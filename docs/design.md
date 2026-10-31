@@ -68,9 +68,9 @@ Checked 2026-10-31:
   `infomap`, GeoPandas, in a venv). It starts private and goes public at the freeze, since it carries the GBIF name and
   private can become public but not the reverse. Approving this plan authorises creating it. Nothing goes into the backend repo.
 - GBIF Engineering Handbook rules apply: `README.adoc`, an issue for each non-trivial piece of work, Conventional Commits
-  referencing the issue (`feat(cleaning): ... #12`), `feature/...` branches, docs updated with the code. The handbook makes the
-  committer responsible for having read AI-written code and discourages unreviewed AI-written issues, so Markus reviews
-  the tracking issue and each merge to the main branch.
+  referencing the issue (`feat(cleaning): ... #12`), docs updated with the code. Markus decided that all work happens directly
+  on `main`, with no feature branches, because this is a one-person repo. The handbook makes the committer responsible for
+  having read AI-written code and discourages unreviewed AI-written issues, so Markus reviews the tracking issue.
 
 ## What Costello et al. 2017 did with the same problems
 
