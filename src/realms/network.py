@@ -7,9 +7,12 @@ spatial information it carries, following Infomap Bioregions 2 (Edler et al.).
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import compress
 
 import numpy as np
 import polars as pl
+
+from realms.matrix import RANKS, SPECIES, CellTaxa, cell_taxa
 
 
 @dataclass(frozen=True)
@@ -39,48 +42,36 @@ def rank_values(taxa: pl.DataFrame, rank: str) -> pl.DataFrame:
     return taxa.select("species_id", pl.col(f"{rank}_id").alias("value")).filter(pl.col("value").is_not_null())
 
 
-def _rank_links(presence: pl.DataFrame, taxa: pl.DataFrame | None, rank: str, total_cells: int) -> pl.DataFrame:
-    if rank == "species":
-        return presence.select(
-            "cell",
-            (pl.lit("species:") + pl.col("species_id")).alias("taxon"),
-            pl.lit(1.0).alias("weight"),
-        )
-    pairs = presence.join(rank_values(taxa, rank), on="species_id", how="inner").select("cell", "value").unique()
-    weights = pairs.group_by("value").len().with_columns(
-        pl.col("len").map_elements(lambda n: information_weight(n, total_cells), return_dtype=pl.Float64).alias("weight")
-    )
-    return pairs.join(weights, on="value").select(
-        "cell",
-        (pl.lit(f"{rank}:") + pl.col("value")).alias("taxon"),
-        "weight",
+def network_from(ct: CellTaxa) -> Network:
+    """Links for every cell-taxon pair of the matrix, weighted as `information_weight` says for genera and families.
+
+    A genus or family held by every cell has weight 0 and drops out before the nodes are numbered. A cell with no links stays in
+    the network, so a cell with no species is reported rather than lost.
+    """
+    n_cells = len(ct.cells)
+    weight_of_count = np.array([0.0] + [information_weight(k, n_cells) for k in range(1, n_cells + 1)])
+    weight = np.where(ct.rank == SPECIES, 1.0, weight_of_count[ct.x.getnnz(axis=0)])
+    keep = weight > 0
+
+    cell_idx = np.repeat(np.arange(n_cells, dtype=np.int64), np.diff(ct.x.indptr))
+    column = ct.x.indices
+    if not keep.all():
+        linked = keep[column]
+        cell_idx, column = cell_idx[linked], column[linked]
+    node = np.cumsum(keep) - 1
+    return Network(
+        cells=ct.cells,
+        taxa=list(compress(ct.taxa, keep.tolist())),
+        cell_idx=cell_idx,
+        taxon_idx=node[column],
+        weight=weight[column],
     )
 
 
-def build_network(
-    presence: pl.DataFrame,
-    taxa: pl.DataFrame | None = None,
-    ranks: Sequence[str] = ("species", "genus", "family"),
-) -> Network:
+def build_network(presence: pl.DataFrame, taxa: pl.DataFrame | None = None, ranks: Sequence[str] = RANKS) -> Network:
     """Build the network from `cell, species_id` rows.
 
     A null species_id keeps its cell in the network without a link, so a cell with no species is reported rather than lost.
     With `taxa`, only the species it lists become nodes, and one with no genus or family simply gets no node at that rank.
     """
-    cells = sorted(presence["cell"].unique().to_list())
-    occupied = accepted_presence(presence, taxa)
-    use_ranks = [r for r in ranks if r == "species" or taxa is not None]
-
-    links = pl.concat([_rank_links(occupied, taxa, rank, len(cells)) for rank in use_ranks]).filter(pl.col("weight") > 0)
-    taxon_names = sorted(links["taxon"].unique().to_list())
-
-    cell_index = {c: i for i, c in enumerate(cells)}
-    taxon_index = {t: i for i, t in enumerate(taxon_names)}
-    links = links.sort("cell", "taxon")
-    return Network(
-        cells=cells,
-        taxa=taxon_names,
-        cell_idx=np.array([cell_index[c] for c in links["cell"]], dtype=np.int64),
-        taxon_idx=np.array([taxon_index[t] for t in links["taxon"]], dtype=np.int64),
-        weight=links["weight"].to_numpy(),
-    )
+    return network_from(cell_taxa(presence, taxa, ranks))

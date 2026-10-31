@@ -1,21 +1,15 @@
 """How much of a realm's biota lives nowhere else."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix
 
+from realms.matrix import Incidence
 from realms.network import accepted_presence, rank_values
 
 Labels = dict[str, int]
-
-
-@dataclass(frozen=True)
-class Incidence:
-    x: csr_matrix  # binary, the cells asked for x all taxa in the table
-    totals: np.ndarray  # occupied cells per taxon across the whole table, including cells not asked for
 
 
 def presence_by_rank(presence: pl.DataFrame, taxa: pl.DataFrame | None) -> dict[str, pl.DataFrame]:

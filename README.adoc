@@ -37,6 +37,13 @@ uv run python scripts/fetch_reference.py # COL, WCVP, GRIIS, gazetteers and coas
 uv run python scripts/check_reference.py # rank coverage, and what WCVP's empty value means
 ----
 
+== Measuring scale
+
+[source,bash]
+----
+uv run python scripts/benchmark.py --species 1000000 # time the cell-taxon matrix on a synthetic grid, about 6 GB at 1M species
+----
+
 == Layout
 
 `src/realms/`:: The analysis package.

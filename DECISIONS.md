@@ -141,3 +141,49 @@ Markus's call, replacing the kingdom-qualified names above. All figures are for 
   could be any of several taxa and a misapplied one was used for another taxon, so the species GBIF gives them is a guess.
 - **To check on the pilot:** the sample reads the API's COL classification, not the SQL columns. Every `specieskey` must be in the accepted table,
   and `n_synonym` should be near 3.1% of records. Zero would mean the SQL `taxonomicstatus` isn't COL's.
+
+### Scale (2026-10-31)
+
+Speed-ups must not change a result, and each one is measured on the same synthetic grid: 8,100 cells, 1M species, 31.6M presences, 89M
+links with genus and family. All figures are from this Mac (48 GB, 14 cores). The grid is `synth.grid_presence`, which draws in the order
+of the scratch generator the baseline was measured with: the same 31,608,488 presences, and 89,059,784 links on 1,210,000 taxa.
+
+Baseline, the string-keyed code before any speed-up:
+
+| Stage | Time | Note |
+|---|---|---|
+| `build_network` | 37 s | peak RSS 5.0 -> 12.7 GB |
+| `rank_presence` | 5 s | |
+| `incidence`, one call | 22 s | peak 15.5 GB |
+| `add_link` loop into Infomap | 70 s | one Python call per link |
+| Infomap, 1 trial | 23 s | the synthetic network has no modules; real data will be slower |
+| `resolve_pieces` (529 units) | 24 s | nearly all of it the `incidence` call |
+| `_Merger` init / per merge | 26 s / 0.05 s | init is the `incidence` call |
+| one null map (`_one_partition`) | 0.09 s | |
+| `realm_share`, one call at 89M nonzeros | 0.29 s (5 realms) to 1.24 s (60) | scoring one null map at one rank |
+
+One selection run (56 candidate maps, 99 null maps each, 3 ranks, 20 bootstraps) then costs about 1 h of `endemism_excess` rebuilding
+incidence, 2 h of scoring null maps, and 1 h of bootstraps rebuilding network and tables from strings. Peak memory near 17 GB came from
+string-keyed Polars frames and grows with the links, so resolution 7 (about 4x these links) would not fit in 48 GB.
+
+**`CellTaxa`, one integer-coded matrix built once** (`scripts/benchmark.py --species 1000000`). Peak RSS is the whole process so far,
+generator included.
+
+| Stage | Time | Target | Peak RSS | Target |
+|---|---|---|---|---|
+| `grid_presence` | 10.8 s | | 2.1 GB | |
+| `cell_taxa` | 3.4 s | 40 s | 3.6 GB | 8 GB |
+| `network_from` | 0.6 s | 10 s | 5.8 GB | |
+| `rows`, all 8,100 cells | 0.2 s | 2 s | 5.8 GB | |
+| `resample`, one draw | 2.2 s | 15 s | 6.3 GB | |
+
+Building the network took 37 s and now takes 4.0 s (`cell_taxa` and `network_from`), and what `incidence` took 22 s for, `rows` does in
+0.2 s. The results are the same: `network_from` equals the old `build_network` bit for bit on planted, hand-made and grid cases, and
+`scripts/costello_selection.py` still gives a byte-identical `selection.csv` and a `selection.log` that differs only in its stamps.
+
+- Genus and family weights come from a table of `information_weight(k, n_cells)` for `k = 1..n_cells`, so they are the same floats as
+  before and a column held by every cell still drops out of the network. `rows` and endemism keep such a column, as before.
+- **`resample` drops a cell that no drawn species occupies,** as the old `_resample` did when the cell's rows fell out of the joined
+  presence table. This matters beyond tidiness, because the weights count cells: keeping the empty cell would change them. On a
+  400-cell grid with 300 species a draw lost 7 cells. The old function drew among every species in the presence table, the new one among
+  the accepted species that have a column, which is the same set when `taxa` lists every species present, as it does for Costello.
