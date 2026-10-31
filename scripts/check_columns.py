@@ -23,16 +23,13 @@ from pathlib import Path
 
 import polars as pl
 
-from realms.grid import Grid, load_grid
+from realms.grid import ZERO_KM2, Grid, load_grid
 from realms.reference import load_taxa
 
 COLUMNS = {"specieskey": pl.String, "taxonomicstatus": pl.String, "cell6": pl.String, "cell7": pl.String, "part": pl.String, "n": pl.Int64}
 PARTS = ("sea", "land")
 RESOLUTIONS = (6, 7)
 STATUS_TOLERANCE = 0.01  # of the API's count
-# A part with no area still gets float noise: a cell wholly on land at resolution 6 has a sea_km2 of 3e-8. The smallest real parts on the
-# grids are 0.006 km2 of land and 0.26 km2 of sea, so anything below 1000 m2 is none.
-ZERO_KM2 = 1e-3
 EXAMPLES = 10
 
 

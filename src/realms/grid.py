@@ -21,6 +21,9 @@ from shapely import Polygon, STRtree
 
 GEOD = pyproj.Geod(ellps="WGS84")
 KINDS = ("land", "sea")
+# A part with no area still gets float noise: a cell wholly on land at resolution 6 has a sea_km2 of 3e-8. The smallest real parts on the
+# grids are 0.006 km2 of land and 0.26 km2 of sea, so anything below 1000 m2 is none.
+ZERO_KM2 = 1e-3
 # Degrees, about 10 cm. Cells disagree by up to 1.4e-8 where they should share a vertex, and no two vertices lie between that and 1 apart.
 SNAP = 1e-6
 SHARED = 1e-4  # degrees of boundary two cells must share to be neighbours, not just touch at a corner

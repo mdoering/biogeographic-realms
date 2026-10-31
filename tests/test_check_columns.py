@@ -6,7 +6,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from realms.grid import Grid
+from realms.grid import ZERO_KM2, Grid
 
 SCRIPT = Path(__file__).parent.parent / "scripts" / "check_columns.py"
 spec = importlib.util.spec_from_file_location("check_columns", SCRIPT)
@@ -225,6 +225,10 @@ def test_a_record_without_a_cell_fails():
 
 
 # check 4: parts of zero area
+
+
+def test_zero_area_is_the_threshold_of_the_grid():
+    assert check_columns.ZERO_KM2 is ZERO_KM2
 
 
 def test_records_on_parts_of_zero_area():
