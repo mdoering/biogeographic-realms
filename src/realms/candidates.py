@@ -1,6 +1,7 @@
 """From clustering modules to one nested map per realm count."""
 
 from dataclasses import dataclass
+from heapq import heapify, heappop, heappush
 
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
@@ -143,15 +144,11 @@ class _Merger:
         self.shared[drop, :] = 0.0
         self.shared[:, drop] = 0.0
 
-    def closest_pair(self, among: np.ndarray | None = None) -> tuple[int, int]:
-        """The lowest beta-sim pair of active units, ties going to the lowest labels. `among` limits the first of the pair."""
+    def closest_pair(self) -> tuple[int, int]:
+        """The lowest beta-sim pair of active units, ties going to the lowest labels."""
         beta = self.beta_sim()
         allowed = np.outer(self.active, self.active)
-        if among is None:
-            allowed &= np.triu(np.ones_like(allowed), k=1)
-        else:
-            allowed &= np.outer(among, np.ones(len(among), dtype=bool))
-            np.fill_diagonal(allowed, False)
+        allowed &= np.triu(np.ones_like(allowed), k=1)
         i, j = np.unravel_index(np.argmin(np.where(allowed, beta, np.inf)), beta.shape)
         return int(i), int(j)
 
@@ -175,41 +172,97 @@ def merge_sequence(labels: Labels, ct: CellTaxa, k_max: int = 60, k_min: int = 5
     return maps
 
 
+class _TaxaIndex:
+    """Which unit holds each taxon, for units that merge into one another one at a time.
+
+    The overlap of one unit with every other is then one gather over the taxa of that unit, where a units x units array would
+    have to be updated for every merge. The index is the transpose of the units x taxa matrix, with the unit of each entry
+    changed as units merge. When two units hold a taxon and merge, one of the two entries is dropped, so a taxon has one entry per
+    unit that holds it and the entries count shared taxa.
+    """
+
+    def __init__(self, x: csr_matrix):
+        """`x` is units x taxa, binary."""
+        by_taxon = x.T.tocsr()
+        self.n_units = x.shape[0]
+        self.indptr = by_taxon.indptr.astype(np.int64)  # where each taxon's entries start
+        self.holder = by_taxon.indices.astype(np.int32)  # the unit of each entry, or `n_units` for one that was dropped
+        self.taxa = [[x.indices[x.indptr[i] : x.indptr[i + 1]]] for i in range(self.n_units)]  # per unit, in pieces that merging adds
+        self.richness = np.diff(x.indptr).astype(np.float64)
+        self.active = np.ones(self.n_units, dtype=bool)
+
+    def absorb(self, unit: int) -> int:
+        """Merge `unit` into the active unit with the lowest beta-sim to it, and return that unit's position.
+
+        Beta-sim is `1 - shared / min(richness)` in float64, and 1.0 where the poorer unit has no taxa. Ties go to the lowest position.
+        """
+        self.active[unit] = False  # so that neither it nor a unit merged before can be the partner
+        taxa = self.taxa[unit][0] if len(self.taxa[unit]) == 1 else np.concatenate(self.taxa[unit])
+        starts = self.indptr[taxa]
+        lengths = self.indptr[taxa + 1] - starts
+        ends = np.cumsum(lengths)
+        entries = np.repeat(starts - (ends - lengths), lengths)  # every entry of every taxon of the unit, as positions in `holder`
+        entries += np.arange(len(entries))
+        holders = self.holder[entries]
+        shared = np.bincount(holders, minlength=self.n_units + 1)[: self.n_units].astype(np.float64)
+        poorer = np.minimum(self.richness[unit], self.richness)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            beta = np.where(poorer > 0, 1.0 - shared / poorer, 1.0)
+        partner = int(np.argmin(np.where(self.active, beta, np.inf)))
+
+        # the unit's entry for each of its taxa moves to the partner, or is dropped where the partner holds the taxon already
+        own = entries[holders == unit]  # one for each taxon, in the order of `taxa`
+        both = np.zeros(len(taxa), dtype=bool)
+        both[np.searchsorted(ends, np.flatnonzero(holders == partner), side="right")] = True
+        self.holder[own[both]] = self.n_units
+        self.holder[own[~both]] = partner
+        self.taxa[partner].append(taxa[~both])
+        self.taxa[unit] = []
+        self.richness[partner] += len(taxa) - int(both.sum())
+        self.richness[unit] = 0.0
+        return partner
+
+
 def apply_size_floor(
     labels: Labels, areas: dict[str, float], ct: CellTaxa, floor_km2: float = 1_000_000
 ) -> tuple[Labels, dict[int, int]]:
     """Merge units under the floor into the realm they share the most taxa with, smallest first.
 
-    Returns the new labels and `{sub_realm: parent}`, where the parent is the realm the unit ended up in.
+    Returns the new labels and `{sub_realm: parent}`, where the parent is the realm the unit ended up in. The smallest area goes
+    first and a tie in area goes to the lowest label, and the realm to merge into is the one with the lowest beta-sim, a tie going to
+    the lowest label. It stops when no unit is under the floor or one unit is left.
     """
-    merger = _Merger(labels, ct)
-    current = dict(labels)
-    area = {u: 0.0 for u in merger.units}
+    units, x = _unit_matrix(labels, ct)
+    index = _TaxaIndex(x)
+    area = {u: 0.0 for u in units}
     for cell, unit in labels.items():
         area[unit] += areas[cell]
-    position = {u: i for i, u in enumerate(merger.units)}
+    position = {u: i for i, u in enumerate(units)}
+    small = [(a, u) for u, a in area.items() if a < floor_km2]  # a unit is listed again when it grows, and the old entry is stale
+    heapify(small)
     absorbed_by: dict[int, int] = {}
 
-    while True:
-        small = [u for u in merger.units if merger.active[position[u]] and area[u] < floor_km2]
-        if not small or int(merger.active.sum()) == 1:
-            break
-        unit = min(small, key=lambda u: (area[u], u))
-        only_this = np.zeros(len(merger.units), dtype=bool)
-        only_this[position[unit]] = True
-        _, other = merger.closest_pair(among=only_this)
-        target = merger.units[other]
-        current = {c: (target if r == unit else r) for c, r in current.items()}
-        merger.merge(other, position[unit])
+    while len(units) - len(absorbed_by) > 1 and small:
+        size, unit = heappop(small)
+        if unit in absorbed_by or area[unit] != size:
+            continue
+        target = units[index.absorb(position[unit])]
         area[target] += area.pop(unit)
         absorbed_by[unit] = target
+        if area[target] < floor_km2:
+            heappush(small, (area[target], target))
 
     def final(unit: int) -> int:
+        chain = []
         while unit in absorbed_by:
+            chain.append(unit)
             unit = absorbed_by[unit]
+        for passed in chain:
+            absorbed_by[passed] = unit
         return unit
 
-    return current, {unit: final(unit) for unit in absorbed_by}
+    parents = {unit: final(unit) for unit in list(absorbed_by)}
+    return {c: parents.get(r, r) for c, r in labels.items()}, parents
 
 
 def candidate_maps(

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import reference_impl as ref
-from helpers import grid, matrix
+from helpers import grid, matrix, presence as presence_table
 from realms.candidates import DegenerateClustering, apply_size_floor, candidate_maps, connected_pieces, merge_sequence, resolve_pieces
 from realms.cluster import Partition
 from realms.matrix import RANKS, cell_taxa
@@ -214,6 +214,58 @@ def test_size_floor_matches_reference(seed):
     new = apply_size_floor(labels, areas, cell_taxa(presence, taxa))
     assert len(new[1]) > 5  # many units are absorbed, so the merges are exercised
     assert new == old
+
+
+def tied_case(seed):
+    """Units of one cell each that hold one of three taxon sets and have one of three areas, so most choices are ties.
+
+    The labels are shuffled against the cells, so that the lowest label is not the lowest cell. Two units with equal areas and a
+    partner with equal beta-sim can only be told apart by the rule for ties.
+    """
+    rng = np.random.default_rng(seed)
+    kinds = [[f"k{kind}-{i}" for i in range(3 + kind)] + ["common"] for kind in range(3)]
+    n = 14 + seed
+    rows = [(f"c{u:02d}", species) for u in range(n) for species in kinds[int(rng.integers(3))]]
+    labels = {f"c{u:02d}": 10 * int(label) for u, label in enumerate(rng.permutation(n))}
+    areas = {c: float(rng.choice([2e5, 3e5, 4e5])) for c in labels}
+    return rows, labels, areas
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_size_floor_matches_reference_with_ties(seed):
+    rows, labels, areas = tied_case(seed)
+    old = ref.apply_size_floor(labels, areas, ref.rank_presence(presence_table(rows), None, RANKS))
+    new = apply_size_floor(labels, areas, matrix(rows))
+    assert len(new[1]) > 5  # many units are absorbed, so the ties are exercised
+    assert new == old
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_size_floor_matches_reference_many_units(seed):
+    presence, taxa, truth = planted_network(n_realms=8, cells_per_realm=50, endemic_species=40, widespread_species=10, seed=seed)
+    rng = np.random.default_rng(seed)
+    cells = sorted(truth)
+    labels = {c: int(u) for c, u in zip(cells, rng.permutation(len(cells)))}  # 400 units, one cell each
+    big = rng.random(len(cells)) < 0.1
+    areas = {c: float(rng.uniform(1e6, 3e6) if b else rng.uniform(1e5, 6e5)) for c, b in zip(cells, big)}
+    old = ref.apply_size_floor(labels, areas, ref.rank_presence(presence, taxa, RANKS))
+    new = apply_size_floor(labels, areas, cell_taxa(presence, taxa))
+    assert len(set(labels.values())) == 400 and 330 < len(new[1]) < 400  # most of the 360 or so small units are absorbed
+    assert new == old
+
+
+def test_size_floor_unit_without_taxa():
+    # e0 and e1 hold no taxon, so every pair with them has beta-sim 1, and so has every pair with s, which shares nothing. Smallest first,
+    # s and then e1 go to e0, the first unit in line. It then holds z, shares nothing with a or b either, and goes to a.
+    rows = [("e0", None), ("e1", None), ("a", "x"), ("a", "y"), ("b", "p"), ("b", "q"), ("s", "z")]
+    labels = {"e0": 0, "a": 1, "b": 2, "e1": 3, "s": 4}
+    areas = {"e0": 4e5, "a": 2e6, "b": 2e6, "e1": 3e5, "s": 1e5}
+    presence = presence_table(rows)
+    old = ref.apply_size_floor(labels, areas, ref.rank_presence(presence, None, RANKS))
+    new = apply_size_floor(labels, areas, cell_taxa(presence, None))
+    assert new == old
+    assert new[0] == {"e0": 1, "a": 1, "b": 2, "e1": 1, "s": 1}  # all the way into a, the first with taxa
+    assert new[1] == {0: 1, 3: 1, 4: 1}
 
 
 def scattered_case(seed):
