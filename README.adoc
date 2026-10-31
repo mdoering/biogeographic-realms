@@ -26,9 +26,19 @@ uv run python scripts/fetch_costello.py
 uv run python scripts/costello_repro.py
 ----
 
+== Preparing the GBIF download
+
+[source,bash]
+----
+uv run python scripts/check_release.py   # which COL release GBIF production uses
+uv run python scripts/test_patterns.py   # sample real records per text term
+uv run python scripts/write_queries.py   # generate and validate queries/, submitting nothing
+----
+
 == Layout
 
 `src/realms/`:: The analysis package.
 `scripts/`:: Runs that produce results.
+`queries/`:: The generated occurrence queries.
 `tests/`:: Unit tests.
 `data/`, `results/`:: Downloads and outputs. Neither is committed.

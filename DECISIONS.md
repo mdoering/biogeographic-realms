@@ -38,3 +38,29 @@ Every change to a method or threshold, dated, with its reason. The design is in 
   large modules. Runtime and memory aren't a concern at this size, with 110 s and 7.5 GB including 20 bootstraps.
 - The area-weighted endemism score of a map dominated by one huge realm is high by construction (0.678 here), since nearly every
   species occurs in it and most occur nowhere else. Only the excess over the null, which has the same areas, is meaningful.
+- Costello's own 30 realms, assigned from their published polygons by cell centre (1,584 of 1,759 cells), give a strict mean endemism
+  of 23% on their own matrix (range 5% to 54%), against the published 42% (17% to 84%). Their figure may come from cell groups before
+  the boundaries were smoothed by hand, but that's unverified. So 42% can't serve as a reference value without its method.
+
+### Text patterns
+
+Terms were judged by reading samples of real records from GBIF's free text search (`scripts/test_patterns.py`), dropping or narrowing
+any where over a third of the sample wasn't a garden, zoo or held organism.
+
+- **Limited by kingdom.** Garden terms and `cultivated`-type terms count for plants only: animals in a botanic garden were overwhelmingly
+  wild ("Santa Cruz Botanic Garden", "Jardin botanique de Montréal"), and "On cultivated Quercus" describes a wild insect on a host plant.
+  Zoo terms count for animals only: plants at a zoo were mostly wild ("Boulevard du Jardin Zoologique", "along zoo fence").
+- **Dropped.** `aquarium` ("East London, Aquarium Rocks" is a place, and the rest were rescued wild animals), `garden` ("Garden compost",
+  "Rich garden soil"), `hortus` (`botanic` already catches "Hortus Botanicus", and the rest were places).
+- **Negations excluded.** "nicht kultiviert", "no cultivada", "not a zoo animal", and "cultivated land" or "champ cultivé", which describe a
+  weed's habitat.
+- **Captivity in free text needs a statement of fact.** Remarks discuss it without meaning it ("do not mark this observation as captive",
+  "not in captivity!"), so `captive` and `in captivity` only count in `locality` and `habitat`, and remarks need "captive born" or similar.
+- `greenhouse`, `glasshouse` and `gewächshaus` count for everything, since an organism under glass says nothing about a native range.
+- Accepted imprecision: hits remain imperfect ("Arboretum de Sibang" is natural forest, "Bairro Jardim Botânico" a neighbourhood). A
+  species only loses its presence in a cell if every record of it there is hit, so a false hit costs little.
+
+### COL release
+
+- 2026-10-31: GBIF production is on 315557 (COL26.6 XR), per metadata and a probe: 19 sampled ids absent from it, GBIF knows none of them
+  (`scripts/check_release.py`). Some of those names match a different id in 315557, so ids can't be joined across releases.
