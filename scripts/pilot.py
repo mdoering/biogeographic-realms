@@ -13,12 +13,14 @@ and the parents of the bootstrap's and `excess_table`'s workers each run in a ch
 stage is then run again without them, only to time it and weigh its workers. `--project-only` projects again from a saved `measure.json`.
 
 `project` carries the measures over to resolution 7 with the conservative growth factor of 2.5 from resolution 6 to 7, and with the 1.38
-measured on Denmark, which is a lower bound because Denmark spans only 8 cells.
+measured on Denmark, which is a lower bound because Denmark spans only 8 cells. A bootstrap's workers time their own `candidate_maps`, so
+that it and the rest of the worker, which have different models, are scaled apart.
 
 The counts are a download, so run it as `uv run python -I scripts/pilot.py --counts data/gbif/<key> --workers N`.
 """
 
 import argparse
+import importlib
 import json
 import math
 import multiprocessing
@@ -66,6 +68,7 @@ GROWTHS = {"2.5": 2.5, "1.38": 1.38}  # links, resolution 6 to 7: the conservati
 CELLS_RATIO = 21_872 / 7_292  # ISEA3H cells at resolution 7 over resolution 6, `scripts/check_grid.py`
 BUDGET_GB, FREE_GB, HOURS = 40, 10, 24  # the most that one process or all the workers may hold, the disk to leave, the time limit
 BOOTSTRAPS = 20  # of a selection run, as `bootstrap_stability` has it by default
+EXCESS_STAGES = ("excess_table", "excess_table_without_zero_area_parts")  # the second only stands in for the first, to time it and weigh its workers
 CORES = os.cpu_count() or 1
 
 
@@ -167,9 +170,10 @@ def _candidates(partition: Partition, ct, areas: dict[str, float], adjacency: di
 
 
 def _bootstrap(ct, maps: dict, areas: dict, adjacency: dict, markov_time: float) -> dict:
-    """In a child, which is clean: `bootstrap_stability` in `BOOT_PROBE` workers, with the peak and time of each, and this process's peak."""
+    """In a child, which is clean: `bootstrap_stability` in `BOOT_PROBE` workers, with the peak and time of each and how much of that
+    time was `candidate_maps`, and this process's peak."""
     started = time.perf_counter()
-    with worker_peaks(select) as seen:
+    with worker_peaks(select, timed="candidate_maps") as seen:
         scores = bootstrap_stability(
             ct, maps, areas, adjacency, n_boot=BOOT_PROBE, seed=SEED, trials=BOOT_TRIALS, floor_km2=FLOOR_KM2, k_max=K_MAX,
             markov_time=markov_time, workers=BOOT_PROBE,
@@ -235,20 +239,45 @@ def structure(partition: Partition, part_info: pl.DataFrame) -> dict:
     }
 
 
-def _with_peak(function: Callable, shared, task):
-    """In a worker: the result of one task, with the seconds it took and the peak of this worker so far."""
+def _with_peak(function: Callable, timed: tuple[str, str] | None, shared, task):
+    """In a worker: the result of one task, with the seconds it took, the peak of this worker so far, and the seconds of `timed`.
+
+    `timed` is a module and the name of a function in it that the task calls, which is timed by replacing it in this worker for the
+    task. Its seconds are `<name>_seconds` in what comes back.
+    """
+    spent = [0.0]
     started = time.perf_counter()
-    result = function(shared, task)
-    return result, {"seconds": round(time.perf_counter() - started, 1), "peak_gb": round(peak_gb(), 2), "pid": os.getpid()}
+    with ExitStack() as stack:
+        if timed:
+            module = importlib.import_module(timed[0])
+            real = getattr(module, timed[1])
+
+            def counted(*args, **kwargs):
+                begun = time.perf_counter()
+                try:
+                    return real(*args, **kwargs)
+                finally:
+                    spent[0] += time.perf_counter() - begun
+
+            stack.enter_context(mock.patch.object(module, timed[1], counted))
+        result = function(shared, task)
+    info = {"seconds": round(time.perf_counter() - started, 1), "peak_gb": round(peak_gb(), 2), "pid": os.getpid()}
+    if timed:
+        info[f"{timed[1]}_seconds"] = round(spent[0], 2)
+    return result, info
 
 
 @contextmanager
-def worker_peaks(module):
-    """Replaces `module.map_tasks` with one that also collects, per task, what `_with_peak` measured. Yields that list."""
+def worker_peaks(module, timed: str | None = None):
+    """Replaces `module.map_tasks` with one that also collects, per task, what `_with_peak` measured. Yields that list.
+
+    `timed` names a function of `module` that the tasks call, whose seconds in each worker are collected too.
+    """
     seen: list[dict] = []
+    watch = (module.__name__, timed) if timed else None
 
     def traced(function, tasks, shared, workers=1):
-        out = parallel.map_tasks(partial(_with_peak, function), tasks, shared, workers)
+        out = parallel.map_tasks(partial(_with_peak, function, watch), tasks, shared, workers)
         seen.extend(info for _, info in out)
         return [result for result, _ in out]
 
@@ -265,18 +294,22 @@ def project(data: dict, growth: float) -> dict:
 
     - Infomap and the resampling are proportional to links, and so is their memory, with no fixed share. A 10-trial Infomap costs
       as much as 10 times the 1-trial run, or the 10-trial run measured if that is more.
-    - `candidate_maps` merges once per unit, and units follow cells, so there are `c` times the merges. A merge goes over a dense
-      units x units array (`c` squared) and over the links (`f`), and is as slow as the slower. Those dense arrays need `c` squared
-      the memory too, where the rest needs `f`.
-    - A bootstrap is a 3-trial Infomap, the resample and the network, which grow with `f`, and a `candidate_maps`, which grows as above.
+    - `candidate_maps` merges once per unit, and units follow cells, so there are `c` times the merges. A merge goes over the taxa of
+      one unit and over the units that hold them, which is the links (`f`), and over a vector with a slot for every unit (`c`), so it
+      is as slow as the slower of the two, and the time is `c` times `f` or `c` times `c`, whichever is more. There is no array of
+      units squared, so the memory follows the links (`f`).
+    - A bootstrap is a 3-trial Infomap, the resample and the network, which grow with `f`, and a `candidate_maps`, which grows as
+      above. Each worker times its own `candidate_maps`, so that it is scaled on its own and the rest of the worker's time is not. The
+      slowest worker's of each is taken.
     - `excess_table` is a Python loop over cells and a product over links, so it grows as the larger of the two, and as the number of
-      maps, of which a larger grid can have all `K_MAX - K_MIN + 1`.
-    - Workers: as many as fit in `BUDGET_GB` next to the parent, and at most one fewer than the cores.
+      maps, of which a larger grid can have all `K_MAX - K_MIN + 1`. If it was measured neither with nor without the zero-area parts it
+      is left out, listed under `unmeasured`, and the answer is then not a go.
+    - Workers: as many as fit in `BUDGET_GB`, 40 GB for all of them together next to the parent, and at most one fewer than the cores.
     """
     stages, infomap = data["stages"], data["infomap"]
     f, c = HEADLINE * growth, CELLS_RATIO
     chosen = data["chosen_markov_time"]
-    merge_scale, dense_scale = c * max(c**2, f), max(c**2, f)
+    merge_scale = c * max(c, f)
 
     # (a) the headline Infomap run, the worst of the Infomap runs measured, alone and next to the matrix
     measured_ten = stages["infomap_10_trials"]
@@ -289,27 +322,32 @@ def project(data: dict, growth: float) -> dict:
     ten_trials = f * max(HEADLINE_TRIALS * trial, measured_ten["child_seconds"])
     cand = stages[f"candidate_maps_{chosen}"]
     candidate = cand["child_seconds"] * merge_scale
-    candidate_peak = cand["child_peak_rss_gb"] * dense_scale
+    candidate_peak = cand["child_peak_rss_gb"] * f
 
     boot_workers = stages["bootstrap"]["workers"]
-    boot = max(worker["seconds"] for worker in boot_workers)
-    linear = f * max(boot - cand["child_seconds"], 0.0)  # what a bootstrap does besides its candidate maps
-    per_boot = linear + candidate
+    boot_candidates = max(worker["candidate_maps_seconds"] for worker in boot_workers)
+    linear = f * max(worker["seconds"] - worker["candidate_maps_seconds"] for worker in boot_workers)  # a bootstrap besides its candidate maps
+    per_boot = linear + boot_candidates * merge_scale
     parent = f * stages["bootstrap"]["child_peak_rss_gb"]  # the process that runs the workers, which holds the matrix and the maps
     worker = max(f * max(w["peak_gb"] for w in boot_workers), candidate_peak)
     boot_room = (BUDGET_GB - parent) / worker  # workers that fit next to the parent
     boot_fit = max(1, min(CORES - 1, math.floor(boot_room)))
     waves = math.ceil(BOOTSTRAPS / boot_fit)
 
-    which = "excess_table" if "workers" in stages["excess_table"] else "excess_table_without_zero_area_parts"
-    excess = stages[which]
-    excess_room = (BUDGET_GB - f * excess["child_peak_rss_gb"]) / (f * max(w["peak_gb"] for w in excess["workers"]))
-    excess_fit = max(1, min(CORES - 1, math.floor(excess_room)))
-    more_maps = (K_MAX - K_MIN + 1) / excess["maps"]
-    excess_time = excess["tasks_seconds_sum"] * max(f, c) * more_maps / excess_fit  # the work of every map, over as many workers as fit
+    which = next((name for name in EXCESS_STAGES if "workers" in stages.get(name, {})), None)
+    if which:
+        excess = stages[which]
+        excess_peak = f * max(w["peak_gb"] for w in excess["workers"])
+        excess_room = (BUDGET_GB - f * excess["child_peak_rss_gb"]) / excess_peak
+        excess_fit = max(1, min(CORES - 1, math.floor(excess_room)))
+        more_maps = (K_MAX - K_MIN + 1) / excess["maps"]
+        excess_time = excess["tasks_seconds_sum"] * max(f, c) * more_maps / excess_fit  # the work of every map, over as many workers as fit
+    else:
+        excess_room = excess_fit = excess_peak = excess_time = None
+    unmeasured = [] if which else ["excess_table"]
 
-    total = ten_trials + candidate + waves * per_boot + excess_time
-    without_candidates = ten_trials + waves * linear + excess_time
+    total = ten_trials + candidate + waves * per_boot + (excess_time or 0.0)
+    without_candidates = ten_trials + waves * linear + (excess_time or 0.0)
 
     # (c) the zip and Parquet of the download, which grow with its rows, and so with the pairs
     disk = data["disk"]
@@ -317,23 +355,28 @@ def project(data: dict, growth: float) -> dict:
     left = disk["free_gb"] - needed
 
     a = alone <= BUDGET_GB and inside <= BUDGET_GB
-    b = total / 3600 <= HOURS and boot_room >= 1 and excess_room >= 1  # not even one worker is a failure, whatever the time
+    b = total / 3600 <= HOURS and boot_room >= 1 and (excess_room is None or excess_room >= 1)  # not even one worker is a failure
     cc = left >= FREE_GB
+
+    def hours(seconds: float | None) -> float | None:
+        return None if seconds is None else round(seconds / 3600, 2)
+
     return {
         "growth": growth,
         "link_factor": f,
         "links": round(f * data["links"]),
         "a_infomap_peak_gb": {"alone": round(alone, 1), "with_matrix": round(inside, 1), "limit": BUDGET_GB, "ok": a},
         "b_selection_hours": {
-            "total": round(total / 3600, 2),
-            "infomap_10_trials": round(ten_trials / 3600, 2),
-            "candidate_maps": round(candidate / 3600, 2),
-            "bootstraps": round(waves * per_boot / 3600, 2),
-            "one_bootstrap_hours": round(per_boot / 3600, 2),
+            "total": hours(total),
+            "infomap_10_trials": hours(ten_trials),
+            "candidate_maps": hours(candidate),
+            "bootstraps": hours(waves * per_boot),
+            "one_bootstrap_hours": hours(per_boot),
+            "of_which_candidate_maps": hours(boot_candidates * merge_scale),
             "bootstrap_workers": boot_fit,
-            "excess_table": round(excess_time / 3600, 2),
+            "excess_table": hours(excess_time),
             "excess_workers": excess_fit,
-            "without_candidate_maps": round(without_candidates / 3600, 2),
+            "without_candidate_maps": hours(without_candidates),
             "limit": HOURS,
             "ok": b,
         },
@@ -341,19 +384,24 @@ def project(data: dict, growth: float) -> dict:
             "candidate_maps": round(candidate_peak, 1),
             "bootstrap_worker": round(worker, 1),
             "bootstrap_parent": round(parent, 1),
-            "excess_worker": round(f * max(w["peak_gb"] for w in excess["workers"]), 1),
+            "excess_worker": None if excess_peak is None else round(excess_peak, 1),
             "limit": BUDGET_GB,
         },
         "c_disk_left_gb": {"after_download": round(left, 1), "download_gb": round(needed, 2), "minimum": FREE_GB, "ok": cc},
         "excess_measured_on": which,
-        "go": bool(a and b and cc),
+        "unmeasured": unmeasured,
+        "go": bool(a and b and cc and not unmeasured),
     }
 
 
 def add_projection(data: dict) -> None:
     """The projection for every growth, and the decision on the conservative one, which a measure file can be given again."""
     data["projection"] = {name: project(data, growth) for name, growth in GROWTHS.items()}
-    data["decision"] = "go to resolution 7" if data["projection"]["2.5"]["go"] else "stay at resolution 6"
+    deciding = data["projection"]["2.5"]
+    if deciding["unmeasured"]:
+        data["decision"] = f"undecided: {', '.join(deciding['unmeasured'])} was not measured"
+    else:
+        data["decision"] = "go to resolution 7" if deciding["go"] else "stay at resolution 6"
 
 
 def disk_numbers(counts: Path) -> dict:
@@ -441,33 +489,37 @@ def excess_stage(run: Run, name: str, maps: dict, ct, adjacency: dict, areas: di
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--counts", type=Path, required=True, help="the Parquet parts of an ingested download, data/gbif/<key>")
-    parser.add_argument("--workers", type=int, required=True, help="processes for excess_table")
+    parser.add_argument("--counts", type=Path, help="the Parquet parts of an ingested download, data/gbif/<key>, to measure")
+    parser.add_argument("--workers", type=int, help="processes for excess_table, to measure")
     parser.add_argument("--resolution", type=int, default=6, help="the ISEA3H resolution of the counts, default 6")
     parser.add_argument("--markov-times", type=float, nargs="+", default=MARKOV_TIMES, help="the first with candidate maps is used for the rest, default 1.0 0.75")
     parser.add_argument("--survey", type=float, nargs="*", default=SURVEY, help="more Markov times, for their module counts and candidate maps only")
     parser.add_argument("--reference", type=Path, default=Path("data/reference"), help="default data/reference")
     parser.add_argument("--split", type=Path, default=Path("data/split/halves-315557.parquet"))
     parser.add_argument("--results", type=Path, default=Path("results/pilot"), help="where res<r>/ goes, default results/pilot")
-    parser.add_argument("--project-only", action="store_true", help="measure nothing: project again from the measure.json of an earlier run")
+    parser.add_argument("--project-only", action="store_true", help="measure nothing: project again from the measure.json in --results of an earlier run")
     args = parser.parse_args(argv)
-
-    reference = args.reference
-    gpkg = reference / "grids" / f"ISEA3H-{args.resolution}.gpkg"
-    land = reference / "natural_earth" / "ne_10m_land.zip"
-    release = reference / "exports" / "extended" / "col.zip"
     directory = args.results / f"res{args.resolution}"
-    missing = [str(p) for p in (args.counts, args.split, gpkg, land, release, args.counts.with_suffix(".zip")) if not p.exists()]
-    if missing:
-        raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
 
     if args.project_only:
+        if not (directory / "measure.json").exists():
+            raise SystemExit(f"FAILED {directory / 'measure.json'} is missing")
         measured = json.loads((directory / "measure.json").read_text())
         add_projection(measured)
         (directory / "measure.json").write_text(json.dumps(measured, indent=2) + "\n")
         print(json.dumps(measured["projection"], indent=2))
         print(f"decision at growth 2.5: {measured['decision']}")
         return
+
+    if args.counts is None or args.workers is None:
+        parser.error("--counts and --workers are required, unless --project-only")
+    reference = args.reference
+    gpkg = reference / "grids" / f"ISEA3H-{args.resolution}.gpkg"
+    land = reference / "natural_earth" / "ne_10m_land.zip"
+    release = reference / "exports" / "extended" / "col.zip"
+    missing = [str(p) for p in (args.counts, args.split, gpkg, land, release, args.counts.with_suffix(".zip")) if not p.exists()]
+    if missing:
+        raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
 
     run = Run(directory)
     run.data.update(
@@ -589,7 +641,8 @@ def measure(run: Run, args: argparse.Namespace, directory: Path, gpkg: Path, lan
         kept = {part for part, area in areas.items() if area >= ZERO_KM2}
         reduced = {k: {part: realm for part, realm in labels.items() if part in kept} for k, labels in maps.items()}
         near = {part: adjacency[part] & kept for part in kept}
-        excess_stage(run, "excess_table_without_zero_area_parts", reduced, ct, near, {part: areas[part] for part in kept}, args.workers)
+        if not excess_stage(run, "excess_table_without_zero_area_parts", reduced, ct, near, {part: areas[part] for part in kept}, args.workers):
+            run.say("excess_table is not measured at all, so the projection leaves it out and is not a decision")
 
     run.data["disk"] = disk_numbers(args.counts)
     add_projection(run.data)
