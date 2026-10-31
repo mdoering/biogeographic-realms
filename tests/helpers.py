@@ -1,8 +1,15 @@
 import polars as pl
 
+from realms.matrix import CellTaxa, cell_taxa
+
 
 def presence(rows):
     return pl.DataFrame(rows, schema={"cell": pl.String, "species_id": pl.String}, orient="row")
+
+
+def matrix(rows) -> CellTaxa:
+    """The cell-taxon matrix of `cell, species_id` rows, species only."""
+    return cell_taxa(presence(rows), None)
 
 
 def grid(width, height):

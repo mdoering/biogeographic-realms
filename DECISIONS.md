@@ -187,3 +187,6 @@ Building the network took 37 s and now takes 4.0 s (`cell_taxa` and `network_fro
   presence table. This matters beyond tidiness, because the weights count cells: keeping the empty cell would change them. On a
   400-cell grid with 300 species a draw lost 7 cells. The old function drew among every species in the presence table, the new one among
   the accepted species that have a column, which is the same set when `taxa` lists every species present, as it does for Costello.
+- **`bootstrap_stability` takes its ranks from the matrix and needs the species rank.** The `ranks` argument is gone, so the network, the
+  pieces and the merges of a bootstrap always use the ranks of the matrix that made the maps. It resamples species, so a matrix without them
+  is refused, where `ranks=("genus",)` used to resample species and cluster on genera alone. Nothing in the pipeline runs that way.

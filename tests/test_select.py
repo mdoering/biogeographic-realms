@@ -1,8 +1,13 @@
+import numpy as np
 import polars as pl
+import pytest
 
+import reference_impl as ref
 from realms.cluster import run_infomap
-from realms.candidates import candidate_maps
-from realms.network import build_network
+from realms.candidates import DegenerateClustering, candidate_maps
+from realms.matrix import cell_taxa
+from realms.network import network_from
+from realms.score import v_measure
 from realms.select import bootstrap_stability, select_level
 from realms.synth import planted_network
 
@@ -42,15 +47,14 @@ def test_stability_high_on_planted_realms():
     presence, taxa, truth = planted_network(n_realms=6, cells_per_realm=10, endemic_species=30, widespread_species=5)
     areas = {c: 1e6 for c in truth}
     adjacency = {c: set() for c in truth}
-    result = candidate_maps(run_infomap(build_network(presence)), presence, areas, adjacency)
-    stability = bootstrap_stability(presence, None, result.maps, areas, adjacency, n_boot=3)
+    ct = cell_taxa(presence, None)
+    result = candidate_maps(run_infomap(network_from(ct)), ct, areas, adjacency)
+    stability = bootstrap_stability(ct, result.maps, areas, adjacency, n_boot=3)
     assert stability[6] >= 0.8
 
 
 def test_stability_low_on_noise():
     # species scattered at random have no realms, so the maps shouldn't reproduce
-    import numpy as np
-
     rng = np.random.default_rng(1)
     cells = [f"c{i}" for i in range(40)]
     rows = [(str(c), f"s{s}") for s in range(300) for c in rng.choice(cells, size=3, replace=False)]
@@ -58,7 +62,7 @@ def test_stability_low_on_noise():
     areas = {c: 1e6 for c in cells}
     adjacency = {c: set() for c in cells}
     maps = {5: {c: i % 5 for i, c in enumerate(cells)}}
-    assert bootstrap_stability(presence, None, maps, areas, adjacency, n_boot=3)[5] < 0.5
+    assert bootstrap_stability(cell_taxa(presence, None), maps, areas, adjacency, n_boot=3)[5] < 0.5
 
 
 def family_only_world():
@@ -82,8 +86,8 @@ def test_stability_reruns_the_callers_ranks():
     presence, taxa, truth = family_only_world()
     areas = {c: 1e6 for c in truth}
     adjacency = {c: set() for c in truth}
-    with_family = bootstrap_stability(presence, taxa, {2: truth}, areas, adjacency, n_boot=3, ranks=("species", "family"))
-    species_only = bootstrap_stability(presence, taxa, {2: truth}, areas, adjacency, n_boot=3, ranks=("species",))
+    with_family = bootstrap_stability(cell_taxa(presence, taxa, ("species", "family")), {2: truth}, areas, adjacency, n_boot=3)
+    species_only = bootstrap_stability(cell_taxa(presence, taxa, ("species",)), {2: truth}, areas, adjacency, n_boot=3)
     assert with_family[2] > 0.8 > species_only[2]
 
 
@@ -92,6 +96,50 @@ def test_stability_reruns_the_callers_size_floor():
     presence, taxa, truth = planted_network(n_realms=2, cells_per_realm=6, endemic_species=20, widespread_species=0)
     areas = {c: 1e6 for c in truth}
     adjacency = {c: set() for c in truth}
-    kept = bootstrap_stability(presence, None, {2: truth}, areas, adjacency, n_boot=2, ranks=("species",))
-    collapsed = bootstrap_stability(presence, None, {2: truth}, areas, adjacency, n_boot=2, ranks=("species",), floor_km2=1e9)
+    ct = cell_taxa(presence, None)
+    kept = bootstrap_stability(ct, {2: truth}, areas, adjacency, n_boot=2)
+    collapsed = bootstrap_stability(ct, {2: truth}, areas, adjacency, n_boot=2, floor_km2=1e9)
     assert kept[2] > 0.8 and collapsed[2] == 0.0
+
+
+def reference_stability(presence, taxa, maps, areas, adjacency, n_boot, ranks, seed=1, trials=3, floor_km2=1_000_000, k_max=60):
+    """`bootstrap_stability` as it was: resample the string tables, rebuild the network and the rank table from them."""
+    rng = np.random.default_rng(seed)
+    scores = {k: [] for k in maps}
+    for b in range(n_boot):
+        new_presence, new_taxa = ref._resample(presence, taxa, rng)
+        partition = ref.run_infomap(ref.build_network(new_presence, new_taxa, ranks=ranks), seed=seed + b, trials=trials)
+        compared = ref.rank_presence(new_presence, new_taxa, ranks)
+        try:
+            units = ref.resolve_pieces(partition.leaf_labels(), adjacency, compared)
+            floored, _ = ref.apply_size_floor(units, areas, compared, floor_km2)
+            if len(set(floored.values())) < 2:
+                raise DegenerateClustering
+            candidates = ref.merge_sequence(floored, compared, k_max, 2)
+        except DegenerateClustering:
+            candidates = {}
+        for k, labels in maps.items():
+            if candidates:
+                scores[k].append(v_measure(labels, candidates[min(candidates, key=lambda available: (abs(available - k), available))]))
+            else:
+                scores[k].append(0.0)
+    return {k: float(np.median(values)) for k, values in scores.items()}
+
+
+@pytest.mark.parametrize("ranks", [("species",), ("species", "genus", "family")])
+def test_bootstrap_stability_matches_reference(ranks):
+    presence, taxa, truth = planted_network(n_realms=6, cells_per_realm=10, endemic_species=30, widespread_species=5)
+    areas = {c: 1e6 for c in truth}
+    adjacency = {c: set() for c in truth}
+    ct = cell_taxa(presence, taxa, ranks)
+    maps = candidate_maps(run_infomap(network_from(ct)), ct, areas, adjacency, k_min=2).maps
+    assert len(maps) > 1
+    old = reference_stability(presence, taxa, maps, areas, adjacency, n_boot=3, ranks=ranks)
+    assert len(set(old.values())) > 1  # the maps are told apart, so the comparison isn't of a constant
+    assert bootstrap_stability(ct, maps, areas, adjacency, n_boot=3) == old
+
+
+def test_stability_needs_species_to_resample():
+    presence, taxa, truth = planted_network(n_realms=2, cells_per_realm=6, endemic_species=20, widespread_species=0)
+    with pytest.raises(ValueError, match="species"):
+        bootstrap_stability(cell_taxa(presence, taxa, ("genus",)), {2: truth}, {c: 1e6 for c in truth}, {c: set() for c in truth}, n_boot=1)

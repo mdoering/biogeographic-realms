@@ -16,10 +16,12 @@ from shapely.geometry import Point
 from realms.candidates import DegenerateClustering, candidate_maps
 from realms.cluster import run_infomap
 from realms.costello import csquare_adjacency, csquare_area_km2, csquare_bounds, load_matrix
-from realms.endemism import endemism_score, presence_by_rank, rank_presence, realm_endemism
+from realms.endemism import endemism_score, realm_endemism
 from realms.fetch import fetch
 from realms.maps import plot_cells
-from realms.network import build_network
+from realms.matrix import RANKS as ALL_RANKS
+from realms.matrix import cell_taxa
+from realms.network import network_from
 from realms.nullmodel import endemism_excess
 from realms.score import v_measure
 from realms.select import bootstrap_stability, select_level
@@ -70,10 +72,12 @@ def main() -> None:
     taxa = matrix.genera()
     areas = {c: csquare_area_km2(c) for c in cells}
     adjacency = csquare_adjacency(cells)
-    ranks = presence_by_rank(presence, taxa)
-    stamp(f"{presence.height} presences, {len(cells)} cells, ranks {list(ranks)}", started)
+    ct = cell_taxa(presence, taxa, RANKS)
+    species_only = ct.select(["species"])
+    held = [rank for i, rank in enumerate(ALL_RANKS) if (ct.rank == i).any()]
+    stamp(f"{presence.height} presences, {len(cells)} cells, ranks {held}", started)
 
-    net = build_network(presence, taxa, ranks=RANKS)
+    net = network_from(ct)
     stamp(f"network: {len(net.taxa)} taxa, {len(net.weight)} links", started)
     partition = run_infomap(net, seed=1, trials=10)
     leaves = partition.leaf_labels()
@@ -85,16 +89,16 @@ def main() -> None:
     plot_cells(list(leaves), list(leaves.values()), csquare_bounds, OUT / "infomap_leaf_modules.png", "Infomap leaf modules, species and genus")
 
     try:
-        result = candidate_maps(partition, rank_presence(presence, taxa, RANKS), areas, adjacency)
+        result = candidate_maps(partition, ct, areas, adjacency)
     except DegenerateClustering as e:
         stamp(f"DEGENERATE: {e}", started)
         return
     maps = result.maps
     stamp(f"candidates: k from {min(maps)} to {max(maps)}, {len(result.sub_realms)} sub-realms: {result.sub_realms}", started)
 
-    stability = bootstrap_stability(presence, taxa, maps, areas, adjacency, n_boot=args.boot, ranks=RANKS)
+    stability = bootstrap_stability(ct, maps, areas, adjacency, n_boot=args.boot)
     stamp("stability done", started)
-    excess = {k: endemism_excess(maps[k], ranks, adjacency, areas, n_null=args.null) for k in sorted(maps)}
+    excess = {k: endemism_excess(maps[k], ct, adjacency, areas, n_null=args.null) for k in sorted(maps)}
     stamp("excess done", started)
 
     table = pl.DataFrame(
@@ -112,17 +116,17 @@ def main() -> None:
     for k in sorted({selection.k, 7, 30} & set(maps)):
         labels = maps[k]
         plot_cells(list(labels), list(labels.values()), csquare_bounds, OUT / f"selection_k{k}.png", f"Infomap and selection rules, k={k}")
-        shares = realm_endemism(labels, presence)
+        shares = realm_endemism(labels, species_only)
         print(
             f"k={k}: V-measure with Costello's 30 = {v_measure(labels, costello):.3f}, "
-            f"species endemism score = {endemism_score(labels, presence, areas):.3f}, "
-            f"strict = {endemism_score(labels, presence, areas, tolerance=1.0):.3f}, "
+            f"species endemism score = {endemism_score(labels, species_only, areas):.3f}, "
+            f"strict = {endemism_score(labels, species_only, areas, tolerance=1.0):.3f}, "
             f"mean realm share = {np.mean(list(shares.values())):.3f}"
         )
-    strict_shares = realm_endemism(costello, presence, tolerance=1.0)
+    strict_shares = realm_endemism(costello, species_only, tolerance=1.0)
     print(
-        f"Costello's 30 on the same cells: species endemism score = {endemism_score(costello, presence, areas):.3f}, "
-        f"strict = {endemism_score(costello, presence, areas, tolerance=1.0):.3f}, "
+        f"Costello's 30 on the same cells: species endemism score = {endemism_score(costello, species_only, areas):.3f}, "
+        f"strict = {endemism_score(costello, species_only, areas, tolerance=1.0):.3f}, "
         f"strict mean realm share = {np.mean(list(strict_shares.values())):.3f} (published mean: 0.42), "
         f"range {min(strict_shares.values()):.2f} to {max(strict_shares.values()):.2f} (published: 0.17 to 0.84)"
     )

@@ -3,11 +3,11 @@
 from dataclasses import dataclass
 
 import numpy as np
-import polars as pl
-from scipy.sparse import csr_matrix, vstack
+from scipy.sparse import coo_matrix, csr_matrix
 
 from realms.cluster import Partition
-from realms.endemism import Labels, incidence
+from realms.endemism import Labels
+from realms.matrix import CellTaxa
 
 
 class DegenerateClustering(Exception):
@@ -43,10 +43,22 @@ def _beta_sim(a: np.ndarray, b: np.ndarray) -> float:
     return 1.0 - int((a & b).sum()) / poorer if poorer else 1.0
 
 
+def _membership(labels: Labels) -> tuple[list[str], list[int], csr_matrix]:
+    """The sorted cells, the sorted units, and which unit each cell belongs to as a cells x units indicator."""
+    cells = sorted(labels)
+    units = sorted(set(labels.values()))
+    position = {u: i for i, u in enumerate(units)}
+    membership = coo_matrix(
+        (np.ones(len(cells), dtype=np.int32), (np.arange(len(cells)), [position[labels[c]] for c in cells])),
+        shape=(len(cells), len(units)),
+    ).tocsr()
+    return cells, units, membership
+
+
 def resolve_pieces(
     labels: Labels,
     adjacency: dict[str, set[str]],
-    presence: pl.DataFrame,
+    ct: CellTaxa,
     min_shared: int = 3,
     tolerance: float = 0.95,
 ) -> Labels:
@@ -57,52 +69,47 @@ def resolve_pieces(
     realm it shares most with, or the most similar realm of all if nothing touches it. The largest piece never moves, and neither
     does a piece that shares nothing with any option, since moving it would be arbitrary.
     """
-    cells = sorted(labels)
+    cells, realms, membership = _membership(labels)
     index = {c: i for i, c in enumerate(cells)}
-    table = incidence(presence, cells)
-    x, totals = table.x.astype(bool), table.totals
+    position = {r: i for i, r in enumerate(realms)}
+    table = ct.rows(cells)
+    x, totals = table.x, table.totals
 
     realm_cells: dict[int, set[str]] = {}
     for cell, realm in labels.items():
         realm_cells.setdefault(realm, set()).add(cell)
-    realm_rows = {r: [index[c] for c in members] for r, members in realm_cells.items()}
+    inside_counts = (membership.T @ x).tocsr()  # the cells of each realm that hold each taxon
+    realm_taxa = inside_counts > 0
 
-    def taxa_of(rows: list[int]) -> np.ndarray:
-        return np.asarray(x[rows].sum(axis=0)).ravel() > 0
+    def taxa_of(realm: int) -> np.ndarray:
+        return realm_taxa[position[realm]].toarray().ravel()
 
     result = dict(labels)
     for realm, members in sorted(realm_cells.items()):
         pieces = connected_pieces(members, adjacency)
         if len(pieces) == 1:
             continue
-        inside = np.asarray(x[realm_rows[realm]].sum(axis=0)).ravel()
+        inside = inside_counts[position[realm]].toarray().ravel()
         endemic = (inside > 0) & (inside / np.maximum(totals, 1) >= tolerance)
         for piece in pieces[1:]:
-            piece_rows = [index[c] for c in piece]
-            rest_rows = [index[c] for c in members - piece]
-            piece_taxa = taxa_of(piece_rows)
-            if int((piece_taxa & taxa_of(rest_rows) & endemic).sum()) >= min_shared:
+            in_piece = np.asarray(x[[index[c] for c in piece]].sum(axis=0)).ravel()
+            piece_taxa = in_piece > 0
+            rest_taxa = inside > in_piece  # held by a cell of the realm outside the piece
+            if int((piece_taxa & rest_taxa & endemic).sum()) >= min_shared:
                 continue
             touching = {labels[n] for c in piece for n in adjacency.get(c, ()) if labels.get(n, realm) != realm}
             options = sorted(touching or (set(realm_cells) - {realm}))
             if options:
-                best = min(options, key=lambda r: (_beta_sim(piece_taxa, taxa_of(realm_rows[r])), r))
-                if _beta_sim(piece_taxa, taxa_of(realm_rows[best])) < 1.0:
+                best = min(options, key=lambda r: (_beta_sim(piece_taxa, taxa_of(r)), r))
+                if _beta_sim(piece_taxa, taxa_of(best)) < 1.0:
                     for cell in piece:
                         result[cell] = best
     return result
 
 
-def _unit_matrix(labels: Labels, presence: pl.DataFrame) -> tuple[list[int], csr_matrix]:
-    cells = sorted(labels)
-    units = sorted(set(labels.values()))
-    position = {u: i for i, u in enumerate(units)}
-    x = incidence(presence, cells).x
-    membership = csr_matrix(
-        (np.ones(len(cells), dtype=np.int32), (np.arange(len(cells)), [position[labels[c]] for c in cells])),
-        shape=(len(cells), len(units)),
-    )
-    grouped = (membership.T @ x).tocsr()
+def _unit_matrix(labels: Labels, ct: CellTaxa) -> tuple[list[int], csr_matrix]:
+    cells, units, membership = _membership(labels)
+    grouped = (membership.T @ ct.rows(cells).x).tocsr()
     grouped.data = np.ones_like(grouped.data)
     return units, grouped
 
@@ -110,10 +117,9 @@ def _unit_matrix(labels: Labels, presence: pl.DataFrame) -> tuple[list[int], csr
 class _Merger:
     """Units that merge one pair at a time, keeping pairwise beta-sim up to date."""
 
-    def __init__(self, labels: Labels, presence: pl.DataFrame):
-        self.units, grouped = _unit_matrix(labels, presence)
-        self.rows = [grouped[i] for i in range(grouped.shape[0])]
-        self.shared = (grouped @ grouped.T).toarray().astype(np.float64)
+    def __init__(self, labels: Labels, ct: CellTaxa):
+        self.units, self.x = _unit_matrix(labels, ct)  # units x taxa, binary, and a merged-away unit is an empty row
+        self.shared = (self.x @ self.x.T).toarray().astype(np.float64)
         self.active = np.ones(len(self.units), dtype=bool)
 
     def beta_sim(self) -> np.ndarray:
@@ -124,12 +130,14 @@ class _Merger:
         return beta
 
     def merge(self, keep: int, drop: int) -> None:
-        merged = self.rows[keep] + self.rows[drop]
-        merged.data = np.ones_like(merged.data)
-        self.rows[keep] = merged
-        self.rows[drop] = csr_matrix(merged.shape, dtype=merged.dtype)
+        k = len(self.units)
+        others = np.delete(np.arange(k), drop)
+        # a k x k update: every unit keeps its row, `keep` also takes the row of `drop`, and `drop` is left empty
+        update = coo_matrix((np.ones(k, dtype=np.int32), (np.append(others, keep), np.append(others, drop))), shape=(k, k)).tocsr()
+        self.x = (update @ self.x).tocsr()
+        self.x.data[:] = 1  # a taxon held by both units is still one taxon
         self.active[drop] = False
-        overlap = (vstack(self.rows).tocsr() @ merged.T).toarray().ravel().astype(np.float64)
+        overlap = (self.x @ self.x[keep].T).toarray().ravel().astype(np.float64)
         self.shared[keep, :] = overlap
         self.shared[:, keep] = overlap
         self.shared[drop, :] = 0.0
@@ -148,9 +156,9 @@ class _Merger:
         return int(i), int(j)
 
 
-def merge_sequence(labels: Labels, presence: pl.DataFrame, k_max: int = 60, k_min: int = 5) -> dict[int, Labels]:
+def merge_sequence(labels: Labels, ct: CellTaxa, k_max: int = 60, k_min: int = 5) -> dict[int, Labels]:
     """One nested map per realm count, merging the pair of units that share the most taxa by beta-sim each time."""
-    merger = _Merger(labels, presence)
+    merger = _Merger(labels, ct)
     current = dict(labels)
     maps: dict[int, Labels] = {}
     k = len(merger.units)
@@ -168,13 +176,13 @@ def merge_sequence(labels: Labels, presence: pl.DataFrame, k_max: int = 60, k_mi
 
 
 def apply_size_floor(
-    labels: Labels, areas: dict[str, float], presence: pl.DataFrame, floor_km2: float = 1_000_000
+    labels: Labels, areas: dict[str, float], ct: CellTaxa, floor_km2: float = 1_000_000
 ) -> tuple[Labels, dict[int, int]]:
     """Merge units under the floor into the realm they share the most taxa with, smallest first.
 
     Returns the new labels and `{sub_realm: parent}`, where the parent is the realm the unit ended up in.
     """
-    merger = _Merger(labels, presence)
+    merger = _Merger(labels, ct)
     current = dict(labels)
     area = {u: 0.0 for u in merger.units}
     for cell, unit in labels.items():
@@ -206,7 +214,7 @@ def apply_size_floor(
 
 def candidate_maps(
     partition: Partition,
-    presence: pl.DataFrame,
+    ct: CellTaxa,
     areas: dict[str, float],
     adjacency: dict[str, set[str]],
     k_max: int = 60,
@@ -216,10 +224,10 @@ def candidate_maps(
     """Finest modules, then separate pieces, then the size floor, then the merge sequence.
 
     Flooring first keeps exactly one map per realm count, and a merge only coarsens, so pieces need resolving just once. Pass
-    `rank_presence` here when the network uses several ranks, so that pieces and merges see the same evolutionary depth.
+    the matrix the network was built from, so that pieces and merges see the same evolutionary depth.
     """
-    units = resolve_pieces(partition.leaf_labels(), adjacency, presence)
-    floored, sub_realms = apply_size_floor(units, areas, presence, floor_km2)
+    units = resolve_pieces(partition.leaf_labels(), adjacency, ct)
+    floored, sub_realms = apply_size_floor(units, areas, ct, floor_km2)
     if len(set(floored.values())) < k_min:
         raise DegenerateClustering(f"{len(set(floored.values()))} units above the size floor, need at least {k_min}")
-    return CandidateMaps(maps=merge_sequence(floored, presence, k_max, k_min), sub_realms=sub_realms, units=units)
+    return CandidateMaps(maps=merge_sequence(floored, ct, k_max, k_min), sub_realms=sub_realms, units=units)

@@ -1,52 +1,11 @@
 """How much of a realm's biota lives nowhere else."""
 
-from collections.abc import Sequence
-
 import numpy as np
-import polars as pl
 from scipy.sparse import coo_matrix
 
-from realms.matrix import Incidence
-from realms.network import accepted_presence, rank_values
+from realms.matrix import CellTaxa, Incidence
 
 Labels = dict[str, int]
-
-
-def presence_by_rank(presence: pl.DataFrame, taxa: pl.DataFrame | None) -> dict[str, pl.DataFrame]:
-    """One `cell, species_id` table per rank that has values, with the genus or family id in `species_id`."""
-    occupied = accepted_presence(presence, taxa)
-    ranks = {"species": occupied}
-    if taxa is None:
-        return ranks
-    for rank in ("genus", "family"):
-        if taxa[f"{rank}_id"].null_count() == taxa.height:
-            continue
-        rolled = occupied.join(rank_values(taxa, rank), on="species_id", how="inner")
-        ranks[rank] = rolled.select("cell", pl.col("value").alias("species_id")).unique()
-    return ranks
-
-
-def rank_presence(presence: pl.DataFrame, taxa: pl.DataFrame | None, ranks: Sequence[str]) -> pl.DataFrame:
-    """All the chosen ranks in one table, each taxon named by rank, for comparing cells or realms at every depth at once."""
-    tables = presence_by_rank(presence, taxa)
-    return pl.concat(
-        table.select("cell", (pl.lit(f"{rank}:") + pl.col("species_id")).alias("species_id")) for rank, table in tables.items() if rank in ranks
-    )
-
-
-def incidence(presence: pl.DataFrame, cells: list[str]) -> Incidence:
-    """Binary cells x taxa for `cells`, in that order, plus each taxon's cell count over the whole table.
-
-    The totals include cells not listed, so a taxon that also occurs outside a map isn't mistaken for an endemic of it.
-    """
-    pairs = presence.filter(pl.col("species_id").is_not_null()).select("cell", "species_id").unique()
-    pairs = pairs.with_columns((pl.col("species_id").rank("dense").cast(pl.Int64) - 1).alias("column"))
-    n_taxa = int(pairs["column"].max()) + 1 if pairs.height else 0
-    totals = np.bincount(pairs["column"].to_numpy(), minlength=n_taxa)
-    cell_frame = pl.DataFrame({"cell": cells, "row": range(len(cells))}, schema={"cell": pl.String, "row": pl.Int64})
-    rows = pairs.join(cell_frame, on="cell", how="inner")
-    x = coo_matrix((np.ones(rows.height, dtype=np.int32), (rows["row"].to_numpy(), rows["column"].to_numpy())), shape=(len(cells), n_taxa)).tocsr()
-    return Incidence(x, totals)
 
 
 def realm_share(table: Incidence, cell_realm: np.ndarray, n_realms: int, tolerance: float) -> np.ndarray:
@@ -73,9 +32,9 @@ def _indexed(labels: Labels) -> tuple[list[str], np.ndarray, list[int]]:
     return cells, np.array([index[labels[c]] for c in cells], dtype=np.int64), realms
 
 
-def realm_endemism(labels: Labels, presence: pl.DataFrame, tolerance: float = 0.95) -> dict[int, float]:
+def realm_endemism(labels: Labels, ct: CellTaxa, tolerance: float = 0.95) -> dict[int, float]:
     cells, cell_realm, realms = _indexed(labels)
-    shares = realm_share(incidence(presence, cells), cell_realm, len(realms), tolerance)
+    shares = realm_share(ct.rows(cells), cell_realm, len(realms), tolerance)
     return {r: float(s) for r, s in zip(realms, shares)}
 
 
@@ -84,8 +43,8 @@ def area_weighted(shares: np.ndarray, cell_realm: np.ndarray, cell_area: np.ndar
     return float((shares * realm_area).sum() / realm_area.sum())
 
 
-def endemism_score(labels: Labels, presence: pl.DataFrame, areas: dict[str, float], tolerance: float = 0.95) -> float:
+def endemism_score(labels: Labels, ct: CellTaxa, areas: dict[str, float], tolerance: float = 0.95) -> float:
     """Endemic share averaged over realms, weighted by realm area."""
     cells, cell_realm, realms = _indexed(labels)
-    shares = realm_share(incidence(presence, cells), cell_realm, len(realms), tolerance)
+    shares = realm_share(ct.rows(cells), cell_realm, len(realms), tolerance)
     return area_weighted(shares, cell_realm, np.array([areas[c] for c in cells]))

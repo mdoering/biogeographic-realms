@@ -1,8 +1,10 @@
 import numpy as np
 
+import reference_impl as ref
 from helpers import grid
 from realms.candidates import connected_pieces
-from realms.endemism import presence_by_rank
+from realms.endemism import area_weighted, realm_share
+from realms.matrix import cell_taxa
 from realms.nullmodel import endemism_excess, null_partitions
 from realms.synth import planted_network
 
@@ -89,13 +91,45 @@ def planted_on_grid(shuffle_space):
 
 def test_planted_map_beats_null():
     presence, taxa, truth, adjacency, areas = planted_on_grid(shuffle_space=False)
-    assert endemism_excess(truth, presence_by_rank(presence, taxa), adjacency, areas, n_null=19) > 0.3
+    assert endemism_excess(truth, cell_taxa(presence, taxa), adjacency, areas, n_null=19) > 0.3
 
 
 def test_random_maps_do_not_beat_null():
     # with no signal in location, a map drawn from the null shows no excess on average
     presence, taxa, truth, adjacency, areas = planted_on_grid(shuffle_space=True)
-    ranks = presence_by_rank(presence, taxa)
+    ct = cell_taxa(presence, taxa)
     maps = null_partitions(truth, adjacency, areas, n=8, seed=42)
-    excess = [endemism_excess(m, ranks, adjacency, areas, n_null=19, seed=3) for m in maps]
+    excess = [endemism_excess(m, ct, adjacency, areas, n_null=19, seed=3) for m in maps]
     assert abs(float(np.mean(excess))) < 0.05
+
+
+def reference_excess(labels, presence, taxa, adjacency, areas, n_null, seed, tolerance=0.95):
+    """`endemism_excess` as it was: one string-keyed table per rank, each turned into its own `incidence`."""
+    cells = sorted(labels)
+    cell_area = np.array([areas[c] for c in cells])
+    realms = sorted(set(labels.values()))
+    observed = np.array([realms.index(labels[c]) for c in cells])
+    nulls = [np.array([realms.index(null[c]) for c in cells]) for null in null_partitions(labels, adjacency, areas, n=n_null, seed=seed)]
+    excess = []
+    for table in ref.presence_by_rank(presence, taxa).values():
+        incidence = ref.incidence(table, cells)
+
+        def score(cell_realm):
+            return area_weighted(realm_share(incidence, cell_realm, len(realms), tolerance), cell_realm, cell_area)
+
+        excess.append(score(observed) - float(np.mean([score(null) for null in nulls])))
+    return float(np.mean(excess))
+
+
+def test_endemism_excess_matches_reference():
+    presence, taxa, truth, adjacency, areas = planted_on_grid(shuffle_space=False)
+    for tolerance in (0.95, 1.0):
+        old = reference_excess(truth, presence, taxa, adjacency, areas, n_null=9, seed=2, tolerance=tolerance)
+        assert endemism_excess(truth, cell_taxa(presence, taxa), adjacency, areas, n_null=9, seed=2, tolerance=tolerance) == old
+
+
+def test_endemism_excess_averages_the_ranks_of_the_matrix():
+    presence, taxa, truth, adjacency, areas = planted_on_grid(shuffle_space=False)
+    ct = cell_taxa(presence, taxa)
+    excess = {r: endemism_excess(truth, ct.select([r]), adjacency, areas, n_null=9) for r in ("species", "genus", "family")}
+    assert endemism_excess(truth, ct, adjacency, areas, n_null=9) == float(np.mean(list(excess.values())))

@@ -1,6 +1,5 @@
 """Choosing the headline map by rules fixed in advance."""
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -8,8 +7,9 @@ import polars as pl
 
 from realms.candidates import DegenerateClustering, candidate_maps
 from realms.cluster import run_infomap
-from realms.endemism import Labels, rank_presence
-from realms.network import build_network
+from realms.endemism import Labels
+from realms.matrix import CellTaxa
+from realms.network import network_from
 from realms.score import v_measure
 
 MIN_STABILITY = 0.8
@@ -34,51 +34,37 @@ def select_level(table: pl.DataFrame) -> Selection:
     return Selection(int(k), False, f"k={k} has excess within {TIE} of the highest, {top:.3f}, among {eligible.height} stable maps")
 
 
-def _resample(presence: pl.DataFrame, taxa: pl.DataFrame | None, rng: np.random.Generator) -> tuple[pl.DataFrame, pl.DataFrame | None]:
-    """Draw species with replacement. Each draw becomes its own species, so a species drawn twice counts twice."""
-    species = sorted(presence["species_id"].drop_nulls().unique().to_list())
-    draws = rng.integers(len(species), size=len(species))
-    drawn = pl.DataFrame(
-        {"species_id": [species[d] for d in draws], "draw": [f"{species[d]}#{i}" for i, d in enumerate(draws)]},
-        schema={"species_id": pl.String, "draw": pl.String},
-    )
-    new_presence = presence.join(drawn, on="species_id").select("cell", pl.col("draw").alias("species_id"))
-    if taxa is None:
-        return new_presence, None
-    new_taxa = taxa.join(drawn, on="species_id").drop("species_id").rename({"draw": "species_id"})
-    return new_presence, new_taxa
-
-
 def _nearest(maps: dict[int, Labels], k: int) -> Labels:
     return maps[min(maps, key=lambda available: (abs(available - k), available))]
 
 
 def bootstrap_stability(
-    presence: pl.DataFrame,
-    taxa: pl.DataFrame | None,
+    ct: CellTaxa,
     maps: dict[int, Labels],
     areas: dict[str, float],
     adjacency: dict[str, set[str]],
     n_boot: int = 20,
     seed: int = 1,
     trials: int = 3,
-    ranks: Sequence[str] = ("species", "genus", "family"),
     floor_km2: float = 1_000_000,
     k_max: int = 60,
 ) -> dict[int, float]:
     """Median V-measure per realm count between each map and the same pipeline rerun on resampled species.
 
-    `ranks`, `floor_km2` and `k_max` have to be the ones that produced `maps`, or this measures some other pipeline. A bootstrap that
-    lacks the exact count uses its nearest. One that collapses completely scores zero.
+    Each bootstrap draws species with replacement from those of `ct`, each draw its own species so that one drawn twice counts
+    twice. The ranks are those of `ct`, and they, `floor_km2` and `k_max` have to be the ones that produced `maps`, or this
+    measures some other pipeline. A bootstrap that lacks the exact count uses its nearest. One that collapses completely scores zero.
     """
     rng = np.random.default_rng(seed)
+    n_species = len(ct.species_ids())
+    if not n_species:
+        raise ValueError("bootstrap_stability resamples species, so the matrix needs the species rank")
     scores: dict[int, list[float]] = {k: [] for k in maps}
     for b in range(n_boot):
-        new_presence, new_taxa = _resample(presence, taxa, rng)
-        partition = run_infomap(build_network(new_presence, new_taxa, ranks=ranks), seed=seed + b, trials=trials)
-        compared = rank_presence(new_presence, new_taxa, ranks)
+        resampled = ct.resample(rng.integers(n_species, size=n_species))
+        partition = run_infomap(network_from(resampled), seed=seed + b, trials=trials)
         try:
-            candidates = candidate_maps(partition, compared, areas, adjacency, k_max=k_max, k_min=2, floor_km2=floor_km2).maps
+            candidates = candidate_maps(partition, resampled, areas, adjacency, k_max=k_max, k_min=2, floor_km2=floor_km2).maps
         except DegenerateClustering:
             candidates = {}
         for k, labels in maps.items():
