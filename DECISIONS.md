@@ -28,19 +28,20 @@ Every change to a method or threshold, dated, with its reason. The design is in 
 
 - **Infomap degenerates at its default scale.** Species and genus nodes give 16 modules, the largest holding 75% of the 1,759 cells.
   After the size floor, 5 units remain, so the merge sequence has a single candidate. It selected k=5 and fell short of the
-  stability threshold (0.785 against 0.8). The design's fallback doesn't trigger, because 5 units aren't "fewer than 5".
+  stability threshold (0.786 against 0.8). The design's fallback doesn't trigger, because 5 units aren't "fewer than 5".
 - **The usable scale lies somewhere else.** A scan of Infomap settings on this matrix, as (leaf modules, share of the largest):
   species only, default (26, 0.57); species and genus, default (27, 0.73); two-level (16, 0.92 with genus); Markov time 0.75
   (372, 0.33 species only; 354, 0.36 with genus); Markov time 0.5 (over 1,600, 0.01). Nothing here was tried between 0.75 and 1.
 - **Adding genus makes modules coarser.** Infomap Bioregions 2 warns that ancestral nodes collapse modular structure, and that
   shows here. Evolutionary depth may need a lower weight than the paper's whole-tree formula, or integration at one rank.
 - To settle while exploring half A, using only endemism excess and stability: a Markov time sweep, or recursing Infomap inside
-  large modules. Runtime and memory aren't a concern at this size, with 110 s and 7.5 GB including 20 bootstraps.
+  large modules. Runtime and memory aren't a concern at this size, with about 100 s and 5 to 7 GB including 20 bootstraps.
 - The area-weighted endemism score of a map dominated by one huge realm is high by construction (0.678 here), since nearly every
   species occurs in it and most occur nowhere else. Only the excess over the null, which has the same areas, is meaningful.
 - Costello's own 30 realms, assigned from their published polygons by cell centre (1,584 of 1,759 cells), give a strict mean endemism
-  of 23% on their own matrix (range 5% to 54%), against the published 42% (17% to 84%). Their figure may come from cell groups before
-  the boundaries were smoothed by hand, but that's unverified. So 42% can't serve as a reference value without its method.
+  of 19% on their own matrix (range 4% to 43%), against the published 42% (17% to 84%). This counts a species' presence in cells no polygon
+  covers against its endemism. Their figure may come from cell groups before the boundaries were smoothed by hand, but that's unverified.
+  So 42% can't serve as a reference value without its method.
 
 ### Text patterns
 
@@ -81,3 +82,32 @@ any where over a third of the sample wasn't a garden, zoo or held organism.
   that have them. Lists also hold higher ranks, which need filtering out.
 - **Missing, needing a POST on production to create:** WRiMS (26853), and GRIIS for AQ, AS, BL, BQ-Bonaire, BQ-Saba, FK, GQ, GS, GW, KP, KR, KY, KY-Grand,
   KY-Little, MF, PG, PS, SH-Ascension, SH-StHelena, SH-Tristan, SS, TR, VG. Nothing requested yet.
+
+### Null model
+
+- Pieces grow together, always extending the one furthest below its area, followed by a pass that hands border cells to neighbours below
+  their area. The design's order of growing one piece at a time missed target areas by up to 44 of 144 cells. Now 92% of maps are within one
+  cell, and the worst of 200 was 11 off. Null maps come out blobbier than real realms, which could understate the null's endemism slightly.
+- A cell nothing touches joins the piece furthest below its area, not the nearest by centre, because the null works from adjacency alone.
+
+### After review of the branch
+
+- **The family split keeps families whole.** A lineage takes its most common `taxGroup`, as 20 real families carry two groups (Asteraceae among
+  them) and 4,625 species have none. On the real table: no species without a half, no lineage in both halves.
+- **Genus and family names are qualified by kingdom.** 2,272 genus names recur across kingdoms in 315557 (*Drosophila* in three), covering
+  92,973 species. Unqualified, they would tie fly cells to fungus cells.
+- **Endemism counts every cell a taxon occurs in, even outside the map.** Before, a species' cells outside the labelled set were ignored. This
+  changed the Costello figure above from 23% to 19%.
+- **Pieces and merges use every rank in the network, not species alone.** The design says "sharing the most species", written before evolutionary
+  depth was added. Comparing species only would discard the genus and family signal the network was built to carry. `rank_presence` provides the
+  combined table.
+- **A separate piece stays if it shares nothing with any other realm,** as moving it would be arbitrary. The design only covers the case where
+  there is a realm it shares something with.
+- **`bootstrap_stability` reruns the caller's ranks, size floor and `k_max`.** It used to rerun a fixed pipeline whatever produced the maps.
+
+Query changes, which the first download freezes:
+
+- `n_open`, `n_datasets_open` and `n_years_open` count `license IN ('CC0_1_0','CC_BY_4_0')`, as the design's robustness run says, rather than
+  anything not CC BY-NC. `n_nc` stays.
+- A record of a species with no kingdom no longer drops out of the clean counts (1,753 species in 315557).
+- `" zoo "` now matches at the start and end of a text, and `" zoo,"` and `" zoo."` are added, so "Berlin Zoo" and "Zoo, Berlin" count.

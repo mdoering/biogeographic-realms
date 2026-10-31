@@ -73,9 +73,12 @@ def in_release(release_key: int, usage_id: str, api: str = CLB_API) -> bool:
 
 def gbif_match(name: str, api: str = GBIF_API) -> Match:
     query = urllib.parse.urlencode({"checklistKey": CHECKLIST_KEY, "scientificName": name})
-    _, body = get_json(f"{api}/v2/species/match?{query}")
-    usage = (body or {}).get("usage") or {}
-    return Match(usage.get("key"), usage.get("rank"), ((body or {}).get("diagnostics") or {}).get("matchType"))
+    status, body = get_json(f"{api}/v2/species/match?{query}")
+    if status != 200 or body is None:
+        # no match is a 200 with matchType NONE, so a 404 means the endpoint itself has gone
+        raise ApiError(f"species match answered {status} for {name!r}")
+    usage = body.get("usage") or {}
+    return Match(usage.get("key"), usage.get("rank"), (body.get("diagnostics") or {}).get("matchType"))
 
 
 _NON_NATIVE_MEANS = "'introduced','introducedAssistedColonisation','vagrant'"
@@ -91,10 +94,11 @@ _CLEAN = (
     f"AND (establishmentmeans.concept IS NULL OR establishmentmeans.concept NOT IN ({_NON_NATIVE_MEANS})) "
     f"AND (degreeofestablishment.concept IS NULL OR degreeofestablishment.concept NOT IN ({_NON_NATIVE_DEGREE})) "
     "AND NOT COALESCE(ARRAY_CONTAINS(issue,'TAXON_MATCH_FUZZY'),FALSE) "
-    f"AND (v_kingdom IS NULL OR LOWER(v_kingdom) NOT IN ({_CLASH_KINGDOMS}) OR LOWER(kingdom) NOT IN ({_CLASH_KINGDOMS}) "
+    f"AND (v_kingdom IS NULL OR kingdom IS NULL OR LOWER(v_kingdom) NOT IN ({_CLASH_KINGDOMS}) OR LOWER(kingdom) NOT IN ({_CLASH_KINGDOMS}) "
     "OR LOWER(v_kingdom) = LOWER(kingdom))"
 )
 _NC = "license = 'CC_BY_NC_4_0'"
+_OPEN = "license IN ('CC0_1_0','CC_BY_4_0')"
 _PART = "CASE WHEN level0gid IS NULL THEN 'sea' ELSE 'land' END"
 
 
@@ -109,6 +113,9 @@ def _pattern_sql(pattern: HumanPattern) -> str:
         if "%" in term or "_" in term:
             raise ValueError(f"wildcard in text term {term!r}")
     text = f"LOWER(COALESCE({pattern.column},''))"
+    if pattern.term != pattern.term.strip():
+        # a term with outer spaces must also match at the very start and end of the text
+        text = f"CONCAT(' ', {text}, ' ')"
     parts = [f"LOWER(kingdom) = '{pattern.kingdom.lower()}'"] if pattern.kingdom else []
     parts.append(f"{text} LIKE '%{_sql_literal(pattern.term)}%'")
     parts += [f"{text} NOT LIKE '%{_sql_literal(phrase)}%'" for phrase in pattern.unless]
@@ -127,8 +134,9 @@ def build_sql(resolution: int, patterns: Sequence[HumanPattern]) -> str:
  COUNT(DISTINCT CASE WHEN {_CLEAN} THEN datasetkey END) AS n_datasets,
  COUNT(DISTINCT CASE WHEN {_CLEAN} THEN "year" END) AS n_years,
  SUM(CASE WHEN ({_CLEAN}) AND {_NC} THEN 1 ELSE 0 END) AS n_nc,
- COUNT(DISTINCT CASE WHEN ({_CLEAN}) AND NOT ({_NC}) THEN datasetkey END) AS n_datasets_open,
- COUNT(DISTINCT CASE WHEN ({_CLEAN}) AND NOT ({_NC}) THEN "year" END) AS n_years_open,
+ SUM(CASE WHEN ({_CLEAN}) AND {_OPEN} THEN 1 ELSE 0 END) AS n_open,
+ COUNT(DISTINCT CASE WHEN ({_CLEAN}) AND {_OPEN} THEN datasetkey END) AS n_datasets_open,
+ COUNT(DISTINCT CASE WHEN ({_CLEAN}) AND {_OPEN} THEN "year" END) AS n_years_open,
  SUM(CASE WHEN ({_CLEAN}) AND datasetkey = '{EBIRD}' THEN 1 ELSE 0 END) AS n_ebird,
  SUM(CASE WHEN ({_CLEAN}) AND datasetkey = '{INATURALIST}' THEN 1 ELSE 0 END) AS n_inat,
  SUM(CASE WHEN ({_CLEAN}) AND ({human}) THEN 1 ELSE 0 END) AS n_human_text

@@ -1,5 +1,6 @@
 """Choosing the headline map by rules fixed in advance."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -7,7 +8,7 @@ import polars as pl
 
 from realms.candidates import DegenerateClustering, candidate_maps
 from realms.cluster import run_infomap
-from realms.endemism import Labels
+from realms.endemism import Labels, rank_presence
 from realms.network import build_network
 from realms.score import v_measure
 
@@ -61,18 +62,23 @@ def bootstrap_stability(
     n_boot: int = 20,
     seed: int = 1,
     trials: int = 3,
+    ranks: Sequence[str] = ("species", "genus", "family"),
+    floor_km2: float = 1_000_000,
+    k_max: int = 60,
 ) -> dict[int, float]:
     """Median V-measure per realm count between each map and the same pipeline rerun on resampled species.
 
-    A bootstrap that lacks the exact count uses its nearest. One that collapses completely scores zero.
+    `ranks`, `floor_km2` and `k_max` have to be the ones that produced `maps`, or this measures some other pipeline. A bootstrap that
+    lacks the exact count uses its nearest. One that collapses completely scores zero.
     """
     rng = np.random.default_rng(seed)
     scores: dict[int, list[float]] = {k: [] for k in maps}
     for b in range(n_boot):
         new_presence, new_taxa = _resample(presence, taxa, rng)
-        partition = run_infomap(build_network(new_presence, new_taxa), seed=seed + b, trials=trials)
+        partition = run_infomap(build_network(new_presence, new_taxa, ranks=ranks), seed=seed + b, trials=trials)
+        compared = rank_presence(new_presence, new_taxa, ranks)
         try:
-            candidates = candidate_maps(partition, new_presence, areas, adjacency, k_min=2).maps
+            candidates = candidate_maps(partition, compared, areas, adjacency, k_max=k_max, k_min=2, floor_km2=floor_km2).maps
         except DegenerateClustering:
             candidates = {}
         for k, labels in maps.items():

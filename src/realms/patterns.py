@@ -33,7 +33,7 @@ HUMAN_PATTERNS: tuple[HumanPattern, ...] = tuple(
         ("botanic", "jardin botanique", "jardín botánico", "jardim botânico", "botanischer garten", "orto botanico", "arboretum"),
         kingdom="Plantae",
     )
-    + _patterns((" zoo ", "zoo animal"), kingdom="Animalia", unless=("not a zoo", "not a captive"))
+    + _patterns((" zoo ", " zoo,", " zoo.", "zoo animal"), kingdom="Animalia", unless=("not a zoo", "not a captive"))
     + _patterns(("zoo specimen", "zoological garden", "zoologischer garten", "tierpark", "jardin zoologique"), kingdom="Animalia")
     + _patterns(("greenhouse", "glasshouse", "gewächshaus"))
     + _patterns(
@@ -52,7 +52,8 @@ HUMAN_PATTERNS: tuple[HumanPattern, ...] = tuple(
 
 
 def like_match(value: str | None, term: str) -> bool:
-    return value is not None and term in value.lower()
+    """The padding lets a term with outer spaces match at the very start and end of the text, as the query does."""
+    return value is not None and term in f" {value.lower()} "
 
 
 def _hits(pattern: HumanPattern, text: str | None, kingdom: str | None) -> bool:

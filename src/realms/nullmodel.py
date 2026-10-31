@@ -45,7 +45,6 @@ def _one_partition(
     targets = [area for _, area in pieces]
     heap = [(-remaining[p] / targets[p], float(rng.random()), p) for p in range(len(pieces))]
     heapq.heapify(heap)
-    deferred: list[tuple[str, int]] = []
     while heap:
         _, _, piece = heapq.heappop(heap)
         frontier = frontiers[piece]
@@ -54,7 +53,6 @@ def _one_partition(
             if cell in assigned:
                 continue
             if touches_own_realm(cell, piece):
-                deferred.append((cell, piece))
                 continue
             place(cell, piece)
             heapq.heappush(heap, (-remaining[piece] / targets[piece], float(rng.random()), piece))
@@ -176,11 +174,11 @@ def endemism_excess(
     observed_realm = np.array([position[labels[c]] for c in cells])
     null_realms = [np.array([position[null[c]] for c in cells]) for null in nulls]
 
-    def score(x, cell_realm: np.ndarray) -> float:
-        return area_weighted(realm_share(x, cell_realm, len(realms), tolerance), cell_realm, cell_area)
+    def score(table, cell_realm: np.ndarray) -> float:
+        return area_weighted(realm_share(table, cell_realm, len(realms), tolerance), cell_realm, cell_area)
 
     excess = []
     for presence in presence_by_rank.values():
-        x = incidence(presence, cells)
-        excess.append(score(x, observed_realm) - float(np.mean([score(x, realm) for realm in null_realms])))
+        table = incidence(presence, cells)
+        excess.append(score(table, observed_realm) - float(np.mean([score(table, realm) for realm in null_realms])))
     return float(np.mean(excess))

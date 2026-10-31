@@ -1,3 +1,4 @@
+import polars as pl
 import pytest
 
 from helpers import presence
@@ -166,3 +167,18 @@ def test_degenerate_clustering_raises():
     adjacency = {f"c{u}": set() for u in range(3)}
     with pytest.raises(DegenerateClustering):
         candidate_maps(Partition(paths=paths, unassigned=[]), presence(rows), areas, adjacency)
+
+
+def test_species_also_outside_the_map_is_not_restricted():
+    # the shared species occur mostly in cells the map doesn't cover, so they can't hold the detached piece in the realm
+    p, labels, adjacency = pieces_fixture(shared_species=3)
+    elsewhere = presence([(f"far{i}", f"main{s}") for i in range(30) for s in range(3)])
+    assert resolve_pieces(labels, adjacency, pl.concat([p, elsewhere]))["d0"] == 1
+
+
+def test_piece_sharing_nothing_with_other_realms_stays():
+    # d0 has its own species and shares none with realm 1, so moving it there would be arbitrary
+    rows = [("a0", "x"), ("a1", "x"), ("b0", "y"), ("b1", "y"), ("d0", "own")]
+    labels = {"a0": 0, "a1": 0, "b0": 1, "b1": 1, "d0": 0}
+    adjacency = {"a0": {"a1"}, "a1": {"a0"}, "b0": {"b1"}, "b1": {"b0"}, "d0": set()}
+    assert resolve_pieces(labels, adjacency, presence(rows))["d0"] == 0

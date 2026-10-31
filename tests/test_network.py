@@ -101,3 +101,14 @@ def test_cell_order_does_not_depend_on_row_order():
     b = build_network(presence([("a", "s1"), ("b", "s2")]))
     assert a.cells == b.cells == ["a", "b"]
     assert links(a) == links(b)
+
+
+def test_same_genus_name_in_two_kingdoms_is_two_nodes():
+    # Drosophila is both a fly and a fungus: they must not tie fly cells to fungus cells
+    p = presence([("a", "fly"), ("b", "fungus"), ("c", "other")])
+    t = pl.DataFrame(
+        {"species_id": ["fly", "fungus", "other"], "genus": ["Drosophila", "Drosophila", "Gus"], "family": ["F1", "F2", "F3"], "kingdom": ["Animalia", "Fungi", "Animalia"]}
+    )
+    net = build_network(p, t, ranks=("genus",))
+    assert net.taxa == ["genus:Animalia:Drosophila", "genus:Animalia:Gus", "genus:Fungi:Drosophila"]
+    assert all(w == 1.0 for w in net.weight)

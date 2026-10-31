@@ -95,7 +95,7 @@ def test_sql_hard_filters_and_columns_present():
         assert hard in where
     # flags are counted, not filtered: raw counts must still see them
     assert "LIVING_SPECIMEN" not in where
-    for column in ("n_raw", "n_datasets", "n_years", "n_nc", "n_datasets_open", "n_years_open", "n_ebird", "n_inat", "n_human_text"):
+    for column in ("n_raw", "n_datasets", "n_years", "n_nc", "n_open", "n_datasets_open", "n_years_open", "n_ebird", "n_inat", "n_human_text"):
         assert f" AS {column}" in sql
     assert " AS n," in sql
     assert sql.rstrip().endswith("END")
@@ -147,3 +147,28 @@ def test_validate_sql_raises_with_the_server_message(api):
     api.routes["/v1/occurrence/download/request/validate"] = (400, {"error": "bad column"})
     with pytest.raises(QueryInvalid, match="bad column"):
         validate_sql("SELECT nonsense", api.base)
+
+
+def test_gbif_match_raises_on_404(api):
+    # the match API says "no match" with a 200: a 404 means the endpoint moved, not that GBIF doesn't know the name
+    with pytest.raises(ApiError):
+        gbif_match("Agave rafaeliorum", api.base)
+
+
+def test_open_counts_name_the_open_licences():
+    sql = build_sql(7, PATTERNS)
+    assert " AS n_open" in sql
+    assert "license IN ('CC0_1_0','CC_BY_4_0')" in sql
+    # an unspecified licence must not count as open
+    assert "NOT (license" not in sql
+
+
+def test_kingdom_clash_needs_a_known_kingdom():
+    # without this, the record of a species with no kingdom makes the clause NULL and drops out of every clean count
+    assert "(v_kingdom IS NULL OR kingdom IS NULL OR LOWER(v_kingdom) NOT IN" in build_sql(7, PATTERNS)
+
+
+def test_sql_pads_terms_with_outer_spaces():
+    sql = build_sql(7, (HumanPattern("locality", " zoo ", kingdom="Animalia", unless=("not a zoo",)),))
+    assert "CONCAT(' ', LOWER(COALESCE(locality,'')), ' ') LIKE '% zoo %'" in sql
+    assert "CONCAT(' ', LOWER(COALESCE(locality,'')), ' ') NOT LIKE '%not a zoo%'" in sql

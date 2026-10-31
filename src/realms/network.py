@@ -28,6 +28,14 @@ def information_weight(n_cells: int, total_cells: int) -> float:
     return 1.0 - math.log(n_cells) / math.log(total_cells)
 
 
+def rank_values(taxa: pl.DataFrame, rank: str) -> pl.DataFrame:
+    """`species_id, value` for a rank, without nulls. Genus and family names recur across kingdoms, so the kingdom qualifies them."""
+    name = pl.col(rank)
+    if "kingdom" in taxa.columns:
+        name = pl.col("kingdom").fill_null("?") + pl.lit(":") + name
+    return taxa.select("species_id", name.alias("value")).filter(pl.col("value").is_not_null())
+
+
 def _rank_links(presence: pl.DataFrame, taxa: pl.DataFrame | None, rank: str, total_cells: int) -> pl.DataFrame:
     if rank == "species":
         return presence.select(
@@ -35,14 +43,13 @@ def _rank_links(presence: pl.DataFrame, taxa: pl.DataFrame | None, rank: str, to
             (pl.lit("species:") + pl.col("species_id")).alias("taxon"),
             pl.lit(1.0).alias("weight"),
         )
-    pairs = presence.join(taxa.select("species_id", rank), on="species_id", how="inner")
-    pairs = pairs.filter(pl.col(rank).is_not_null()).select("cell", rank).unique()
-    weights = pairs.group_by(rank).len().with_columns(
+    pairs = presence.join(rank_values(taxa, rank), on="species_id", how="inner").select("cell", "value").unique()
+    weights = pairs.group_by("value").len().with_columns(
         pl.col("len").map_elements(lambda n: information_weight(n, total_cells), return_dtype=pl.Float64).alias("weight")
     )
-    return pairs.join(weights, on=rank).select(
+    return pairs.join(weights, on="value").select(
         "cell",
-        (pl.lit(f"{rank}:") + pl.col(rank)).alias("taxon"),
+        (pl.lit(f"{rank}:") + pl.col("value")).alias("taxon"),
         "weight",
     )
 

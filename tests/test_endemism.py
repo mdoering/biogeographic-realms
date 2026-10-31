@@ -58,3 +58,29 @@ def test_presence_by_rank_rolls_up_and_skips_null_ranks():
 
 def test_presence_by_rank_without_taxa_is_species_only():
     assert set(presence_by_rank(presence([("a", "s1")]), None)) == {"species"}
+
+
+def test_cells_outside_the_map_count_against_endemism():
+    # s also occurs in a cell the map doesn't cover, so it isn't known to be unique to realm 0
+    rows = [("a", "s"), ("outside", "s"), ("b", "t")]
+    assert realm_endemism({"a": 0, "b": 1}, presence(rows), tolerance=1.0) == {0: 0.0, 1: 1.0}
+
+
+def test_taxon_only_outside_the_map_changes_nothing():
+    rows = [("a", "s"), ("b", "t"), ("outside", "u")]
+    assert realm_endemism({"a": 0, "b": 1}, presence(rows), tolerance=1.0) == {0: 1.0, 1: 1.0}
+
+
+def test_null_species_is_not_a_taxon():
+    rows = [("a", "s1"), ("a", None), ("b", None), ("b", "s2")]
+    assert realm_endemism({"a": 0, "b": 1}, presence(rows)) == {0: 1.0, 1: 1.0}
+
+
+def test_presence_by_rank_drops_null_species():
+    assert presence_by_rank(presence([("a", "s1"), ("b", None)]), None)["species"].rows() == [("a", "s1")]
+
+
+def test_presence_by_rank_keeps_kingdoms_apart():
+    p = presence([("a", "fly"), ("b", "fungus")])
+    taxa = pl.DataFrame({"species_id": ["fly", "fungus"], "genus": ["Drosophila", "Drosophila"], "family": [None, None], "kingdom": ["Animalia", "Fungi"]})
+    assert presence_by_rank(p, taxa)["genus"]["species_id"].n_unique() == 2

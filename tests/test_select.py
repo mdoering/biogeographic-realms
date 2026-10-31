@@ -59,3 +59,39 @@ def test_stability_low_on_noise():
     adjacency = {c: set() for c in cells}
     maps = {5: {c: i % 5 for i, c in enumerate(cells)}}
     assert bootstrap_stability(presence, None, maps, areas, adjacency, n_boot=3)[5] < 0.5
+
+
+def family_only_world():
+    """Cells share no species at all, so only family nodes can tell the two groups apart."""
+    p, t, truth = [], [], {}
+    for group, family in enumerate(("FA", "FB")):
+        for i in range(8):
+            cell = f"{family}-{i}"
+            truth[cell] = group
+            for s in range(4):
+                p.append((cell, f"{cell}-s{s}"))
+                t.append((f"{cell}-s{s}", f"G{cell}", family))
+    return (
+        pl.DataFrame(p, schema={"cell": pl.String, "species_id": pl.String}, orient="row"),
+        pl.DataFrame(t, schema={"species_id": pl.String, "genus": pl.String, "family": pl.String}, orient="row"),
+        truth,
+    )
+
+
+def test_stability_reruns_the_callers_ranks():
+    presence, taxa, truth = family_only_world()
+    areas = {c: 1e6 for c in truth}
+    adjacency = {c: set() for c in truth}
+    with_family = bootstrap_stability(presence, taxa, {2: truth}, areas, adjacency, n_boot=3, ranks=("species", "family"))
+    species_only = bootstrap_stability(presence, taxa, {2: truth}, areas, adjacency, n_boot=3, ranks=("species",))
+    assert with_family[2] > 0.8 > species_only[2]
+
+
+def test_stability_reruns_the_callers_size_floor():
+    # with a floor above the whole world every map collapses to one realm, which can't reproduce two
+    presence, taxa, truth = planted_network(n_realms=2, cells_per_realm=6, endemic_species=20, widespread_species=0)
+    areas = {c: 1e6 for c in truth}
+    adjacency = {c: set() for c in truth}
+    kept = bootstrap_stability(presence, None, {2: truth}, areas, adjacency, n_boot=2, ranks=("species",))
+    collapsed = bootstrap_stability(presence, None, {2: truth}, areas, adjacency, n_boot=2, ranks=("species",), floor_km2=1e9)
+    assert kept[2] > 0.8 and collapsed[2] == 0.0

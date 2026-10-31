@@ -68,3 +68,25 @@ def test_no_ranks_at_all_is_its_own_lineage():
     result = assign_halves(taxa([("s1", "g", None, None, None), ("s2", "g", None, None, None)]))
     lineage = dict(zip(result["species_id"], result["lineage"]))
     assert lineage == {"s1": "species:s1", "s2": "species:s2"}
+
+
+def test_family_with_two_groups_stays_in_one_half():
+    # as in the real taxGroup: Asteraceae is mostly angiosperms, with some species grouped as eukaryotes
+    rows = [(f"a{i}", "angiosperms", "Asteraceae", "O", "C") for i in range(9)] + [("b0", "eukaryotes", "Asteraceae", "O", "C")]
+    for seed in range(20):
+        assert assign_halves(taxa(rows), seed=seed)["half"].n_unique() == 1
+
+
+def test_null_group_still_gets_a_half():
+    result = assign_halves(taxa([("s1", None, "F1", "O", "C"), ("s2", None, "F2", "O", "C")]))
+    assert result["half"].null_count() == 0
+
+
+def test_null_group_follows_the_rest_of_its_family():
+    rows = [("s1", "g", "F", "O", "C"), ("s2", None, "F", "O", "C")]
+    assert assign_halves(taxa(rows))["half"].n_unique() == 1
+
+
+def test_same_family_name_in_two_kingdoms_is_two_lineages():
+    df = taxa([("s1", "g", "Foo", "O", "C"), ("s2", "g", "Foo", "O", "C")]).with_columns(pl.Series("kingdom", ["Animalia", "Plantae"]))
+    assert sorted(assign_halves(df)["lineage"]) == ["family:Animalia:Foo", "family:Plantae:Foo"]

@@ -117,7 +117,7 @@ as a column rather than applying it in `WHERE` means every cleaning layer and se
   fossil, uncertainty at most 100 km.
 - **Count columns:** `n_raw` counts everything past the hard filters. The rest count records passing the layer 1 flag checks
   (not `LIVING_SPECIMEN`, no non-native establishment flag, no fuzzy match, no kingdom clash): `n`, `n_datasets`, `n_years`,
-  `n_nc` (CC BY-NC), `n_datasets_open`, `n_years_open`, `n_ebird`, `n_inat`, `n_human_text`. The `_open` columns give the
+  `n_nc` (CC BY-NC), `n_open` (CC0 and CC BY), `n_datasets_open`, `n_years_open`, `n_ebird`, `n_inat`, `n_human_text`. The `_open` columns give the
   open-only run its own support counts.
 
 **Checked 2026-10-31**
@@ -239,7 +239,7 @@ measured through the out-of-native rate.
 ## Choosing the headline level
 
 **Candidates.** Start from Infomap's finest modules and merge them one pair at a time, always the pair sharing the most
-species by beta-sim. That gives exactly one nested map per realm count from 60 down to 5. It avoids a huge candidate set of
+taxa by beta-sim, across every rank in the network. That gives exactly one nested map per realm count from 60 down to 5. It avoids a huge candidate set of
 uneven cuts, and guarantees maps with 19 and 30 realms for the comparison. Infomap's own levels are reported alongside.
 
 **Size floor.** In every candidate, a unit under 1M km² merges into the realm it shares the most species with and stays

@@ -54,12 +54,13 @@ def resolve_pieces(
 
     Cells with few records often hold only widespread taxa, which makes distant cells look alike. A piece stays if at least
     `min_shared` of its taxa are endemic to the realm and also occur in another piece. Otherwise it moves to the adjacent
-    realm it shares most with, or the most similar realm of all if nothing touches it. The largest piece never moves.
+    realm it shares most with, or the most similar realm of all if nothing touches it. The largest piece never moves, and neither
+    does a piece that shares nothing with any option, since moving it would be arbitrary.
     """
     cells = sorted(labels)
     index = {c: i for i, c in enumerate(cells)}
-    x = incidence(presence, cells).astype(bool)
-    totals = np.asarray(x.sum(axis=0)).ravel()
+    table = incidence(presence, cells)
+    x, totals = table.x.astype(bool), table.totals
 
     realm_cells: dict[int, set[str]] = {}
     for cell, realm in labels.items():
@@ -86,8 +87,9 @@ def resolve_pieces(
             options = sorted(touching or (set(realm_cells) - {realm}))
             if options:
                 best = min(options, key=lambda r: (_beta_sim(piece_taxa, taxa_of(realm_rows[r])), r))
-                for cell in piece:
-                    result[cell] = best
+                if _beta_sim(piece_taxa, taxa_of(realm_rows[best])) < 1.0:
+                    for cell in piece:
+                        result[cell] = best
     return result
 
 
@@ -95,7 +97,7 @@ def _unit_matrix(labels: Labels, presence: pl.DataFrame) -> tuple[list[int], csr
     cells = sorted(labels)
     units = sorted(set(labels.values()))
     position = {u: i for i, u in enumerate(units)}
-    x = incidence(presence, cells).astype(np.int32)
+    x = incidence(presence, cells).x
     membership = csr_matrix(
         (np.ones(len(cells), dtype=np.int32), (np.arange(len(cells)), [position[labels[c]] for c in cells])),
         shape=(len(cells), len(units)),
@@ -213,7 +215,8 @@ def candidate_maps(
 ) -> CandidateMaps:
     """Finest modules, then separate pieces, then the size floor, then the merge sequence.
 
-    Flooring first keeps exactly one map per realm count, and a merge only coarsens, so pieces need resolving just once.
+    Flooring first keeps exactly one map per realm count, and a merge only coarsens, so pieces need resolving just once. Pass
+    `rank_presence` here when the network uses several ranks, so that pieces and merges see the same evolutionary depth.
     """
     units = resolve_pieces(partition.leaf_labels(), adjacency, presence)
     floored, sub_realms = apply_size_floor(units, areas, presence, floor_km2)

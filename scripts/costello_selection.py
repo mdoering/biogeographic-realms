@@ -16,7 +16,7 @@ from shapely.geometry import Point
 from realms.candidates import DegenerateClustering, candidate_maps
 from realms.cluster import run_infomap
 from realms.costello import csquare_adjacency, csquare_area_km2, csquare_bounds, load_matrix
-from realms.endemism import endemism_score, presence_by_rank, realm_endemism
+from realms.endemism import endemism_score, presence_by_rank, rank_presence, realm_endemism
 from realms.fetch import fetch
 from realms.maps import plot_cells
 from realms.network import build_network
@@ -28,6 +28,7 @@ MATRIX = Path("data/costello/obis_2009_csq.csv")
 OUT = Path("results/costello")
 GAZETTEERS = Path("data/reference/gazetteers")
 RAW = "https://raw.githubusercontent.com/CatalogueOfLife/col-gazetteers/main"
+RANKS = ("species", "genus")
 
 
 def stamp(message: str, started: float) -> None:
@@ -72,7 +73,7 @@ def main() -> None:
     ranks = presence_by_rank(presence, taxa)
     stamp(f"{presence.height} presences, {len(cells)} cells, ranks {list(ranks)}", started)
 
-    net = build_network(presence, taxa, ranks=("species", "genus"))
+    net = build_network(presence, taxa, ranks=RANKS)
     stamp(f"network: {len(net.taxa)} taxa, {len(net.weight)} links", started)
     partition = run_infomap(net, seed=1, trials=10)
     leaves = partition.leaf_labels()
@@ -84,14 +85,14 @@ def main() -> None:
     plot_cells(list(leaves), list(leaves.values()), csquare_bounds, OUT / "infomap_leaf_modules.png", "Infomap leaf modules, species and genus")
 
     try:
-        result = candidate_maps(partition, presence, areas, adjacency)
+        result = candidate_maps(partition, rank_presence(presence, taxa, RANKS), areas, adjacency)
     except DegenerateClustering as e:
         stamp(f"DEGENERATE: {e}", started)
         return
     maps = result.maps
     stamp(f"candidates: k from {min(maps)} to {max(maps)}, {len(result.sub_realms)} sub-realms: {result.sub_realms}", started)
 
-    stability = bootstrap_stability(presence, taxa, maps, areas, adjacency, n_boot=args.boot)
+    stability = bootstrap_stability(presence, taxa, maps, areas, adjacency, n_boot=args.boot, ranks=RANKS)
     stamp("stability done", started)
     excess = {k: endemism_excess(maps[k], ranks, adjacency, areas, n_null=args.null) for k in sorted(maps)}
     stamp("excess done", started)
