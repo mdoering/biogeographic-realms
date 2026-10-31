@@ -189,6 +189,24 @@ def test_scan_counts_without_parts_fails(tmp_path):
         scan_counts(tmp_path)
 
 
+# the seal and scan_counts
+
+ROOT = Path(__file__).parent.parent
+# `scan_counts` reads every species, half B included, without the seal. These are its only readers: `qa`, called by the script, which gives
+# global numbers only, and `_select`, which checks the seal first. DECISIONS.md lists them in its seal paragraph, so a new reader needs a ruling.
+SCAN_COUNTS_READERS = {"src/realms/occurrences.py", "scripts/ingest.py"}
+
+
+def test_only_the_qa_script_and_the_sealed_loaders_read_scan_counts():
+    readers = {
+        path.relative_to(ROOT).as_posix()
+        for folder in ("src", "scripts")
+        for path in (ROOT / folder).rglob("*.py")
+        if "scan_counts" in path.read_text()
+    }
+    assert readers == SCAN_COUNTS_READERS, "scan_counts bypasses the seal on half B: add a reader only with a ruling listed in DECISIONS.md"
+
+
 # qa
 
 QA_ROWS = [

@@ -395,5 +395,10 @@ unless the three pass marks hold. Run it as `uv run python -I`, since it reads a
   lineage or per-taxon figure. The unaccepted-species check gives how many species and rows and names none, where `check_columns.py` lists
   examples, so no figure can be traced to a taxon. Unknown cells are listed (up to 10 codes), since a cell is not a taxon.
   - **`unsealed=True` call sites so far:** none. The calibration on half B's plants is planned as the only one before the freeze, and will be listed here.
+  - **`scan_counts` reads, which are not sealed:** `scan_counts` is public and returns every species, half B included, so the seal doesn't cover it.
+    It has two readers, and both touch all species: `qa`, called from `scripts/ingest.py`, which produces global numbers only, and
+    `_select` in `realms/occurrences.py`, which checks the seal before it reads and returns half A, or half B only when `unsealed=True`.
+    `tests/test_occurrences.py` fails if any other module under `src/` or `scripts/` mentions `scan_counts`, so a new reader needs a ruling
+    listed here.
 - **Not done here:** how many sea-part records are terrestrial species on the coast (open since the column check) needs the species'
   environment, and wasn't part of this check.
