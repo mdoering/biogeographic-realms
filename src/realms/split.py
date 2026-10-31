@@ -4,10 +4,15 @@ Whole families go to one half or the other, so relatives of an endemic family ne
 test. Half A is for exploring, half B stays untouched until the pipeline is frozen.
 """
 
+import hashlib
+from pathlib import Path
+
 import numpy as np
 import polars as pl
 
 SPLIT_SEED: int = 20261031
+# The canonical hash of the split for COL release 315557, as made by scripts/write_split.py.
+SPLIT_SHA256: str = "88f237b47d4964108c161e08acb00c9cf03601418dd2e0f16b49a43704845fa9"
 OTHER_GROUP = "other"
 
 
@@ -67,3 +72,25 @@ def assign_halves(taxa: pl.DataFrame, seed: int = SPLIT_SEED) -> pl.DataFrame:
 
     assignment = pl.DataFrame({"lineage": list(halves), "half": list(halves.values())}, schema={"lineage": pl.String, "half": pl.String})
     return df.join(assignment, on="lineage", how="left", maintain_order="left")
+
+
+def split_sha256(split: pl.DataFrame) -> str:
+    """The sha256 of the split's content: the rows `species_id TAB lineage TAB half LF`, sorted by species_id, as UTF-8.
+
+    The content is hashed, not the Parquet file, whose bytes carry the writer's version and would change with a Polars upgrade.
+    """
+    rows = split.select("species_id", "lineage", "half")
+    if any(rows.null_count().row(0)):
+        raise ValueError("the split has null values in species_id, lineage or half")
+    lines = pl.concat_str("species_id", pl.lit("\t"), "lineage", pl.lit("\t"), "half", pl.lit("\n"))
+    content = rows.sort("species_id").select(lines.str.join("")).item()
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def load_split(path: Path, sha256: str = SPLIT_SHA256) -> pl.DataFrame:
+    """Read the frozen split (species_id, lineage, half), refusing a file whose content hash differs from `sha256`."""
+    split = pl.read_parquet(path)
+    found = split_sha256(split)
+    if found != sha256:
+        raise ValueError(f"{path} has content hash {found}, not the frozen {sha256}")
+    return split

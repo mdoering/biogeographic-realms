@@ -1,6 +1,9 @@
-import polars as pl
+import hashlib
 
-from realms.split import assign_halves
+import polars as pl
+import pytest
+
+from realms.split import assign_halves, load_split, split_sha256
 
 
 def taxa(rows):
@@ -90,3 +93,44 @@ def test_null_group_follows_the_rest_of_its_family():
 def test_same_family_name_in_two_kingdoms_is_two_lineages():
     df = taxa([("s1", "g", "Foo", "O", "C"), ("s2", "g", "Foo", "O", "C")]).with_columns(pl.Series("kingdom", ["Animalia", "Plantae"]))
     assert sorted(assign_halves(df)["lineage"]) == ["family:Animalia:Foo", "family:Plantae:Foo"]
+
+
+def write_split(path, df):
+    df.select("species_id", "lineage", "half").sort("species_id").write_parquet(path)
+
+
+def test_split_sha256_is_the_hash_of_the_sorted_rows():
+    df = pl.DataFrame(
+        {"species_id": ["s2", "é1", "s10"], "lineage": ["order:O", "species:é1", "family:F"], "half": ["A", "A", "B"]},
+    )
+    content = "s10\tfamily:F\tB\ns2\torder:O\tA\né1\tspecies:é1\tA\n".encode()
+    assert split_sha256(df) == hashlib.sha256(content).hexdigest()
+    assert split_sha256(df.reverse()) == split_sha256(df)
+    assert split_sha256(df.select("half", "lineage", "species_id", pl.lit(1).alias("extra"))) == split_sha256(df)
+
+
+def test_split_sha256_refuses_a_missing_value():
+    df = pl.DataFrame({"species_id": ["s1", "s2"], "lineage": ["family:F", None], "half": ["A", "B"]})
+    with pytest.raises(ValueError, match="null"):
+        split_sha256(df)
+
+
+def test_load_split_returns_the_file_when_its_hash_matches(tmp_path):
+    df = assign_halves(families([3, 5, 2, 7]))
+    path = tmp_path / "halves.parquet"
+    write_split(path, df)
+    loaded = load_split(path, sha256=split_sha256(df))
+    assert loaded.columns == ["species_id", "lineage", "half"]
+    assert species_half(loaded) == species_half(df)
+
+
+def test_load_split_refuses_a_changed_file(tmp_path):
+    df = assign_halves(families([3, 5, 2, 7]))
+    expected = split_sha256(df)
+    other = {"A": "B", "B": "A"}[df["half"][0]]
+    flipped = df.with_columns(pl.when(pl.col("species_id") == df["species_id"][0]).then(pl.lit(other)).otherwise(pl.col("half")).alias("half"))
+    assert species_half(flipped) != species_half(df)
+    path = tmp_path / "halves.parquet"
+    write_split(path, flipped)
+    with pytest.raises(ValueError, match="halves.parquet"):
+        load_split(path, sha256=expected)

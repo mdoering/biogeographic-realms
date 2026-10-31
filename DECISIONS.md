@@ -234,3 +234,67 @@ them, k = 5 to 60.
 - **`--markov-time` is passed only when it isn't 1.0,** so the default command line is the one Infomap ran before. Below 1 gives more,
   smaller modules. `bootstrap_stability` takes the same value as the run that made the maps, as it does for `trials` and the size floor.
   `costello_selection.py` has no flag for it, because no run uses anything but the default yet.
+
+### Family split frozen (2026-10-31)
+
+Written before anything is clustered on GBIF data, by `scripts/write_split.py` to `data/split/halves-315557.parquet` (columns `species_id`,
+`lineage`, `half`, sorted by `species_id`; not committed). The freeze (M2) cites the hash below.
+
+- **Inputs:** COL release 315557, seed `20261031`, `load_taxa` left-joined to `load_tax_groups` on `species_id` (`tax_group` as `group`, null
+  where a species has none), then `assign_halves`. 2,529,340 species in 46,615 lineages, and the file is the same on a second run.
+- **`SPLIT_SHA256` = `88f237b47d4964108c161e08acb00c9cf03601418dd2e0f16b49a43704845fa9`.** It hashes the content and not the Parquet file,
+  whose bytes carry the writer's version, so a Polars upgrade would fail an unchanged split. The content is the UTF-8 rows
+  `species_id TAB lineage TAB half LF`, sorted by `species_id` (byte order). `split.split_sha256` computes it for both the script and
+  `split.load_split`, which raises `ValueError` when a file's hash differs. An independent Python sort and loop on the real file gives the
+  same hash.
+- **Balance:** half A has 1,264,661 species in 23,335 lineages, half B 1,264,679 in 23,280. By lineage rank: 15,866 families, 391 orders, 104
+  classes and 30,254 species with no family, order or class, each its own lineage (15,170 in A, 15,084 in B).
+- **Per group,** counting each species under its own group, so a lineage that spans groups is counted in each and the lineages sum to more than
+  46,615:
+
+| Group | Species A | Species B | Lineages A | Lineages B |
+|---|---|---|---|---|
+| (none) | 2,312 | 2,313 | 40 | 39 |
+| algae | 10,138 | 10,138 | 287 | 288 |
+| angiosperms | 185,871 | 186,764 | 229 | 229 |
+| animals | 12,152 | 12,226 | 12,050 | 12,049 |
+| arachnids | 57,131 | 57,131 | 413 | 412 |
+| archaea | 382 | 382 | 23 | 24 |
+| arthropods | 1,823 | 1,425 | 44 | 49 |
+| ascomycetes | 56,613 | 56,613 | 2,248 | 2,249 |
+| bacteria | 10,739 | 10,739 | 321 | 321 |
+| basidiomycetes | 28,754 | 28,753 | 176 | 176 |
+| bivalves | 14,295 | 14,296 | 174 | 176 |
+| bryophytes | 10,381 | 10,380 | 136 | 137 |
+| chordates | 46,475 | 46,452 | 935 | 937 |
+| coleoptera | 188,848 | 188,872 | 107 | 108 |
+| crustacean | 43,668 | 44,050 | 691 | 692 |
+| diptera | 90,414 | 90,458 | 118 | 119 |
+| eukaryotes | 3,439 | 2,605 | 672 | 672 |
+| fungi | 108 | 141 | 91 | 1 |
+| gastropods | 56,335 | 56,276 | 404 | 405 |
+| gymnosperms | 881 | 880 | 13 | 13 |
+| hemiptera | 58,699 | 58,698 | 143 | 143 |
+| hymenoptera | 81,535 | 81,405 | 79 | 80 |
+| insects | 260 | 453 | 38 | 3 |
+| lepidoptera | 91,218 | 91,218 | 75 | 75 |
+| molluscs | 271 | 272 | 17 | 21 |
+| orthoptera | 15,492 | 15,491 | 42 | 43 |
+| otheranimals | 80,789 | 80,788 | 1,756 | 1,756 |
+| otherarthropods | 17,962 | 17,963 | 231 | 233 |
+| otherfungi | 1,739 | 1,740 | 95 | 95 |
+| otherinsects | 33,875 | 33,874 | 322 | 321 |
+| othermolluscs | 7,676 | 7,618 | 318 | 320 |
+| plants | 290 | 291 | 238 | 247 |
+| prokaryotes | 0 | 1 | 0 | 1 |
+| protists | 30,604 | 30,605 | 578 | 578 |
+| pseudofungi | 1,048 | 924 | 1 | 37 |
+| pteridophytes | 7,318 | 7,318 | 30 | 32 |
+| trichoptera | 6,879 | 6,879 | 24 | 24 |
+| viruses | 8,247 | 8,247 | 187 | 187 |
+
+- **Where a group's halves differ by more than a few species,** one large lineage sits on one side: `Periconiaceae` (141 species) in B for
+  `fungi`, `Peronosporaceae` (1,048) in A for `pseudofungi`, class `Insecta` (321) in B for `insects`, and `Cyclopidae` (1,085) and class
+  `Copepoda` (388) in A for `arthropods`. A lineage is balanced under its most common group and takes its other-group species with it, so the
+  856 `Asteraceae` species grouped as `eukaryotes` sit in A with the rest of the family. 23 lineages hold species of several groups (70,012
+  species).
