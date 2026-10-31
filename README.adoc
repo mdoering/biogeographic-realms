@@ -1,0 +1,23 @@
+= Global biogeographic realms from GBIF occurrences
+
+An attempt to divide the whole globe, land and sea, into large non-overlapping realms from GBIF occurrence records alone,
+defined by endemism at species, genus and family level, and to test how well existing schemes hold up against the result.
+
+This is a scientific analysis, not a gazetteer. See link:docs/design.md[the design] for the method, and
+link:DECISIONS.md[the decision log] for every change to it.
+
+== Setup
+
+Requires Python 3.13 and https://docs.astral.sh/uv/[uv].
+
+[source,bash]
+----
+uv sync
+uv run pytest
+----
+
+== Layout
+
+`src/realms/`:: The analysis package.
+`tests/`:: Unit tests.
+`data/`, `results/`:: Downloads and outputs. Neither is committed.
