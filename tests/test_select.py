@@ -143,3 +143,25 @@ def test_stability_needs_species_to_resample():
     presence, taxa, truth = planted_network(n_realms=2, cells_per_realm=6, endemic_species=20, widespread_species=0)
     with pytest.raises(ValueError, match="species"):
         bootstrap_stability(cell_taxa(presence, taxa, ("genus",)), {2: truth}, {c: 1e6 for c in truth}, {c: set() for c in truth}, n_boot=1)
+
+
+def planted_maps():
+    presence, taxa, truth = planted_network(n_realms=6, cells_per_realm=10, endemic_species=30, widespread_species=5)
+    areas = {c: 1e6 for c in truth}
+    adjacency = {c: set() for c in truth}
+    ct = cell_taxa(presence, taxa)
+    maps = candidate_maps(run_infomap(network_from(ct)), ct, areas, adjacency, k_min=2).maps
+    return ct, maps, areas, adjacency
+
+
+def test_bootstrap_workers_do_not_change_results():
+    ct, maps, areas, adjacency = planted_maps()
+    alone = bootstrap_stability(ct, maps, areas, adjacency, n_boot=4)
+    assert len(set(alone.values())) > 1  # the maps are told apart, so equal results aren't equal constants
+    assert bootstrap_stability(ct, maps, areas, adjacency, n_boot=4, workers=2) == alone
+    assert bootstrap_stability(ct, maps, areas, adjacency, n_boot=4, workers=8) == alone  # more workers than bootstraps
+
+
+def test_bootstrap_markov_time_reaches_the_reruns():
+    ct, maps, areas, adjacency = planted_maps()
+    assert bootstrap_stability(ct, maps, areas, adjacency, n_boot=3, markov_time=0.5) != bootstrap_stability(ct, maps, areas, adjacency, n_boot=3)

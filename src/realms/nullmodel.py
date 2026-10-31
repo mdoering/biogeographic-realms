@@ -7,6 +7,7 @@ import numpy as np
 from realms.candidates import connected_pieces
 from realms.endemism import Labels, area_weighted, realm_share
 from realms.matrix import CellTaxa, Incidence
+from realms.parallel import map_tasks
 
 MAX_SWEEPS = 200
 
@@ -156,6 +157,40 @@ def null_partitions(
     return [_one_partition(pieces, cells, adjacency, areas, rng) for _ in range(n)]
 
 
+def _rank_tables(ct: CellTaxa, cells: list[str]) -> list[Incidence]:
+    """One incidence of `cells` per rank of the matrix, species first as RANKS has it."""
+    everything = ct.rows(cells)
+    tables = []
+    for rank in np.unique(ct.rank):
+        columns = np.flatnonzero(ct.rank == rank)
+        tables.append(Incidence(everything.x[:, columns], everything.totals[columns]))
+    return tables
+
+
+def _excess(
+    labels: Labels,
+    cells: list[str],
+    cell_area: np.ndarray,
+    tables: list[Incidence],
+    adjacency: dict[str, set[str]],
+    areas: dict[str, float],
+    n_null: int,
+    seed: int,
+    tolerance: float,
+) -> float:
+    realms = sorted(set(labels.values()))
+    position = {r: i for i, r in enumerate(realms)}
+    nulls = null_partitions(labels, adjacency, areas, n=n_null, seed=seed)
+    observed_realm = np.array([position[labels[c]] for c in cells])
+    null_realms = [np.array([position[null[c]] for c in cells]) for null in nulls]
+
+    def score(table: Incidence, cell_realm: np.ndarray) -> float:
+        return area_weighted(realm_share(table, cell_realm, len(realms), tolerance), cell_realm, cell_area)
+
+    excess = [score(table, observed_realm) - float(np.mean([score(table, realm) for realm in null_realms])) for table in tables]
+    return float(np.mean(excess))
+
+
 def endemism_excess(
     labels: Labels,
     ct: CellTaxa,
@@ -168,19 +203,35 @@ def endemism_excess(
     """Area-weighted endemism above the mean of the null maps, averaged equally across the ranks present in `ct`."""
     cells = sorted(labels)
     cell_area = np.array([areas[c] for c in cells])
-    realms = sorted(set(labels.values()))
-    position = {r: i for i, r in enumerate(realms)}
-    nulls = null_partitions(labels, adjacency, areas, n=n_null, seed=seed)
-    observed_realm = np.array([position[labels[c]] for c in cells])
-    null_realms = [np.array([position[null[c]] for c in cells]) for null in nulls]
+    return _excess(labels, cells, cell_area, _rank_tables(ct, cells), adjacency, areas, n_null, seed, tolerance)
 
-    def score(table: Incidence, cell_realm: np.ndarray) -> float:
-        return area_weighted(realm_share(table, cell_realm, len(realms), tolerance), cell_realm, cell_area)
 
-    everything = ct.rows(cells)
-    excess = []
-    for rank in np.unique(ct.rank):  # species first, as RANKS has it
-        columns = np.flatnonzero(ct.rank == rank)
-        table = Incidence(everything.x[:, columns], everything.totals[columns])
-        excess.append(score(table, observed_realm) - float(np.mean([score(table, realm) for realm in null_realms])))
-    return float(np.mean(excess))
+def _excess_of_map(shared: tuple, labels: Labels) -> float:
+    cells, cell_area, tables, adjacency, areas, n_null, seed, tolerance = shared
+    return _excess(labels, cells, cell_area, tables, adjacency, areas, n_null, seed, tolerance)
+
+
+def excess_table(
+    maps: dict[int, Labels],
+    ct: CellTaxa,
+    adjacency: dict[str, set[str]],
+    areas: dict[str, float],
+    n_null: int = 99,
+    seed: int = 1,
+    tolerance: float = 0.95,
+    workers: int = 1,
+) -> dict[int, float]:
+    """`endemism_excess` of each map, which all have to cover the same cells, in the order of `maps`.
+
+    The incidence of each rank is built once for those cells and handed to each worker as it starts. A worker takes whole maps,
+    drawing the null maps of its map from the same `seed` as a call to `endemism_excess` would, so the values are the same for
+    any number of `workers`.
+    """
+    if not maps:
+        return {}
+    cells = sorted(next(iter(maps.values())))
+    if any(labels.keys() != set(cells) for labels in maps.values()):
+        raise ValueError("excess_table needs every map on the same cells")
+    cell_area = np.array([areas[c] for c in cells])
+    shared = (cells, cell_area, _rank_tables(ct, cells), adjacency, areas, n_null, seed, tolerance)
+    return dict(zip(maps, map_tasks(_excess_of_map, list(maps.values()), shared, workers)))

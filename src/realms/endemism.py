@@ -18,7 +18,7 @@ def realm_share(table: Incidence, cell_realm: np.ndarray, n_realms: int, toleran
     membership = coo_matrix(
         (np.ones(len(cell_realm), dtype=np.int32), (np.arange(len(cell_realm)), cell_realm)), shape=(x.shape[0], n_realms)
     ).tocsr()
-    counts = (x.T @ membership).tocoo()
+    counts = (table.xt @ membership).tocoo()
     present = np.bincount(counts.col, minlength=n_realms)
     endemic_rows = counts.data / totals[counts.row] >= tolerance
     endemic = np.bincount(counts.col[endemic_rows], minlength=n_realms)

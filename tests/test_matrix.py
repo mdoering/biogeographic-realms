@@ -142,6 +142,14 @@ def test_rows_keep_the_order_asked_for_and_repeat_a_cell_asked_twice():
     assert np.array_equal(got, everything[[3, 0, 3]])
 
 
+def test_incidence_transpose_is_the_taxa_by_cells_matrix_built_once():
+    presence, taxa = hand_made_case()
+    table = cell_taxa(presence, taxa).rows(["d", "a", "b"])
+    assert table.xt.shape == table.x.T.shape and table.xt.format == "csr"
+    assert (table.xt != table.x.T).nnz == 0
+    assert table.xt is table.xt
+
+
 def test_species_ids_follow_column_order():
     presence, taxa = hand_made_case()
     assert cell_taxa(presence, taxa).species_ids() == ["s1", "s2", "s3", "s4", "s5"]

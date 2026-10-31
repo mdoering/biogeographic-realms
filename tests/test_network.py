@@ -1,9 +1,13 @@
 import math
 
+import infomap
 import polars as pl
 import pytest
 
+import reference_impl as ref
+from realms.cluster import run_infomap
 from realms.network import build_network, information_weight
+from realms.synth import planted_network
 
 
 def presence(rows):
@@ -124,3 +128,49 @@ def test_species_of_one_genus_id_share_a_node():
     p = presence([("a", "s1"), ("b", "s2"), ("c", "s3")])
     net = build_network(p, taxa([("s1", "G", None), ("s2", "G", None), ("s3", "H", None)]), ranks=("genus",))
     assert net.taxa == ["genus:G", "genus:H"]
+
+
+def planted_net(ranks=("species", "genus", "family")):
+    presence, taxa, _ = planted_network(n_realms=6, cells_per_realm=10, endemic_species=30, widespread_species=5)
+    return build_network(presence, taxa, ranks)
+
+
+def test_bulk_links_give_the_reference_partition():
+    net = planted_net()
+    assert len(set(ref.run_infomap(net).leaf_labels().values())) > 1  # a real clustering, so the comparison says something
+    assert run_infomap(net) == ref.run_infomap(net)
+    assert run_infomap(net, seed=4, trials=2) == ref.run_infomap(net, seed=4, trials=2)
+
+
+def test_bulk_links_keep_a_cell_without_links_unassigned():
+    presence, taxa, _ = planted_network(n_realms=2, cells_per_realm=5, endemic_species=10, widespread_species=0)
+    with_empty = pl.concat([presence, pl.DataFrame({"cell": ["empty"], "species_id": [None]}, schema=presence.schema)])
+    net = build_network(with_empty)
+    assert run_infomap(net) == ref.run_infomap(net)
+    assert run_infomap(net).unassigned == ["empty"]
+
+
+def leaf_modules(partition):
+    return len(set(partition.leaf_labels().values()))
+
+
+def test_markov_time_below_one_gives_more_modules():
+    net = planted_net(ranks=("species",))
+    assert leaf_modules(run_infomap(net, markov_time=0.5)) > leaf_modules(run_infomap(net, markov_time=1.0))
+
+
+def test_default_markov_time_leaves_the_command_line_alone(monkeypatch):
+    flags = []
+    real = infomap.Infomap
+
+    def spy(options=""):
+        flags.append(options)
+        return real(options)
+
+    monkeypatch.setattr(infomap, "Infomap", spy)
+    net = planted_net()
+    run_infomap(net)
+    run_infomap(net, markov_time=1.0)
+    run_infomap(net, markov_time=0.5)
+    assert flags[0] == flags[1] == "--flow-model undirected --seed 1 --num-trials 10 --silent"
+    assert flags[2] == flags[0] + " --markov-time 0.5"

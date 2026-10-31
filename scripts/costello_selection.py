@@ -22,7 +22,7 @@ from realms.maps import plot_cells
 from realms.matrix import RANKS as ALL_RANKS
 from realms.matrix import cell_taxa
 from realms.network import network_from
-from realms.nullmodel import endemism_excess
+from realms.nullmodel import excess_table
 from realms.score import v_measure
 from realms.select import bootstrap_stability, select_level
 
@@ -62,6 +62,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--boot", type=int, default=20)
     parser.add_argument("--null", type=int, default=99)
+    parser.add_argument("--workers", type=int, default=1, help="processes for the bootstraps and the null maps, which give the same results as one")
     args = parser.parse_args()
 
     started = time.time()
@@ -96,9 +97,9 @@ def main() -> None:
     maps = result.maps
     stamp(f"candidates: k from {min(maps)} to {max(maps)}, {len(result.sub_realms)} sub-realms: {result.sub_realms}", started)
 
-    stability = bootstrap_stability(ct, maps, areas, adjacency, n_boot=args.boot)
+    stability = bootstrap_stability(ct, maps, areas, adjacency, n_boot=args.boot, workers=args.workers)
     stamp("stability done", started)
-    excess = {k: endemism_excess(maps[k], ct, adjacency, areas, n_null=args.null) for k in sorted(maps)}
+    excess = excess_table(maps, ct, adjacency, areas, n_null=args.null, workers=args.workers)
     stamp("excess done", started)
 
     table = pl.DataFrame(

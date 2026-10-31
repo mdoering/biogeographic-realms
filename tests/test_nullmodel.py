@@ -1,11 +1,12 @@
 import numpy as np
+import pytest
 
 import reference_impl as ref
 from helpers import grid
 from realms.candidates import connected_pieces
 from realms.endemism import area_weighted, realm_share
 from realms.matrix import cell_taxa
-from realms.nullmodel import endemism_excess, null_partitions
+from realms.nullmodel import endemism_excess, excess_table, null_partitions
 from realms.synth import planted_network
 
 
@@ -133,3 +134,32 @@ def test_endemism_excess_averages_the_ranks_of_the_matrix():
     ct = cell_taxa(presence, taxa)
     excess = {r: endemism_excess(truth, ct.select([r]), adjacency, areas, n_null=9) for r in ("species", "genus", "family")}
     assert endemism_excess(truth, ct, adjacency, areas, n_null=9) == float(np.mean(list(excess.values())))
+
+
+def test_excess_table_equals_endemism_excess():
+    presence, taxa, truth, adjacency, areas = planted_on_grid(shuffle_space=False)
+    ct = cell_taxa(presence, taxa)
+    maps = {3: truth, 2: {c: min(r, 1) for c, r in truth.items()}, 4: null_partitions(truth, adjacency, areas, n=1, seed=8)[0]}
+    old = {k: endemism_excess(maps[k], ct, adjacency, areas, n_null=9, seed=2) for k in maps}
+    assert len(set(old.values())) == len(maps)
+    assert excess_table(maps, ct, adjacency, areas, n_null=9, seed=2, workers=2) == old
+    assert excess_table(maps, ct, adjacency, areas, n_null=9, seed=2) == old
+    assert list(excess_table(maps, ct, adjacency, areas, n_null=9, seed=2, workers=8)) == list(maps)  # more workers than maps
+
+
+def test_excess_table_keeps_the_tolerance():
+    presence, taxa, truth, adjacency, areas = planted_on_grid(shuffle_space=False)
+    ct = cell_taxa(presence, taxa)
+    maps = {4: null_partitions(truth, adjacency, areas, n=1, seed=8)[0]}  # realms that cut across the planted ones
+    lax = excess_table(maps, ct, adjacency, areas, n_null=9, tolerance=0.5, workers=2)
+    strict = excess_table(maps, ct, adjacency, areas, n_null=9, tolerance=1.0, workers=2)
+    assert lax != strict
+    assert lax == {4: endemism_excess(maps[4], ct, adjacency, areas, n_null=9, tolerance=0.5)}
+    assert strict == {4: endemism_excess(maps[4], ct, adjacency, areas, n_null=9, tolerance=1.0)}
+
+
+def test_excess_table_needs_every_map_on_the_same_cells():
+    presence, taxa, truth, adjacency, areas = planted_on_grid(shuffle_space=False)
+    smaller = dict(list(truth.items())[:-1])
+    with pytest.raises(ValueError, match="same cells"):
+        excess_table({3: truth, 2: smaller}, cell_taxa(presence, taxa), adjacency, areas, n_null=3)

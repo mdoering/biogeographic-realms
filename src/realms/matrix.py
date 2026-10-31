@@ -7,6 +7,7 @@ string-keyed tables from the presence rows.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 import polars as pl
@@ -20,6 +21,11 @@ SPECIES = RANKS.index("species")
 class Incidence:
     x: csr_matrix  # binary, the cells asked for x all taxa in the table
     totals: np.ndarray  # occupied cells per taxon across the whole table, including cells not asked for
+
+    @cached_property
+    def xt(self) -> csr_matrix:
+        """The transpose, taxa x cells, built on first use and kept. Scoring a map multiplies by it, and a null model scores thousands."""
+        return self.x.T.tocsr()
 
 
 def _check_ranks(ranks: Sequence[str]) -> None:
