@@ -19,6 +19,8 @@ WCVP = 2232
 WRIMS = 26853
 GAZETTEERS = "https://raw.githubusercontent.com/CatalogueOfLife/col-gazetteers/main"
 NATURAL_EARTH_LAND = "https://naciscdn.org/naturalearth/10m/physical/ne_10m_land.zip"
+ISEA3H_GRID = "https://download.gbif.org/grids/ISEA3H/ISEA3H-{}.gpkg"
+ISEA3H_RESOLUTIONS = (5, 6, 7)
 
 
 def get_export(name: str, dataset_key: int, export: ExportInfo | None, manifest: dict, flavour: str = "extended") -> Path | None:
@@ -67,6 +69,10 @@ def main() -> None:
 
     land = fetch(NATURAL_EARTH_LAND, ROOT / "natural_earth" / "ne_10m_land.zip")
     manifest["natural_earth_land"] = {"path": str(land), "size": land.stat().st_size}
+
+    for resolution in ISEA3H_RESOLUTIONS:
+        grid = fetch(ISEA3H_GRID.format(resolution), ROOT / "grids" / f"ISEA3H-{resolution}.gpkg")
+        manifest[f"isea3h_{resolution}"] = {"path": str(grid), "size": grid.stat().st_size}
 
     (ROOT / "manifest.json").write_text(json.dumps(manifest, indent=2))
     missing = sorted(k for k, v in manifest.items() if v.get("status") == "missing")

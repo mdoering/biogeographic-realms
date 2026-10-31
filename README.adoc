@@ -33,8 +33,9 @@ uv run python scripts/costello_repro.py
 uv run python scripts/check_release.py   # which COL release GBIF production uses
 uv run python scripts/test_patterns.py   # sample real records per text term
 uv run python scripts/write_queries.py   # generate and validate queries/, submitting nothing
-uv run python scripts/fetch_reference.py # COL, WCVP, GRIIS, gazetteers and coastline into data/reference
+uv run python scripts/fetch_reference.py # COL, WCVP, GRIIS, gazetteers, coastline and ISEA3H grids into data/reference
 uv run python scripts/check_reference.py # rank coverage, and what WCVP's empty value means
+uv run python scripts/check_grid.py      # ISEA3H resolutions 5 to 7: cells, neighbours, area and land, and the median cell area
 uv run python scripts/write_split.py     # freeze the family split for COL 315557 into data/split and print its hash
 ----
 
