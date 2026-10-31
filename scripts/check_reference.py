@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from realms.reference import load_tax_groups, load_taxa, rank_coverage
+from realms.reference import load_tax_groups, load_taxa, rank_coverage, repeated_names
 
 ROOT = Path("data/reference")
 OUT = Path("results/coverage.json")
@@ -25,6 +25,7 @@ def main() -> None:
     taxa = load_taxa(Path(manifest["col"]["path"]))
     coverage = rank_coverage(taxa)
     coverage["release"] = manifest["col"]["release"]
+    coverage["repeated_names"] = {rank: repeated_names(taxa, rank) for rank in ("genus", "family")}
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(coverage, indent=2))
 
@@ -34,6 +35,7 @@ def main() -> None:
         print(f"  {key:18} {coverage[key]:>9}  {coverage[key] / n:.1%}")
     for kingdom, c in coverage["per_kingdom"].items():
         print(f"  {kingdom:18} {c['species']:>9}  genus {c['with_genus'] / max(c['species'], 1):.1%}  family {c['with_family'] / max(c['species'], 1):.1%}")
+    print(f"names held by several ids within a kingdom: {coverage['repeated_names']}")
 
     groups = load_tax_groups(Path(manifest["col_groups"]["path"])).join(taxa.select("species_id"), on="species_id", how="right")
     print(f"\nspecies with a taxGroup: {groups['tax_group'].drop_nulls().len() / n:.1%}")

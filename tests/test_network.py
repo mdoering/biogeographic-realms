@@ -11,7 +11,7 @@ def presence(rows):
 
 
 def taxa(rows):
-    return pl.DataFrame(rows, schema={"species_id": pl.String, "genus": pl.String, "family": pl.String}, orient="row")
+    return pl.DataFrame(rows, schema={"species_id": pl.String, "genus_id": pl.String, "family_id": pl.String}, orient="row")
 
 
 def links(net):
@@ -64,10 +64,11 @@ def test_missing_rank_creates_no_node():
     assert net.taxa == ["species:s1", "species:s2"]
 
 
-def test_species_missing_from_taxa_keeps_its_species_link():
-    net = build_network(presence([("a", "s1"), ("b", "s2")]), taxa([("s1", "G", "F")]))
-    assert ("b", "species:s2") in links(net)
-    assert "genus:G" in net.taxa
+def test_species_not_listed_as_accepted_never_becomes_a_node():
+    # taxa holds the accepted species, so a synonym id arriving in the presence table must not be clustered
+    net = build_network(presence([("a", "s1"), ("b", "synonym")]), taxa([("s1", "G", "F")]))
+    assert net.taxa == ["family:F", "genus:G", "species:s1"]
+    assert net.cells == ["a", "b"]
 
 
 def test_same_name_at_two_ranks_stays_two_nodes():
@@ -103,12 +104,23 @@ def test_cell_order_does_not_depend_on_row_order():
     assert links(a) == links(b)
 
 
-def test_same_genus_name_in_two_kingdoms_is_two_nodes():
-    # Drosophila is both a fly and a fungus: they must not tie fly cells to fungus cells
+def test_homonym_genera_are_separate_nodes_by_id():
+    # three accepted Drosophila, and names repeat within a kingdom too: only the id says which genus a species is in
     p = presence([("a", "fly"), ("b", "fungus"), ("c", "other")])
     t = pl.DataFrame(
-        {"species_id": ["fly", "fungus", "other"], "genus": ["Drosophila", "Drosophila", "Gus"], "family": ["F1", "F2", "F3"], "kingdom": ["Animalia", "Fungi", "Animalia"]}
+        {
+            "species_id": ["fly", "fungus", "other"],
+            "genus": ["Drosophila", "Drosophila", "Gus"],
+            "genus_id": ["BXWZ6", "8HFX7", "G9"],
+            "kingdom": ["Animalia", "Animalia", "Animalia"],
+        }
     )
     net = build_network(p, t, ranks=("genus",))
-    assert net.taxa == ["genus:Animalia:Drosophila", "genus:Animalia:Gus", "genus:Fungi:Drosophila"]
+    assert net.taxa == ["genus:8HFX7", "genus:BXWZ6", "genus:G9"]
     assert all(w == 1.0 for w in net.weight)
+
+
+def test_species_of_one_genus_id_share_a_node():
+    p = presence([("a", "s1"), ("b", "s2"), ("c", "s3")])
+    net = build_network(p, taxa([("s1", "G", None), ("s2", "G", None), ("s3", "H", None)]), ranks=("genus",))
+    assert net.taxa == ["genus:G", "genus:H"]

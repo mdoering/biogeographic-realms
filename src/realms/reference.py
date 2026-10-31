@@ -22,8 +22,9 @@ SPECIES_COLUMNS = {
     "col:environment": "environment",
     "col:extinct": "extinct",
 }
-USED_COLUMNS = ["col:status", "col:rank", *SPECIES_COLUMNS]
+USED_COLUMNS = ["col:parentID", "col:status", "col:rank", *SPECIES_COLUMNS]
 ACCEPTED = ("accepted", "provisionally accepted")
+ID_RANKS = ("genus", "family")
 GRIIS_ALIAS = re.compile(r"^GRIIS-([A-Z]{2})(?:-(.+))?$")
 
 
@@ -72,8 +73,31 @@ def griis_datasets(api: str = CLB_API) -> list[GriisDataset]:
     return found
 
 
+def _ancestor_ids(usages: pl.DataFrame, species: list[str]) -> pl.DataFrame:
+    """The id of each species' genus and family, walking up `parentID`, which is the only place the export keeps them."""
+    parent = dict(zip(usages["col:ID"].to_list(), usages["col:parentID"].to_list()))
+    rank = dict(zip(usages["col:ID"].to_list(), usages["col:rank"].to_list()))
+    status = dict(zip(usages["col:ID"].to_list(), usages["col:status"].to_list()))
+    found: dict[str, list[str | None]] = {r: [] for r in ID_RANKS}
+    for species_id in species:
+        ancestors = {}
+        usage = parent.get(species_id)
+        while usage is not None:
+            if rank.get(usage) in ID_RANKS:
+                if status[usage] not in ACCEPTED:
+                    raise ValueError(f"accepted species {species_id} sits under {status[usage]} {rank[usage]} {usage}")
+                ancestors.setdefault(rank[usage], usage)
+            usage = parent.get(usage)
+        for r in ID_RANKS:
+            found[r].append(ancestors.get(r))
+    return pl.DataFrame(
+        {"col:ID": species, **{f"{r}_id": found[r] for r in ID_RANKS}},
+        schema={"col:ID": pl.String, **{f"{r}_id": pl.String for r in ID_RANKS}},
+    )
+
+
 def load_taxa(coldp_zip: Path) -> pl.DataFrame:
-    """Accepted species from a COLDP export with a flat classification."""
+    """Accepted species from a COLDP export, with the names of their flat classification and the ids of their genus and family."""
     with zipfile.ZipFile(coldp_zip) as archive:
         name = next((n for n in archive.namelist() if n.rsplit("/", 1)[-1] == "NameUsage.tsv"), None)
         if name is None:
@@ -92,9 +116,10 @@ def load_taxa(coldp_zip: Path) -> pl.DataFrame:
         schema_overrides={c: pl.String for c in USED_COLUMNS},
         null_values=[""],
     )
+    species = usages.filter(pl.col("col:rank") == "species", pl.col("col:status").is_in(ACCEPTED))
     return (
-        usages.filter(pl.col("col:rank") == "species", pl.col("col:status").is_in(ACCEPTED))
-        .select(pl.col(c).alias(n) for c, n in SPECIES_COLUMNS.items())
+        species.join(_ancestor_ids(usages, species["col:ID"].to_list()), on="col:ID", maintain_order="left")
+        .select(*(pl.col(c).alias(n) for c, n in SPECIES_COLUMNS.items()), *(f"{r}_id" for r in ID_RANKS))
         .with_columns((pl.col("extinct") == "true").fill_null(False).alias("extinct"))
     )
 
@@ -124,8 +149,19 @@ def load_tax_groups(classification_zip: Path) -> pl.DataFrame:
 def _counts(taxa: pl.DataFrame) -> dict:
     return {
         "species": taxa.height,
-        "with_genus": taxa["genus"].drop_nulls().len(),
-        "with_family": taxa["family"].drop_nulls().len(),
+        "with_genus": taxa["genus_id"].drop_nulls().len(),
+        "with_family": taxa["family_id"].drop_nulls().len(),
+    }
+
+
+def repeated_names(taxa: pl.DataFrame, rank: str) -> dict:
+    """Names that several ids of a rank hold species under within one kingdom, the species below them, and those not under the name's largest id."""
+    per_id = taxa.filter(pl.col(f"{rank}_id").is_not_null()).group_by("kingdom", rank, f"{rank}_id").len()
+    repeated = per_id.filter(pl.len().over("kingdom", rank) > 1).group_by("kingdom", rank).agg(pl.col("len").sum().alias("species"), pl.col("len").max().alias("largest"))
+    return {
+        "names": repeated.height,
+        "species": int(repeated["species"].sum()),
+        "outside_largest": int((repeated["species"] - repeated["largest"]).sum()),
     }
 
 

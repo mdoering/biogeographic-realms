@@ -87,6 +87,8 @@ _NON_NATIVE_DEGREE = (
     "'colonising','spreading','naturalized','invasive','widespreadInvasive'"
 )
 _CLASH_KINGDOMS = "'animalia','plantae','fungi'"
+# A pro parte name could be any of several taxa and a misapplied one was used for another taxon, so the accepted species GBIF gives is a guess.
+_UNPLACEABLE = "'ambiguous_synonym','misapplied'"
 
 # Layer 1 of the cleaning: the flags GBIF can check. Everything else is counted around this.
 _CLEAN = (
@@ -95,7 +97,8 @@ _CLEAN = (
     f"AND (degreeofestablishment.concept IS NULL OR degreeofestablishment.concept NOT IN ({_NON_NATIVE_DEGREE})) "
     "AND NOT COALESCE(ARRAY_CONTAINS(issue,'TAXON_MATCH_FUZZY'),FALSE) "
     f"AND (v_kingdom IS NULL OR kingdom IS NULL OR LOWER(v_kingdom) NOT IN ({_CLASH_KINGDOMS}) OR LOWER(kingdom) NOT IN ({_CLASH_KINGDOMS}) "
-    "OR LOWER(v_kingdom) = LOWER(kingdom))"
+    "OR LOWER(v_kingdom) = LOWER(kingdom)) "
+    f"AND (taxonomicstatus IS NULL OR LOWER(taxonomicstatus) NOT IN ({_UNPLACEABLE}))"
 )
 _NC = "license = 'CC_BY_NC_4_0'"
 _OPEN = "license IN ('CC0_1_0','CC_BY_4_0')"
@@ -139,6 +142,7 @@ def build_sql(resolution: int, patterns: Sequence[HumanPattern]) -> str:
  COUNT(DISTINCT CASE WHEN ({_CLEAN}) AND {_OPEN} THEN "year" END) AS n_years_open,
  SUM(CASE WHEN ({_CLEAN}) AND datasetkey = '{EBIRD}' THEN 1 ELSE 0 END) AS n_ebird,
  SUM(CASE WHEN ({_CLEAN}) AND datasetkey = '{INATURALIST}' THEN 1 ELSE 0 END) AS n_inat,
+ SUM(CASE WHEN ({_CLEAN}) AND LOWER(taxonomicstatus) = 'synonym' THEN 1 ELSE 0 END) AS n_synonym,
  SUM(CASE WHEN ({_CLEAN}) AND ({human}) THEN 1 ELSE 0 END) AS n_human_text
 FROM occurrence
 WHERE hascoordinate = TRUE AND hasgeospatialissues = FALSE AND occurrencestatus = 'PRESENT' AND specieskey IS NOT NULL

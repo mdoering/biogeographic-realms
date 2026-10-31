@@ -57,20 +57,19 @@ Checked 2026-10-31:
 - A realm may consist of several separate pieces.
 - The headline uses all records, including CC BY-NC. Open-only is a robustness run.
 - A paper is possible, so the downloads carry Markus's name.
-- The work lives in a new repo in the `gbif` org.
+- The work lives in Markus's own repo, `mdoering/biogeographic-realms`, as a personal experiment for now.
+- Genera and families are identified by COL id, never by name, and only accepted COL taxa are compared or clustered.
 - Evolutionary depth matters: it counts if whole genera or families are endemic, not only species.
 
 **Implementation choices**
 - Everything else below, including all numeric thresholds. They are starting values, frozen as described under "Exploring
   and confirming".
 - OSF registration happens when the pipeline is frozen, just before the confirmation run, not up front.
-- The repo is `gbif/biogeographic-realms` (local `~/code/gbif/biogeographic-realms`), Apache-2.0, in Python (DuckDB/Polars,
-  `infomap`, GeoPandas, in a venv). It starts private and goes public at the freeze, since it carries the GBIF name and
-  private can become public but not the reverse. Approving this plan authorises creating it. Nothing goes into the backend repo.
-- GBIF Engineering Handbook rules apply: `README.adoc`, an issue for each non-trivial piece of work, Conventional Commits
-  referencing the issue (`feat(cleaning): ... #12`), docs updated with the code. Markus decided that all work happens directly
-  on `main`, with no feature branches, because this is a one-person repo. The handbook makes the committer responsible for
-  having read AI-written code and discourages unreviewed AI-written issues, so Markus reviews the tracking issue.
+- The repo is public, Apache-2.0, in Python (DuckDB/Polars, `infomap`, GeoPandas, in a venv), checked out at
+  `~/code/gbif/biogeographic-realms`. Nothing goes into the backend repo.
+- `README.adoc`, Conventional Commits, and docs updated with the code. Markus decided that all work happens directly on `main`,
+  with no feature branches, because this is a one-person repo. As a personal repo it has no tracking issue and isn't bound by
+  the GBIF Engineering Handbook.
 
 ## What Costello et al. 2017 did with the same problems
 
@@ -116,9 +115,12 @@ as a column rather than applying it in `WHERE` means every cleaning layer and se
 - **Hard filters only:** coordinate present, no geospatial issue, `occurrencestatus = PRESENT`, species-level match, not
   fossil, uncertainty at most 100 km.
 - **Count columns:** `n_raw` counts everything past the hard filters. The rest count records passing the layer 1 flag checks
-  (not `LIVING_SPECIMEN`, no non-native establishment flag, no fuzzy match, no kingdom clash): `n`, `n_datasets`, `n_years`,
-  `n_nc` (CC BY-NC), `n_open` (CC0 and CC BY), `n_datasets_open`, `n_years_open`, `n_ebird`, `n_inat`, `n_human_text`. The `_open` columns give the
-  open-only run its own support counts.
+  (not `LIVING_SPECIMEN`, no non-native establishment flag, no fuzzy match, no kingdom clash, not matched to an ambiguous synonym
+  or a misapplied name): `n`, `n_datasets`, `n_years`, `n_nc` (CC BY-NC), `n_open` (CC0 and CC BY), `n_datasets_open`,
+  `n_years_open`, `n_ebird`, `n_inat`, `n_synonym`, `n_human_text`. The `_open` columns give the open-only run its own support counts.
+- **Accepted species only:** `specieskey` holds the accepted species even for a record matched through a synonym, so such a record
+  counts for the accepted species rather than being lost, and `n_synonym` allows a run without them. A species missing from the
+  accepted species of the release's export never becomes a node.
 
 **Checked 2026-10-31**
 - The query in exactly this shape passes `POST /occurrence/download/request/validate`, with a placeholder text pattern list.
@@ -156,7 +158,7 @@ This is the core of the project. Layers run in order, and each can be switched o
 
 | Layer | Removes | Catches |
 |---|---|---|
-| 1. Record evidence | `LIVING_SPECIMEN`, non-native establishment flags, fuzzy matches, kingdom clashes, multilingual text patterns in `locality`, `habitat`, `occurrenceremarks` (botanic garden, zoo, cultivated, captive, aquarium...) | Flagged garden, zoo and wrong-match records |
+| 1. Record evidence | `LIVING_SPECIMEN`, non-native establishment flags, fuzzy matches, kingdom clashes, matches to ambiguous synonyms and misapplied names, multilingual text patterns in `locality`, `habitat`, `occurrenceremarks` (botanic garden, zoo, cultivated, captive, aquarium...) | Flagged garden, zoo and wrong-match records |
 | 2. Taxon lists | Extinct species, and a short list of domesticated species and major crops, plus humans | Species with no meaningful wild range |
 | 3. Authoritative ranges | Plants outside WCVP native regions; species x country pairs listed in GRIIS; species flagged in WRiMS, at the level WRiMS allows | Naturalised species, the biggest group that no flag or outlier test can see |
 | 4. Land/sea consistency | A clearly terrestrial species' sea records fold into the land part of that cell, and vice versa. Records far from any coast on the wrong side are dropped. "Clearly" means COL `environment`, or at least 95% of its records on one side. Seabirds stay on both. Freshwater and brackish species aren't folded, as they are what set the Baltic and Black Sea apart in Costello | Coordinate rounding across the shoreline |
@@ -209,8 +211,8 @@ measured through the out-of-native rate.
 
 ## Network and clustering
 
-- **Nodes:** cell parts and taxa at three ranks: species, genus and family. Links are presence only, so bird record volume
-  doesn't dominate.
+- **Nodes:** cell parts and accepted COL taxa at three ranks: species, genus and family, each by its COL id because names repeat,
+  even within a kingdom. Links are presence only, so bird record volume doesn't dominate.
 - **Method:** Infomap on the bipartite network, run hierarchically with a fixed seed. It finds groups of cells sharing
   restricted taxa, which is closest to "defined by endemism".
 - **Evolutionary depth:** this follows Infomap Bioregions 2, which links ancestors to the cells where their descendants occur.
@@ -260,14 +262,15 @@ exploration and still ends in a real test, so registration moves to the freeze i
 
 1. **Split.** Whole families are assigned at random to halves A and B, balanced by major group and species count, with a fixed
    seed. Splitting individual species would put relatives of one endemic family in both halves and inflate the test. Species
-   without a family are assigned by their next rank up. Nothing is clustered on B's taxa, and they aren't inspected, until
+   without a family are assigned by their next rank up. The split alone goes by family name rather than id, so a family COL holds
+   twice can't straddle the halves, while a homonym going along does no harm. Nothing is clustered on B's taxa, and they aren't inspected, until
    step 4. The only use before that is scoring the cleaning calibration on B's plants, against WCVP ranges, with no realms
    involved.
 2. **Explore on A.** Methods and thresholds may change and maps may be viewed until we are happy. Every change is logged in
    `DECISIONS.md` with its reason. Changes are justified by endemism excess, stability and calibration, never by resemblance to
    an existing scheme.
 3. **Freeze.** The pipeline, thresholds, selection rules, border gate and the pass marks for step 4 go into
-   `PREREGISTRATION.md`. The repo goes public, and Markus registers the file on OSF (about 5 minutes with his login). An OSF
+   `PREREGISTRATION.md`, and Markus registers the file on OSF (about 5 minutes with his login). An OSF
    registration can't be edited afterwards, which a Git history can.
 4. **Confirm once on B.** Do B's unseen lineages show endemism excess inside A's realms, at each rank, against the null? How
    closely does a map built from B alone match A's (V-measure)? This asks whether unrelated lineages share the same boundaries,
@@ -322,8 +325,7 @@ alone therefore isn't the test.
 
 ## Steps
 
-1. Create the private `gbif/biogeographic-realms` repo and the tracking issue, fix the family split seed, and write the
-   synthetic planted-realm test.
+1. Create the repo, fix the family split seed, and write the synthetic planted-realm test.
 2. Run the clustering code on Costello's public matrix: reproduce the critique's beta-sim/Ward result, then see what Infomap
    and the selection rules give on the same data.
 3. Read which COL release GBIF production uses. Fetch its export and the other reference data, measure family and genus
@@ -334,7 +336,7 @@ alone therefore isn't the test.
 5. Run the resolution 7 download if the pilot shows it fits. Otherwise stay at resolution 6 and log it.
 6. Build the cleaning layers. Calibrate on half A's plants and score on half B's.
 7. Explore on half A: cluster, build the hierarchy, select a level, iterate. Review maps with Markus.
-8. **Needs Markus:** agree the freeze. Write `PREREGISTRATION.md`, make the repo public, register on OSF.
+8. **Needs Markus:** agree the freeze. Write `PREREGISTRATION.md`, register on OSF.
 9. Confirm once on half B, then run the headline on all species.
 10. Run comparisons and robustness runs, including the border gate.
 11. Build outputs:

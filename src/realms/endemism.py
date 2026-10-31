@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 from scipy.sparse import coo_matrix, csr_matrix
 
-from realms.network import rank_values
+from realms.network import accepted_presence, rank_values
 
 Labels = dict[str, int]
 
@@ -19,13 +19,13 @@ class Incidence:
 
 
 def presence_by_rank(presence: pl.DataFrame, taxa: pl.DataFrame | None) -> dict[str, pl.DataFrame]:
-    """One `cell, species_id` table per rank that has values, with the genus or family in `species_id`."""
-    occupied = presence.filter(pl.col("species_id").is_not_null()).select("cell", "species_id")
-    ranks = {"species": occupied.unique()}
+    """One `cell, species_id` table per rank that has values, with the genus or family id in `species_id`."""
+    occupied = accepted_presence(presence, taxa)
+    ranks = {"species": occupied}
     if taxa is None:
         return ranks
     for rank in ("genus", "family"):
-        if rank not in taxa.columns or taxa[rank].null_count() == taxa.height:
+        if taxa[f"{rank}_id"].null_count() == taxa.height:
             continue
         rolled = occupied.join(rank_values(taxa, rank), on="species_id", how="inner")
         ranks[rank] = rolled.select("cell", pl.col("value").alias("species_id")).unique()

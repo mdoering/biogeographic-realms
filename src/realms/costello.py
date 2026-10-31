@@ -61,14 +61,14 @@ class Matrix:
         return pl.DataFrame({"cell": cells, "species_id": species}, schema={"cell": pl.String, "species_id": pl.String})
 
     def genera(self) -> pl.DataFrame:
-        """Genus is the first word of the name. The matrix has no family, so that column stays null."""
+        """The matrix holds names and no taxonomy, so the first word has to stand in for a genus id, and family stays null."""
         return pl.DataFrame(
             {
                 "species_id": self.species,
-                "genus": [name.split(" ", 1)[0] for name in self.species],
-                "family": [None] * len(self.species),
+                "genus_id": [name.split(" ", 1)[0] for name in self.species],
+                "family_id": [None] * len(self.species),
             },
-            schema={"species_id": pl.String, "genus": pl.String, "family": pl.String},
+            schema={"species_id": pl.String, "genus_id": pl.String, "family_id": pl.String},
         )
 
 

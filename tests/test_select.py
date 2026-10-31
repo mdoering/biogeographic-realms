@@ -73,7 +73,7 @@ def family_only_world():
                 t.append((f"{cell}-s{s}", f"G{cell}", family))
     return (
         pl.DataFrame(p, schema={"cell": pl.String, "species_id": pl.String}, orient="row"),
-        pl.DataFrame(t, schema={"species_id": pl.String, "genus": pl.String, "family": pl.String}, orient="row"),
+        pl.DataFrame(t, schema={"species_id": pl.String, "genus_id": pl.String, "family_id": pl.String}, orient="row"),
         truth,
     )
 

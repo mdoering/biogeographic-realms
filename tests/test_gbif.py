@@ -95,7 +95,7 @@ def test_sql_hard_filters_and_columns_present():
         assert hard in where
     # flags are counted, not filtered: raw counts must still see them
     assert "LIVING_SPECIMEN" not in where
-    for column in ("n_raw", "n_datasets", "n_years", "n_nc", "n_open", "n_datasets_open", "n_years_open", "n_ebird", "n_inat", "n_human_text"):
+    for column in ("n_raw", "n_datasets", "n_years", "n_nc", "n_open", "n_datasets_open", "n_years_open", "n_ebird", "n_inat", "n_synonym", "n_human_text"):
         assert f" AS {column}" in sql
     assert " AS n," in sql
     assert sql.rstrip().endswith("END")
@@ -166,6 +166,17 @@ def test_open_counts_name_the_open_licences():
 def test_kingdom_clash_needs_a_known_kingdom():
     # without this, the record of a species with no kingdom makes the clause NULL and drops out of every clean count
     assert "(v_kingdom IS NULL OR kingdom IS NULL OR LOWER(v_kingdom) NOT IN" in build_sql(7, PATTERNS)
+
+
+def test_matches_that_cant_be_placed_leave_the_clean_count():
+    # a null status must not make the clause NULL, which would drop the record from every clean count
+    assert "(taxonomicstatus IS NULL OR LOWER(taxonomicstatus) NOT IN ('ambiguous_synonym','misapplied'))" in build_sql(7, PATTERNS)
+
+
+def test_records_matched_through_a_synonym_stay_and_are_counted():
+    sql = build_sql(7, PATTERNS)
+    assert "taxonomicstatus" not in sql[sql.index("WHERE") :]
+    assert "LOWER(taxonomicstatus) = 'synonym' THEN 1 ELSE 0 END) AS n_synonym" in sql
 
 
 def test_sql_pads_terms_with_outer_spaces():

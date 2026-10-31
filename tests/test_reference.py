@@ -3,7 +3,7 @@ import zipfile
 import polars as pl
 import pytest
 
-from realms.reference import griis_datasets, latest_export, load_tax_groups, load_taxa, rank_coverage
+from realms.reference import griis_datasets, latest_export, load_tax_groups, load_taxa, rank_coverage, repeated_names
 
 
 def export(key, status="finished", created="2026-07-01", size=10, **request):
@@ -83,15 +83,22 @@ def test_griis_excludes_protected_areas_and_others(api):
     assert [d.alias for d in griis_datasets(api.base)] == ["GRIIS-ZW"]
 
 
-COLUMNS = ["col:ID", "col:status", "col:rank", "col:scientificName", "col:extinct", "col:environment", "col:genus", "col:family", "col:order", "col:class", "col:phylum", "col:kingdom"]
+COLUMNS = ["col:ID", "col:parentID", "col:status", "col:rank", "col:scientificName", "col:extinct", "col:environment", "col:genus", "col:family", "col:order", "col:class", "col:phylum", "col:kingdom"]
 ROWS = [
-    ["F1", "accepted", "family", "Fidae", "", "", "", "", "Oales", "Cea", "Phy", "Animalia"],
-    ["G1", "accepted", "genus", "Gus", "", "", "", "Fidae", "Oales", "Cea", "Phy", "Animalia"],
-    ["S1", "accepted", "species", 'Gus "quoted" bus', "false", "marine", "Gus", "Fidae", "Oales", "Cea", "Phy", "Animalia"],
-    ["S2", "accepted", "species", "Gus cus", "true", "", "Gus", "Fidae", "Oales", "Cea", "Phy", "Animalia"],
-    ["S3", "accepted", "species", "Dus eus", "false", "", "Dus", "", "", "", "", "Plantae"],
-    ["S4", "provisionally accepted", "species", "Dus fus", "false", "", "Dus", "", "", "", "", "Plantae"],
-    ["SY", "synonym", "species", "Gus old", "", "", "", "", "", "", "", ""],
+    ["F1", "", "accepted", "family", "Fidae", "", "", "", "", "Oales", "Cea", "Phy", "Animalia"],
+    ["G1", "F1", "accepted", "genus", "Gus", "", "", "", "Fidae", "Oales", "Cea", "Phy", "Animalia"],
+    ["SG", "G1", "accepted", "subgenus", "Gus (Hus)", "", "", "Gus", "Fidae", "Oales", "Cea", "Phy", "Animalia"],
+    ["S1", "G1", "accepted", "species", 'Gus "quoted" bus', "false", "marine", "Gus", "Fidae", "Oales", "Cea", "Phy", "Animalia"],
+    ["S2", "SG", "accepted", "species", "Gus cus", "true", "", "Gus", "Fidae", "Oales", "Cea", "Phy", "Animalia"],
+    ["G2", "", "accepted", "genus", "Dus", "", "", "", "", "", "", "", "Plantae"],
+    ["S3", "G2", "accepted", "species", "Dus eus", "false", "", "Dus", "", "", "", "", "Plantae"],
+    ["S4", "G2", "provisionally accepted", "species", "Dus fus", "false", "", "Dus", "", "", "", "", "Plantae"],
+    ["SY", "S1", "synonym", "species", "Gus old", "", "", "", "", "", "", "", ""],
+]
+# a second accepted Gus in the same kingdom, as COL has for thousands of genera
+HOMONYM = [
+    ["G3", "", "accepted", "genus", "Gus", "", "", "", "", "", "", "", "Animalia"],
+    ["S5", "G3", "accepted", "species", "Gus hus", "false", "", "Gus", "", "", "", "", "Animalia"],
 ]
 
 
@@ -112,7 +119,9 @@ def test_load_taxa_takes_flat_classification(tmp_path):
     assert row == {
         "species_id": "S1",
         "genus": "Gus",
+        "genus_id": "G1",
         "family": "Fidae",
+        "family_id": "F1",
         "order": "Oales",
         "class": "Cea",
         "phylum": "Phy",
@@ -124,7 +133,38 @@ def test_load_taxa_takes_flat_classification(tmp_path):
 
 def test_load_taxa_reads_empty_as_null(tmp_path):
     row = load_taxa(coldp(tmp_path)).filter(pl.col("species_id") == "S3").row(0, named=True)
-    assert row["family"] is None and row["environment"] is None and row["extinct"] is False
+    assert row["family"] is None and row["family_id"] is None and row["environment"] is None and row["extinct"] is False
+
+
+def test_load_taxa_walks_up_through_ranks_between(tmp_path):
+    row = load_taxa(coldp(tmp_path)).filter(pl.col("species_id") == "S2").row(0, named=True)
+    assert (row["genus_id"], row["family_id"]) == ("G1", "F1")
+
+
+def test_load_taxa_tells_homonym_genera_apart_by_id(tmp_path):
+    taxa = load_taxa(coldp(tmp_path, rows=ROWS + HOMONYM)).filter(pl.col("genus") == "Gus")
+    assert dict(zip(taxa["species_id"], taxa["genus_id"])) == {"S1": "G1", "S2": "G1", "S5": "G3"}
+
+
+def test_load_taxa_species_directly_under_a_family_has_no_genus_id(tmp_path):
+    rows = ROWS + [["S6", "F1", "accepted", "species", "Xus yus", "false", "", "", "Fidae", "Oales", "Cea", "Phy", "Animalia"]]
+    row = load_taxa(coldp(tmp_path, rows=rows)).filter(pl.col("species_id") == "S6").row(0, named=True)
+    assert (row["genus_id"], row["family_id"]) == (None, "F1")
+
+
+def test_load_taxa_refuses_a_genus_that_is_not_accepted(tmp_path):
+    rows = ROWS + [
+        ["GS", "", "synonym", "genus", "Old", "", "", "", "", "", "", "", "Animalia"],
+        ["S7", "GS", "accepted", "species", "Old bus", "false", "", "Old", "", "", "", "", "Animalia"],
+    ]
+    with pytest.raises(ValueError, match="S7.*synonym genus GS"):
+        load_taxa(coldp(tmp_path, rows=rows))
+
+
+def test_repeated_names_count_ids_holding_species_within_a_kingdom(tmp_path):
+    taxa = load_taxa(coldp(tmp_path, rows=ROWS + HOMONYM))
+    assert repeated_names(taxa, "genus") == {"names": 1, "species": 3, "outside_largest": 1}
+    assert repeated_names(taxa, "family") == {"names": 0, "species": 0, "outside_largest": 0}
 
 
 def test_load_taxa_is_not_confused_by_quotes(tmp_path):
@@ -132,7 +172,7 @@ def test_load_taxa_is_not_confused_by_quotes(tmp_path):
 
 
 def test_load_taxa_names_columns_on_mismatch(tmp_path):
-    path = coldp(tmp_path, [c for c in COLUMNS if c != "col:family"], [r[:7] + r[8:] for r in ROWS])
+    path = coldp(tmp_path, [c for c in COLUMNS if c != "col:family"], [r[:8] + r[9:] for r in ROWS])
     with pytest.raises(ValueError, match=r"col:family.*col:genus"):
         load_taxa(path)
 

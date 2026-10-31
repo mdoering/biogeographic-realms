@@ -12,7 +12,11 @@ OTHER_GROUP = "other"
 
 
 def _lineage(columns: list[str]) -> pl.Expr:
-    """A family, or the next rank up if it has none. Names are qualified by kingdom where known, as they aren't unique across kingdoms."""
+    """A family, or the next rank up if it has none.
+
+    By name on purpose, unlike the network: COL holds many families twice under two ids, and those must not straddle the halves, while
+    a true homonym going along does no harm. Names are qualified by kingdom where known.
+    """
     kingdom = pl.col("kingdom").fill_null("?") + pl.lit(":") if "kingdom" in columns else pl.lit("")
     return pl.coalesce(
         pl.lit("family:") + kingdom + pl.col("family"),

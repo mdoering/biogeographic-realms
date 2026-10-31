@@ -47,8 +47,8 @@ def test_score_is_area_weighted():
 def test_presence_by_rank_rolls_up_and_skips_null_ranks():
     p = presence([("a", "s1"), ("a", "s2"), ("b", "s3")])
     taxa = pl.DataFrame(
-        {"species_id": ["s1", "s2", "s3"], "genus": ["G", "G", "H"], "family": [None, None, None]},
-        schema={"species_id": pl.String, "genus": pl.String, "family": pl.String},
+        {"species_id": ["s1", "s2", "s3"], "genus_id": ["G", "G", "H"], "family_id": [None, None, None]},
+        schema={"species_id": pl.String, "genus_id": pl.String, "family_id": pl.String},
     )
     ranks = presence_by_rank(p, taxa)
     assert set(ranks) == {"species", "genus"}
@@ -80,7 +80,19 @@ def test_presence_by_rank_drops_null_species():
     assert presence_by_rank(presence([("a", "s1"), ("b", None)]), None)["species"].rows() == [("a", "s1")]
 
 
-def test_presence_by_rank_keeps_kingdoms_apart():
-    p = presence([("a", "fly"), ("b", "fungus")])
-    taxa = pl.DataFrame({"species_id": ["fly", "fungus"], "genus": ["Drosophila", "Drosophila"], "family": [None, None], "kingdom": ["Animalia", "Fungi"]})
-    assert presence_by_rank(p, taxa)["genus"]["species_id"].n_unique() == 2
+def test_presence_by_rank_keeps_homonyms_apart_by_id():
+    p = presence([("a", "s1"), ("b", "s2")])
+    taxa = pl.DataFrame(
+        {"species_id": ["s1", "s2"], "genus": ["Drosophila", "Drosophila"], "genus_id": ["BXWZ6", "8HFX7"], "family_id": [None, None]},
+        schema={"species_id": pl.String, "genus": pl.String, "genus_id": pl.String, "family_id": pl.String},
+    )
+    assert sorted(presence_by_rank(p, taxa)["genus"].iter_rows()) == [("a", "BXWZ6"), ("b", "8HFX7")]
+
+
+def test_presence_by_rank_counts_accepted_species_only():
+    # a synonym id must not count as a species when comparing cells or scoring endemism
+    p = presence([("a", "s1"), ("b", "synonym")])
+    taxa = pl.DataFrame({"species_id": ["s1"], "genus_id": ["G"], "family_id": ["F"]})
+    ranks = presence_by_rank(p, taxa)
+    assert ranks["species"].rows() == [("a", "s1")]
+    assert ranks["genus"].rows() == [("a", "G")]

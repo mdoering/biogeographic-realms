@@ -69,8 +69,8 @@ def test_presence_lists_occupied_pairs(matrix):
 
 def test_genera_takes_first_word(matrix):
     genera = matrix.genera()
-    assert dict(zip(genera["species_id"], genera["genus"])) == {"Aus bus": "Aus", "Aus cus var": "Aus", "Dus eus": "Dus"}
-    assert genera["family"].null_count() == 3
+    assert dict(zip(genera["species_id"], genera["genus_id"])) == {"Aus bus": "Aus", "Aus cus var": "Aus", "Dus eus": "Dus"}
+    assert genera["family_id"].null_count() == 3
 
 
 def test_plot_cells_writes_an_image(tmp_path):

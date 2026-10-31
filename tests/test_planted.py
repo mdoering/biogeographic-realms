@@ -30,7 +30,7 @@ def single_cell_species(families: dict[str, list[str]]) -> tuple[pl.DataFrame, p
                 t.append((species, f"G{cell}", family))
     return (
         pl.DataFrame(p, schema={"cell": pl.String, "species_id": pl.String}, orient="row"),
-        pl.DataFrame(t, schema={"species_id": pl.String, "genus": pl.String, "family": pl.String}, orient="row"),
+        pl.DataFrame(t, schema={"species_id": pl.String, "genus_id": pl.String, "family_id": pl.String}, orient="row"),
     )
 
 
@@ -51,7 +51,7 @@ def test_cosmopolitan_family_does_not_merge_realms():
     presence, taxa, truth = planted_network()
     in_every_cell = pl.DataFrame({"cell": list(truth), "species_id": [f"cosmo-{c}" for c in truth]})
     cosmo = pl.DataFrame(
-        {"species_id": [f"cosmo-{c}" for c in truth], "genus": [f"Gc-{c}" for c in truth], "family": ["Cosmo"] * len(truth)}
+        {"species_id": [f"cosmo-{c}" for c in truth], "genus_id": [f"Gc-{c}" for c in truth], "family_id": ["Cosmo"] * len(truth)}
     )
     net = build_network(pl.concat([presence, in_every_cell]), pl.concat([taxa, cosmo]))
     assert "family:Cosmo" not in net.taxa

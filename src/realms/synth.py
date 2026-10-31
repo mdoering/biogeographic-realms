@@ -40,6 +40,6 @@ def planted_network(
     truth = {c: r for r, cells in realms.items() for c in cells}
     return (
         pl.DataFrame(presence, schema={"cell": pl.String, "species_id": pl.String}, orient="row"),
-        pl.DataFrame(taxa, schema={"species_id": pl.String, "genus": pl.String, "family": pl.String}, orient="row"),
+        pl.DataFrame(taxa, schema={"species_id": pl.String, "genus_id": pl.String, "family_id": pl.String}, orient="row"),
         truth,
     )

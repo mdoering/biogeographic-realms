@@ -28,12 +28,15 @@ def information_weight(n_cells: int, total_cells: int) -> float:
     return 1.0 - math.log(n_cells) / math.log(total_cells)
 
 
+def accepted_presence(presence: pl.DataFrame, taxa: pl.DataFrame | None) -> pl.DataFrame:
+    """Distinct `cell, species_id` rows without null species. `taxa` lists the accepted species, and anything else stops here."""
+    occupied = presence.filter(pl.col("species_id").is_not_null()).select("cell", "species_id").unique()
+    return occupied if taxa is None else occupied.join(taxa, on="species_id", how="semi")
+
+
 def rank_values(taxa: pl.DataFrame, rank: str) -> pl.DataFrame:
-    """`species_id, value` for a rank, without nulls. Genus and family names recur across kingdoms, so the kingdom qualifies them."""
-    name = pl.col(rank)
-    if "kingdom" in taxa.columns:
-        name = pl.col("kingdom").fill_null("?") + pl.lit(":") + name
-    return taxa.select("species_id", name.alias("value")).filter(pl.col("value").is_not_null())
+    """`species_id, value` for a rank, without nulls. The value is the taxon's id, because names repeat even within a kingdom."""
+    return taxa.select("species_id", pl.col(f"{rank}_id").alias("value")).filter(pl.col("value").is_not_null())
 
 
 def _rank_links(presence: pl.DataFrame, taxa: pl.DataFrame | None, rank: str, total_cells: int) -> pl.DataFrame:
@@ -62,10 +65,10 @@ def build_network(
     """Build the network from `cell, species_id` rows.
 
     A null species_id keeps its cell in the network without a link, so a cell with no species is reported rather than lost.
-    A species with no genus or family simply gets no node at that rank.
+    With `taxa`, only the species it lists become nodes, and one with no genus or family simply gets no node at that rank.
     """
     cells = sorted(presence["cell"].unique().to_list())
-    occupied = presence.filter(pl.col("species_id").is_not_null()).select("cell", "species_id").unique()
+    occupied = accepted_presence(presence, taxa)
     use_ranks = [r for r in ranks if r == "species" or taxa is not None]
 
     links = pl.concat([_rank_links(occupied, taxa, rank, len(cells)) for rank in use_ranks]).filter(pl.col("weight") > 0)
