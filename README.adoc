@@ -16,8 +16,19 @@ uv sync
 uv run pytest
 ----
 
+== Reproducing the critique of Costello et al. 2017
+
+Needs R on the path, because the published result depends on how R's `hclust` breaks ties.
+
+[source,bash]
+----
+uv run python scripts/fetch_costello.py
+uv run python scripts/costello_repro.py
+----
+
 == Layout
 
 `src/realms/`:: The analysis package.
+`scripts/`:: Runs that produce results.
 `tests/`:: Unit tests.
 `data/`, `results/`:: Downloads and outputs. Neither is committed.
