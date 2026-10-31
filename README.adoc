@@ -46,6 +46,7 @@ uv run python -I scripts/ingest.py data/gbif/<key>.zip --resolution 6 # stream a
 [source,bash]
 ----
 uv run python scripts/benchmark.py --species 1000000 # time the cell-taxon matrix on a synthetic grid, about 6 GB at 1M species
+uv run python -I scripts/pilot.py --counts data/gbif/<key> --workers 12 # run the pipeline once on half A at resolution 6, time and weigh every stage, project resolution 7 and write results/pilot/res6/measure.json
 ----
 
 == Layout

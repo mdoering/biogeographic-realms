@@ -402,3 +402,112 @@ unless the three pass marks hold. Run it as `uv run python -I`, since it reads a
     listed here.
 - **Not done here:** how many sea-part records are terrestrial species on the coast (open since the column check) needs the species'
   environment, and wasn't part of this check.
+
+### Pilot at resolution 6, and the scale decision (2026-10-31)
+
+`scripts/pilot.py --counts data/gbif/0019721-261023074918325 --workers 12` ran the pipeline once on half A at resolution 6, from 20:49 to 21:48
+(59 min), and wrote `results/pilot/res6/measure.json` and `pilot.log` (git-ignored). `--project-only` makes the projection again from a saved
+`measure.json`. Nothing of half B is loaded, printed or written: `load_presence(..., "A")` with no `unsealed`, so the call-site list above is still
+empty, and the module summaries below are of half A's parts.
+
+**Data.** 638,157 of half A's 1,264,661 species have a clean record (`n > 0`) in 8,945,552 (species, part) rows, over 9,556 parts (3,066 land and
+6,490 sea) with 28,843 pairs of adjacent parts, two of them with no neighbour. The matrix has 727,680 taxa (638,157 species, 82,306 genera, 7,217
+families) and 14,944,355 links, 737,236 network nodes with the parts. **923 parts have an area below `ZERO_KM2`** (33 land, 890 sea), holding 199,562
+rows, 2.2% of the rows and 0.066% of the clean records. They are kept as they are.
+
+**Stages** (one trial of Infomap each, a process's peak is its own: Infomap, `candidate_maps`, the taxa load and the workers' parent run in child
+processes, and the parent's high-water mark of 7.0 GB is `load_presence`):
+
+| Stage | Time | Peak RSS |
+|---|---|---|
+| load taxa (child) | 12.9 s | 15.1 GB (12.2 to 15.1 over the runs) |
+| load split, grid, presence | 0.2 s, 3.7 s, 1.2 s | parent 7.0 GB |
+| parts, `cell_taxa`, `network_from`, save links | 0.2 s, 1.1 s, 0.1 s, 0.1 s | the matrix is 0.075 GB, the `.npy` 0.36 GB |
+| Infomap 1 trial, Markov time 1.0 | 32.3 s (2.6 s of it loading the links) | 5.15 GB (2.1 GB after loading) |
+| Infomap 1 trial, Markov time 0.75 | 30.2 s | 4.16 GB |
+| Infomap 10 trials, Markov time 0.75 | 238 s, 7.9 times one trial | 5.11 GB |
+| `candidate_maps`, Markov time 0.75 | 1,555 s | 3.03 GB |
+| one bootstrap, 3 trials, 2 of them in 2 workers | 1,328 s and 1,009 s | workers 4.93 and 4.81 GB, their parent 0.77 GB |
+| `excess_table` | fails, see below | |
+| `excess_table`, without the zero-area parts | 13.5 s for one map | 0.95 GB |
+
+- **`candidate_maps` at 0.75:** `resolve_pieces` 0.8 s, `apply_size_floor` 1,554 s, `merge_sequence` 0.15 s. The floor makes 7,039 merges of 0.22 s each,
+  as every merge goes over a dense units x units array (0.4 GB, 0.2 s at 7,044 units), and leaves 5 units, so `merge_sequence` has nothing to
+  merge and there is one map, k = 5. The bootstrap scores only that map, with a median stability of 0.31 over its 2 draws.
+- **Infomap trials run one after the other:** 10 trials cost 7.9 times one, and its peak is 1 GB above that of one trial.
+- **Markov time 1.0 is degenerate on half A:** Infomap puts 9,487 of the 9,556 parts (99.3% of the parts and of the area) in one module, and
+  `candidate_maps` raises `DegenerateClustering`, 2 units above the size floor where 5 are needed. Recorded, not raised, and the later stages
+  used 0.75 as the brief says.
+
+**Module structure, one trial, seed 1, half A only.** Both partitions have one level. The place of a module is the median of its parts' centres.
+
+| Markov time | Modules | Largest | Modules of one part | The largest, in parts (median centre) |
+|---|---|---|---|---|
+| 1.0 | 35 | 99.3% of the parts | 31 | 9,487 (5 N, 7 E: all the rest of the globe), 33 (20 S, 48 E), then 3 and 2, and 31 single parts |
+| 0.75 | 7,044 | 15.7% of the parts | 6,874 | 1,497 (40 N, 33 E), 632 (5 S, 64 W), 39 (30 S, 20 E), 32 (19 S, 47 E), 23 (1 N, 113 E), 21 (21 N, 159 W), then 11 or fewer |
+
+At 0.75 the six largest modules hold 2,244 parts, 23% of them, and 7,039 of the 7,044 are under the 1,000,000 km2 floor. The structure is made of a
+few real blocks and thousands of single parts that the floor then merges one by one.
+
+**Between them** (extra, `SURVEY` in the script: one trial each, and `candidate_maps` on each, fewest units first):
+
+| Markov time | Modules | Largest | One part | `apply_size_floor` | Units after the floor | Maps |
+|---|---|---|---|---|---|---|
+| 1.0 | 35 | 99.3% | 31 | 0.3 s | degenerate (2) | 0 |
+| 0.97 | 43 | 99.2% | 38 | 0.4 s | degenerate (2) | 0 |
+| 0.95 | 62 | 89.6% | 44 | 0.6 s | 5 | 1 |
+| 0.9 | 176 | 77.0% | 154 | 1.7 s | 7 | 3 |
+| 0.85 | 705 | 56.3% | 651 | 8.4 s | 10 | 6 |
+| 0.8 | 2,567 | 42.3% | 2,475 | 87.9 s | 10 | 6 |
+| 0.75 | 7,044 | 15.7% | 6,874 | 1,554 s | 5 | 1 |
+
+Infomap costs 30 to 40 s and 4.1 to 5.2 GB at every Markov time. `candidate_maps` costs about the units to the power 1.8 from 705 to 2,567 units and 2.8 from 2,567 to 7,044, as the dense arrays take over, and
+nothing below 700 units. After the floor there are only 5 to 10 units at every Markov time from 0.95 down, so at most 6 maps (k = 5 to 10), where the selection
+assumes 56 (k = 5 to 60).
+
+**`excess_table` fails on the zero-area parts.** `null_partitions` divides by the area of each piece of a realm (`nullmodel.py`,
+`-remaining[p] / targets[p]`), and a piece made only of parts with no area has none: `ZeroDivisionError: float division by zero`, at Markov times
+0.75 and 0.9 alike. It looks like a limit of earlier code with the zero-area parts kept, which the brief says to keep and a later task folds away,
+so it is **not patched here**. To time the stage and weigh its workers, it was run again on the same maps without the 923 zero-area parts (8,633
+parts, labels, adjacency and areas cut down, the matrix as it was). That run is the `excess_table_without_zero_area_parts` row, it is not the
+pilot's map, and its excess (0.061 for k = 5) is not a result. With one map only one of the 12 workers had a task. Earlier, on 3 maps and 4 workers
+(Markov time 0.9), each worker peaked at 0.54 to 0.62 GB and took 16 s a map.
+
+**`--workers 12`** is the 14 cores less two for the parent and the rest of the machine. Memory allows many more: the bootstrap's workers peak at
+5 GB and the excess's at 0.6 GB, so 12 excess workers need about 9 GB beside a parent of 1 GB. The numbers came from the calibration run (Markov times 1.0
+and 0.9, `--results results/pilot-calibration`), which ran before this one.
+
+**Projection to resolution 7** (`project` in the script; each stage is scaled from its measure and the larger option is taken wherever it is
+unsure). The headline has 2 times the links of half A, so 5 times (R3, growth 2.5) or 2.76 times (Denmark's 1.38) the links measured: 74.7M and
+41.2M. Cells grow 3.0 times (7,292 to 21,872). Infomap, the resampling and their memory scale with links, with no fixed share, and a 10-trial
+Infomap is the larger of 10 one-trial runs and the 10-trial run measured. `candidate_maps` has units, so cells, times the merges, each over a dense
+units x units array (cells squared) or the links, whichever is slower, and the dense arrays need cells squared the memory. `excess_table` scales
+with the larger of cells and links, and with 56 maps. **1.38 is a lower bound** on the growth, as Denmark spans 8 cells, and is only shown beside
+2.5, which decides.
+
+| | Growth 2.5 (decides) | Growth 1.38 |
+|---|---|---|
+| Links at resolution 7, headline | 74.7M | 41.2M |
+| (a) headline Infomap peak, alone, with the matrix; limit 40 GB | 25.8 GB, 26.2 GB: **ok** | 14.2 GB, 14.4 GB: ok |
+| (b) selection run, limit 24 h | **245 h: fails** | 245 h: fails |
+| Of it: 10-trial Infomap | 0.42 h | 0.23 h |
+| Of it: `candidate_maps` of the headline | 11.65 h (27.3 GB) | 11.65 h (27.3 GB) |
+| Of it: 20 bootstraps, 1 worker (27.3 GB each) | 233 h, 11.65 h each, nearly all `candidate_maps` | 233 h |
+| Of it: `excess_table`, 7 workers (4.8 GB each) | 0.15 h | 0.05 h |
+| (b) without `candidate_maps` | 0.57 h | 0.28 h |
+| (c) disk left after the zip and Parquet (2.35 GB; free now 55.7 GB); minimum 10 GB | 53.3 GB: **ok** | 54.4 GB: ok |
+
+**Decision: stay at resolution 6.** (b) fails by a factor of 10, and all of the failure is `apply_size_floor`: at resolution 7 the 7,044 units of
+Markov time 0.75 become about 21,000, with a merge of about 2 s over a 3.6 GB dense array, 11.7 hours and 27 GB for the headline's `candidate_maps`
+and again for each bootstrap. Taking `candidate_maps` out leaves 0.57 hours, and (a) and (c) hold, so the memory and the disk are not what rules
+resolution 7 out. Two things would change the answer, and neither is decided here:
+
+- **The Markov time, or whatever leaves fewer units.** The same pipeline with Markov times 1.0 and 0.9 (176 units, 7 after the floor, 3 maps, 2.3 s
+  of `candidate_maps`, a bootstrap of 96 s and 5.3 GB) gives 26.8 GB for (a), 3.6 h for (b) and 53.8 GB left for (c): go, and 1.25 h at 1.38.
+  Markov time 1.0 gives one module with the whole globe in it, so no setting yet gives both a usable partition and a cheap one.
+- **A cheaper `apply_size_floor`,** which recomputes a dense units x units beta-sim for every merge where one row changes. It was not touched.
+
+**Measurement notes.** The peaks of Infomap, `candidate_maps` and the workers come from `ru_maxrss` inside each child, so they are exact. The
+parent's high-water mark is not a stage's own. The bootstrap ran 2 draws in 2 workers, so its time is that of 2 running together and not of 12.
+`run_infomap`'s `linked` set was left as it is: at 14.9M links it takes 0.2 s, and its list of Python ints is about 0.5 GB by size (not measured), a tenth of Infomap's own 5.2 GB. Five
+times that at resolution 7 is still a tenth of Infomap's 26 GB.
