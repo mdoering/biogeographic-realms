@@ -16,16 +16,19 @@ lose. Both count presences, which is what the network is built from, and not rec
 - `run_drops`: the same, but **only drops count**: a presence whose rows a fold moved to another part (layer 0's zero-area fold, or layer 4, a row of the
   removal log with a `to_part`) is moved, not lost, even if it is gone from where it was. The shares are over all the raw presences of the kind.
 
-The plan words the limit over the whole run, and the controller's ruling (provisional until Markus confirms it before the resolution 7 run) is
-`run_drops`: `choose` reads it by default, and `calibrate` has its columns as `run_*`. The `layer5` columns keep the first reading.
+The plan words the limit over the whole run, and Markus's ruling of 2026-11-01 (reading c) is `run_drops`: the 5% is read over the whole run of layers 1, 2, 4 and 5,
+counting removals only, and a moved presence is not lost. `choose` reads it by default, and `calibrate` has its columns as `run_*`. The `layer5` columns keep the first reading.
 
 **The species** are the plants WCVP gives a native region and every other species of their taxonomic groups. Layer 5 judges a species against its
 group's records in a cell (`under_reported`), and a group can hold species of other kingdoms (in the data, `eukaryotes` does, and so those species are in the set), so the whole group is kept and the
 group totals are what they are in the real run, which also makes a score on half B like for like with half A's. Everything else in layers 1 to 5 is per
 species. `kingdom_counts` says how many of a set of species are not Plantae, from the taxonomy alone.
 
-**The setting** is chosen by `choose`: the one that removes the most outside presences while losing at most 5% of the native ones. A tie goes to
-the lower native loss, and then to the order of the grid. Where no setting loses so little, the one that loses least is taken, and the caller is told.
+**The setting** is chosen by `choose`, by the knee rule (Markus, 2026-11-01). `frontier` keeps the settings that no other beats on both counts, native presences lost
+and outside presences removed. `knee` walks it from the lowest native loss: a step to the next setting is accepted while it costs at most `MAX_MARGINAL` (4) native presences
+lost for each extra outside presence removed and the setting loses at most 5% of the native ones, and the walk stops at the first step that fails either test. The setting chosen
+is the last accepted. Where not even the lowest loss is within 5%, that setting is taken, and the caller is told. `choose(rule="most_removed")` is the rule of before, the most
+outside presences removed within 5%, with ties to the lower native loss and then to the grid order, kept to report what it would have chosen.
 
 **The animal cross-check against GRIIS** (`griis_cross_check`) sets layer 5 against what GRIIS says is introduced. The heuristics have no range to go by,
 so the animals that GRIIS lists as introduced (by its own establishment means, from the lists with distributions) tell how much of that layer 5 finds on its own,
@@ -54,15 +57,18 @@ from realms.natives import WCVP_KINGDOM, References, match_names
 log = logging.getLogger(__name__)
 
 NATIVE_LOSS_LIMIT = 0.05
+# the knee rule's price: at most this many native presences lost for each extra outside presence removed, at each step along the frontier
+MAX_MARGINAL = 4.0
 EPS = 1e-9  # a share compared with a count: 0.05 * 60 is 3.0000000000000004
 LEFTOVER = 10  # the regions listed for the presences that break a case
-# the thresholds to try, in the order of the grid (the first varies slowest): the design's value is the middle of each
+# the thresholds to try, in the order of the grid (the first varies slowest): 3 x 4 x 4 x 3 = 144 settings, the design's value the second of each
 GRID = {
     "satellite_record_share": (0.005, 0.01, 0.02),
-    "satellite_cell_share": (0.02, 0.05, 0.10),
-    "under_rate_factor": (0.005, 0.01, 0.02),
+    "satellite_cell_share": (0.02, 0.05, 0.10, 0.20),
+    "under_rate_factor": (0.005, 0.01, 0.015, 0.02),
     "group_min_records": (300, 1000, 3000),
 }
+RULES_OF_CHOICE = ("knee", "most_removed")
 BEFORE_5 = frozenset({1, 2, 4})  # layer 3 is off in the calibration, and layer 5 is what is measured
 # the rules that layers 1, 2 and 4 read from `Settings.rules_off`, and that so have to agree across the grid: from `RULES`, which says each rule's layer
 EARLY_RULES = frozenset(rule for rule in SWITCHABLE if RULES[rule] in BEFORE_5)
@@ -142,31 +148,129 @@ def rates(status: pl.DataFrame, removed: pl.DataFrame) -> tuple[float, float]:
 # ---- the settings
 
 def settings_grid(base: Settings = Settings()) -> list[Settings]:
-    """The 81 settings of `GRID`, with `base` for everything else, in the order of the grid: the first threshold varies slowest."""
+    """The 144 settings of `GRID`, with `base` for everything else, in the order of the grid: the first threshold varies slowest."""
     return [replace(base, **dict(zip(GRID, values, strict=True))) for values in itertools.product(*GRID.values())]
+
+
+def _reading(reading: str) -> tuple[str, str, str]:
+    if reading not in READINGS:
+        raise ValueError(f"a reading is one of {sorted(READINGS)}, not {reading!r}")
+    return READINGS[reading]
 
 
 def within_limit(limit: float = NATIVE_LOSS_LIMIT, reading: Literal["layer5", "run"] = "run") -> pl.Expr:
     """Whether a row of `calibrate`'s table loses at most `limit` of the native presences, by `reading` (`layer5`, or the whole `run` counting drops only)."""
-    if reading not in READINGS:
-        raise ValueError(f"a reading is one of {sorted(READINGS)}, not {reading!r}")
-    _, lost, native = READINGS[reading]
+    _, lost, native = _reading(reading)
     return pl.col(lost) <= limit * pl.col(native) + EPS
 
 
-def choose(table: pl.DataFrame, limit: float = NATIVE_LOSS_LIMIT, reading: Literal["layer5", "run"] = "run") -> tuple[int, bool]:
-    """The `setting` of `table` (from `calibrate`) that removes the most outside presences among those losing at most `limit` of the native ones.
+def frontier(table: pl.DataFrame, reading: Literal["layer5", "run"] = "run") -> pl.DataFrame:
+    """The Pareto frontier of the settings of `table` on (native presences lost, outside presences removed), by `reading`: the settings that no other beats on both.
 
-    `reading` is which columns count: `run`, the whole of layers 1, 2, 4 and 5 counting drops only (the default), or `layer5`. A tie goes to the fewer
-    native presences lost, and then to the lower setting, which is the order of the grid. Where no setting is within the limit, the one that loses
-    the fewest native presences is taken, the lower setting again winning a tie. Returns the setting and whether the limit was met. The native presences
-    are the same for every setting of one table, so counts are compared and not shares.
+    The settings are sorted by native lost, lowest first, then by outside removed, highest first, then by `setting`, and a row is kept if it removes more outside
+    presences than every row before it. So a setting is left out if another loses no more native presences and removes at least as many outside ones, and of
+    two that tie on both the lower setting stays. The rows come in that order, native lost rising and outside removed rising with it: `setting`,
+    `outside_removed`, `native_lost` and `native` (by the columns of `reading`), `extra_outside` and `extra_native` (what the step into the row adds
+    to the row before it) and `marginal`, `extra_native` over `extra_outside`: the native presences it costs for each extra outside presence removed.
+    The first row has no step, and `None` in those three.
+    """
+    removed, lost, native = _reading(reading)
+    if table.is_empty():
+        raise ValueError("there are no settings to choose from")
+    ordered = table.sort([lost, removed, "setting"], descending=[False, True, False])
+    best_before = pl.col(removed).cum_max().shift(1).fill_null(-1)
+    kept = ordered.filter(pl.col(removed) > best_before)
+    steps = kept.select(
+        "setting",
+        pl.col(removed).alias("outside_removed"),
+        pl.col(lost).alias("native_lost"),
+        pl.col(native).alias("native"),
+    ).with_columns(
+        pl.col("outside_removed").diff().alias("extra_outside"),
+        pl.col("native_lost").diff().alias("extra_native"),
+    )
+    return steps.with_columns((pl.col("extra_native") / pl.col("extra_outside")).alias("marginal"))
+
+
+@dataclass(frozen=True)
+class Knee:
+    """What `knee` found: the chosen `setting`, whether the `limit` was `met`, and the walk along the frontier that led there.
+
+    `steps` is `frontier`'s table with three columns more, one flag per row. `within_limit`: the setting loses at most the limit of the native presences.
+    `affordable`: the step into it costs at most the price (the first row, with no step, is). `accepted`: the walk got that far, that is the row and every row before it
+    are both: it stops at the first that is not, and no row after it is accepted whatever its own flags say.
+    """
+
+    setting: int
+    met: bool
+    steps: pl.DataFrame
+
+    def _at(self) -> int:
+        return self.steps["setting"].to_list().index(self.setting)
+
+    def step_into(self) -> dict:
+        """The frontier row of the chosen setting: its counts, and the step into it (`None` in the step's columns if it is the first)."""
+        return self.steps.row(self._at(), named=True)
+
+    def step_after(self) -> dict | None:
+        """The frontier row after the chosen setting, whose step the walk refused, or `None` if the chosen setting is the last of the frontier."""
+        at = self._at() + 1
+        return self.steps.row(at, named=True) if at < self.steps.height else None
+
+
+def knee(
+    table: pl.DataFrame, limit: float = NATIVE_LOSS_LIMIT, reading: Literal["layer5", "run"] = "run", max_marginal: float = MAX_MARGINAL
+) -> Knee:
+    """Walk the `frontier` of `table` from the setting that loses the fewest native presences, and take the last one the walk accepts.
+
+    A step to the next setting of the frontier is accepted while it costs at most `max_marginal` native presences lost for each extra outside presence removed
+    (counts compared, not the ratio) and the setting loses at most `limit` of the native presences (`within_limit`). The walk stops at the first step that fails
+    either test, and the setting chosen is the last accepted. If not even the first setting is within the limit, that is the one taken, as the fewest lost, and
+    `met` is false.
+    """
+    steps = frontier(table, reading)
+    inside = set(table.filter(within_limit(limit, reading))["setting"].to_list())
+    within, affordable, accepted = [], [], []
+    going = True
+    for row in steps.iter_rows(named=True):
+        within.append(row["setting"] in inside)
+        affordable.append(row["marginal"] is None or row["extra_native"] <= max_marginal * row["extra_outside"] + EPS)
+        going = going and within[-1] and affordable[-1]
+        accepted.append(going)
+    steps = steps.with_columns(pl.Series("within_limit", within, pl.Boolean), pl.Series("affordable", affordable, pl.Boolean), pl.Series("accepted", accepted, pl.Boolean))
+    taken = steps.filter(pl.col("accepted"))
+    if taken.height:
+        return Knee(int(taken["setting"][-1]), True, steps)
+    return Knee(int(steps["setting"][0]), False, steps)
+
+
+def choose(
+    table: pl.DataFrame,
+    limit: float = NATIVE_LOSS_LIMIT,
+    reading: Literal["layer5", "run"] = "run",
+    rule: Literal["knee", "most_removed"] = "knee",
+    max_marginal: float = MAX_MARGINAL,
+) -> tuple[int, bool]:
+    """The `setting` of `table` (from `calibrate`) to take, and whether the `limit` on the native presences lost was met.
+
+    `reading` is which columns count: `run`, the whole of layers 1, 2, 4 and 5 counting drops only (the default), or `layer5`. `rule` is how:
+
+    - `knee` (the default): `knee`, which walks the Pareto frontier from the lowest native loss while each step costs at most `max_marginal` native
+      presences for each extra outside presence removed and the setting stays within the `limit`, and takes the last setting accepted.
+    - `most_removed`: the rule of before, kept for comparison: the most outside presences removed among the settings within the `limit`. A tie goes to the fewer
+      native presences lost, and then to the lower setting, which is the order of the grid. Where no setting is within the limit, the one that loses
+      the fewest native presences is taken, the lower setting again winning a tie.
+
+    The native presences are the same for every setting of one table, so counts are compared and not shares.
     """
     if table.is_empty():
         raise ValueError("there are no settings to choose from")
-    if reading not in READINGS:
-        raise ValueError(f"a reading is one of {sorted(READINGS)}, not {reading!r}")
-    removed, lost, _ = READINGS[reading]
+    if rule not in RULES_OF_CHOICE:
+        raise ValueError(f"a rule is one of {list(RULES_OF_CHOICE)}, not {rule!r}")
+    removed, lost, _ = _reading(reading)
+    if rule == "knee":
+        found = knee(table, limit, reading, max_marginal)
+        return found.setting, found.met
     within = table.filter(within_limit(limit, reading))
     if within.height:
         best = within.sort([removed, lost, "setting"], descending=[True, False, False]).row(0, named=True)

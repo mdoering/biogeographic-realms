@@ -1529,6 +1529,8 @@ joining with nulls unequal.
 
 ### Calibration dry run and known cases on half A at resolution 7 (2026-11-01)
 
+*History: the run of the 81 settings, with its rule and its rulings still open. Markus's rulings, the knee rule, the 144-setting grid and the dry run that replaces this one are in "The knee rule, the 144-setting grid and the resolution 7 dry run" at the end of the log; this run's files are kept in `results/calibrate/res7-grid81/`.*
+
 `uv run python scripts/calibrate.py --counts data/gbif/0020744-261023074918325`, half A only, with no `--score-half-b`, so nothing of half B was loaded. It ran
 in 666 s (layer 5 at 81 settings 499 s) and peaked at 21.7 GB. The outputs are in `results/calibrate/res7/` (git-ignored). This is the run that `--score-half-b --setting N` checks
 for, and it still waits on Markus's choices below.
@@ -1605,3 +1607,100 @@ GBIF's match API was asked about 103 names and placed 78 (132 and 97 before), an
 **The extended exports are not only the old lists with a table added.** The 250 plain exports were of older versions of the datasets: GRIIS-CY's plain one is version 4 and the extended one version 9, and 559 of the plain one's entries are ranked `other`, which the species rule drops (23 species entries
 against 860 now). The 250 lists hold 80,017 species entries now against 68,170 in their plain exports (+11,847), and 85 more come from the Cayman Islands list taking the slot Cayman Brac's 8 held: the 132,479 of now against the 120,547 of before.
 Nothing is cleaned or calibrated here. The numbers of the section "GRIIS by its own establishment means" above, of Task 11a and of the dry run before this one, were made with the old manifest, and the GRIIS rules of the cleaning and the calibration are to be run again on this one.
+
+### The knee rule, the 144-setting grid and the resolution 7 dry run (2026-11-01)
+
+**Markus's decisions on 2026-11-01**, made after the res 7 dry run of the 81 settings (above, kept as history):
+
+- The 5% limit is read over the whole run of layers 1, 2, 4 and 5, counting removals only (reading c). A moved presence is not lost. This is no longer provisional.
+- Half B's scoring loads B's calibration species, meaning the WCVP plants plus the species of their tax groups (2,586 of them not Plantae). That is confirmed.
+- **The choice rule changes to a knee rule.** Build the Pareto frontier of the settings on (native presences lost, outside presences removed), both under reading c. Sort by native lost ascending, then outside removed descending, then
+  setting index ascending. Keep each row that removes more outside presences than every row before it. Walk the frontier from the lowest native loss. Accept a step while it costs at most `MAX_MARGINAL = 4.0` native presences lost per extra
+  outside presence removed, and the setting's native loss stays within the 5% limit. Stop at the first step that fails either test. The chosen setting is the last one accepted. On the 81-setting res 7 table this rule gives setting 75 (2%, 10%,
+  1%, 300); the step after it, to setting 8, costs 9.1 natives per non-native.
+- **The grid widens to 144 settings:** satellite record share {0.5, 1, 2}%, satellite cell share {2, 5, 10, 20}%, under-reported rate factor {0.5, 1, 1.5, 2}%, group minimum {300, 1,000, 3,000}.
+
+**The code** (`src/realms/calibrate.py`). `GRID` is the 144 settings, in the order of the grid (the first threshold varies slowest, the group minimum fastest), with the design's setting at **index 64** (the second value of each).
+`MAX_MARGINAL = 4.0`. `frontier(table, reading)` is the Pareto frontier as above, with each row's step (`extra_outside`, `extra_native`) and `marginal`, the native presences it costs per extra outside presence removed. `knee(...)` walks it and
+returns the chosen `setting`, whether the limit was `met`, and the frontier with three flags per row: `within_limit`, `affordable` (the step into it costs at most `MAX_MARGINAL`, compared as counts) and `accepted` (it and every row before it are both). `choose` returns the knee's
+choice by default, and `choose(rule="most_removed")` the rule of before, for comparison. If not even the lowest-loss setting is within 5%, that one is taken and the caller is told. `chosen.setting` in `report.json` stays an integer, an index into the new grid, so the scoring's guard
+reads it as before. `report.json` has, besides `chosen`, `design_setting` and `chosen_by_layer5_reading` (the knee by layer 5's reading): **`knee_rule`** (the whole frontier with its flags, `step_into` the chosen setting, `step_after` it and `stopped_by`, `cost` or `limit`) and
+**`chosen_by_old_rule`**. Tests: the five of the brief (`test_frontier_keeps_only_settings_that_remove_more_for_their_loss`, `test_knee_rule_stops_at_the_first_step_dearer_than_max_marginal`, `test_knee_rule_never_passes_the_native_loss_limit`,
+`test_knee_rule_on_the_resolution_7_table_of_81_chooses_75`, `test_the_grid_has_144_settings_in_a_stable_order`) and three more, among them one for the report of the dry run; the suite has 1,037 tests, all passing. The fixture
+`tests/fixtures/res7_grid81_settings.csv` is the aggregate counts of half A's 81 settings at resolution 7 (thresholds and the counts of both readings: no taxon, no cell), and the rule picks 75 on it, as computed by hand; the old rule picks 7.
+
+**The dry run at resolution 7** (`uv run python scripts/calibrate.py --counts data/gbif/0020744-261023074918325`, half A only, no `--score-half-b`; the references with all 305 GRIIS lists as extended exports and Cayman Brac apart from the Cayman Islands). 1,080 s
+(layer 5 at 144 settings 905 s), peak 21.6 GB. The 81-setting outputs were moved to `results/calibrate/res7-grid81/` first; the new ones are in `results/calibrate/res7/` (git-ignored), which the scoring of half B reads.
+**No `held_out*` file exists under `results/calibrate/` or `data/split/`, before or after the run, and half B was not loaded.**
+
+- **Within the 5% limit** (reading c): 112 of the 144 settings; by layer 5 alone, all 144.
+- **Chosen by the knee rule: setting 36**, with satellite record share 0.5%, satellite cell share 20%, under-reported rate factor 0.5% and group minimum 300. It sits in a corner of the grid: the lowest record share, rate factor and group minimum and the highest cell share. Its three readings:
+
+  | Reading | Outside presences removed | Native presences lost |
+  |---|---|---|
+  | whole run, removals only (`run_drops`, the one that chooses) | 20.49% (178,804 of 872,784) | 3.03% (91,721 of 3,029,872) |
+  | whole run, everything counted (`run_all`) | 20.49% (178,818 of 872,784) | 3.03% (91,836 of 3,029,872) |
+  | layer 5 alone | 14.07% (115,086 of 817,911) | 1.71% (51,510 of 3,012,793) |
+
+  The knee rule by layer 5's reading also takes 36.
+- **The frontier** has 81 of the 144 settings, 70 of them within the limit. The walk accepted 14, and stopped at the 15th, whose step costs 17.4 natives for each outside presence. Around the chosen setting (whole-run counts; a step's marginal cost is `extra native / extra outside`):
+
+  | Setting (record share, cell share, rate factor, group min) | Outside removed | Native lost | Step: extra outside, extra native | Marginal | |
+  |---|---|---|---|---|---|
+  | 26 (0.5%, 10%, 0.5%, 3,000) | 177,462 | 91,279 | +2,531, +644 | 0.25 | accepted |
+  | 38 (0.5%, 20%, 0.5%, 3,000) | 178,363 | 91,429 | +901, +150 | 0.17 | accepted |
+  | 37 (0.5%, 20%, 0.5%, 1,000) | 178,749 | 91,684 | +386, +255 | 0.66 | accepted |
+  | **36 (0.5%, 20%, 0.5%, 300)** | **178,804** | **91,721** | **+55, +37** | **0.67** | **accepted, chosen** |
+  | 62 (1%, 5%, 0.5%, 3,000) | 178,869 | 92,850 | +65, +1,129 | **17.37** | refused (cost) |
+  | 61 (1%, 5%, 0.5%, 1,000) | 179,266 | 93,104 | +397, +254 | 0.64 | not reached |
+  | 60 (1%, 5%, 0.5%, 300) | 179,323 | 93,142 | +57, +38 | 0.67 | not reached |
+
+  Two more steps within the limit are dearer than 4, **17** (10.0) and **44** (25.4), and two beyond it, 70 (4.1) and 119 (62.7); the walk meets 62 first.
+- **For Markus: what stops the walk.** The step to 62 is a single dear step, and the frontier goes on cheaply after it (61, 60, 110, 109, 108, 74, ... at 0.7 or less each). Counted from 36, **every later frontier setting within the limit costs at most 3.0 natives per extra
+  outside presence removed over the whole way (61: 2.99, 60: 2.74, the others 1.6 or less), except 62 itself (17.4)**. The last frontier setting within the limit is **138** (2%, 20%, 1.5%, 300): 224,288 outside presences removed (25.70%), 143,410 native lost (4.73%), which is 1.14 natives
+  per extra outside presence from 36 and is also what the old rule chose. The frontier is made of rungs of three settings (group minimum 3,000, 1,000, 300) of one family of the other three thresholds, and the step from one family to the next lands on the new family's first rung, here 62, which removes 65 more outside presences than 36 and loses 1,129
+  more native ones: a dent in the frontier, and the first-failure rule stops at the dent. The rule is implemented as Markus gave it, and the choice stands at 36 until he says otherwise. The chosen setting removes less than the design's (64, below) while losing less: from 36 to 64 it is 1.28 natives per extra outside presence.
+- **The old rule** (the most outside presences removed within 5%, for comparison): **setting 138** (2%, 20%, 1.5%, 300), with 25.70% (224,288) outside removed and 4.73% (143,410) native lost over the whole run (run_all 25.70% and 4.74%, layer 5 alone 19.75% and 3.46%).
+  Its step from 36 is the one above. **The design's setting** (64: 1%, 5%, 1%, 1,000, on the frontier): 22.73% (198,417) and 3.85% (116,786) (run_all 22.74% and 3.86%, layer 5 alone 16.52% and 2.56%).
+  The knee rule's choice on the 81-setting table, 75 (2%, 10%, 1%, 300), is **123** of the 144, on the frontier: 207,289 removed (23.75%), 121,246 lost (4.00%). The old rule's choice there, 7 (now 10), is not on the frontier.
+- **What drives it:** the rate factor of `under_reported` again. Averaged over the other thresholds, rate factors 0.5, 1, 1.5 and 2% give 20.4%, 22.6%, 24.2% and 25.6% outside removed against 3.05%, 3.83%, 4.52% and 5.15% native lost, and **only 4 of the 36 settings at 2% are within the limit**.
+  Cell shares 2, 5, 10 and 20% give 21.8% to 24.0% and 3.97% to 4.23%, record shares 22.7% to 23.6% and 4.06% to 4.20%, and the group minimum 23.1% to 23.2% and 4.12% to 4.15%.
+- **Known cases** (all five layers, `native_only`, at the design's thresholds, so they do not depend on the choice; what changed since the 81-setting run is the refreshed GRIIS lists):
+
+  | Case | Result |
+  |---|---|
+  | Potato, outside its WCVP native regions | Pass: 1,024 presences outside before, 0 after, 110 of 127 inside kept (as before) |
+  | Starling, North America | Fail: 1,045 before, **7 after (43 before the refresh)**: Greenland 5 and no region 2; GRIIS took 404 and 527 sub-national, the zero-area fold 104 |
+  | Hawaiian endemic, *Drepanis coccinea* | Pass: 11 of 11 kept (as before) |
+  | Lemuridae, only on Madagascar | Fail: 56 outside before, **8 after (10 before)**, 178 of 217 inside kept; left in North Carolina and Virginia 2 each, Comoros, Denmark, Poland 1 each, 3 with no region |
+  | Tiger, Europe | Waits for step 9 (Felidae is in half B) |
+
+- **GRIIS cross-check, animals** (layers 1, 2, 4 and 5, layer 3 off; the lists with a distribution table are now all 305): at the chosen setting layer 5 takes **8.79%** of the animal presences GRIIS lists as introduced (9,103 of 103,595) against **4.70%** of the others (299,079 of 6,366,558), 1.87 times as much;
+  records 0.03% against 0.03%. At the design's setting 10.50% (10,876) against 5.81% (369,940), 1.81 times. Before the refresh, at the 81-setting run's choice: 12.77% of 70,987 against 6.34% (2.01 times), and 11.29% against 5.83% at the design's. The listed presences are 103,595 now, as the lists with a table grew from 55 to 305.
+- **Native loss by region** (TDWG level 3, at least 100 native presences, 325 of 366 regions, chosen setting, layer 5's reading, whose total loss is 1.71%; the median region loses 0.99%). Regions of at most 5 land parts (56) lose 1.43% (1,152 of 80,372), larger ones (269) 1.50% (61,964 of 4,123,626), so islands do not lose more as a rule,
+  though island groups head the list besides the sampled mainland. The top 20 (a presence counts in each region its part touches, so the rows do not add up):
+
+  | Region | Land parts | Native presences | Lost | Loss |
+  |---|---|---|---|---|
+  | Marianas | 6 | 251 | 43 | 17.1% |
+  | Caroline Is. | 15 | 642 | 94 | 14.6% |
+  | France | 38 | 57,815 | 7,230 | 12.5% |
+  | Cape Verde | 3 | 434 | 53 | 12.2% |
+  | Andaman Is. | 7 | 271 | 31 | 11.4% |
+  | Ogasawara-shoto | 2 | 109 | 12 | 11.0% |
+  | Marquesas | 5 | 267 | 28 | 10.5% |
+  | Libya | 94 | 1,144 | 100 | 8.7% |
+  | Madeira | 2 | 629 | 50 | 7.9% |
+  | Germany | 27 | 32,534 | 2,560 | 7.9% |
+  | Maldives | 7 | 163 | 12 | 7.4% |
+  | Tubuai Is. | 3 | 111 | 8 | 7.2% |
+  | Norfolk Is. | 2 | 224 | 16 | 7.1% |
+  | Seychelles | 2 | 211 | 15 | 7.1% |
+  | Chatham Is. | 2 | 322 | 22 | 6.8% |
+  | Oman | 28 | 2,375 | 160 | 6.7% |
+  | Sri Lanka | 8 | 2,431 | 163 | 6.7% |
+  | Spain | 35 | 54,592 | 3,206 | 5.9% |
+  | Austria | 11 | 14,680 | 859 | 5.9% |
+  | California | 33 | 38,840 | 2,270 | 5.8% |
+
+**Not done here:** the scoring of half B (Step 6, after review). The setting the rule chose is 36, and `res7/report.json` has `chosen.setting` 36 from the same ingest, so `--score-half-b --setting N` would find its guard satisfied.

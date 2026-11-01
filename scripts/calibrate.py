@@ -5,24 +5,27 @@ loads half B):
 
 1. the known cases of the design (`realms.calibrate.CASES`) on all five layers at the design's thresholds with `wcvp_mode` `native_only`:
    those whose family is in half A are run and pass or fail, and the others are listed as waiting for step 9, with their family and half;
-2. the calibration: layers 1, 2 and 4 once and then layer 5 at each of the 81 settings (satellite record share 0.5, 1 and 2%, satellite
-   cell share 2, 5 and 10%, under-reported rate factor 0.5, 1 and 2%, group minimum 300, 1,000 and 3,000 records), with layer 3 off, on the plants
+2. the calibration: layers 1, 2 and 4 once and then layer 5 at each of the 144 settings (satellite record share 0.5, 1 and 2%, satellite
+   cell share 2, 5, 10 and 20%, under-reported rate factor 0.5, 1, 1.5 and 2%, group minimum 300, 1,000 and 3,000 records), with layer 3 off, on the plants
    WCVP gives a native region and the other species of their taxonomic groups (the group totals need them). Each setting is measured by the share of
    outside presences it removes and the share of native presences it loses. The limit of 5% native loss is read over the whole run of layers 1, 2, 4
-   and 5 counting drops only (a presence a fold moved is moved, not lost), as the controller ruled, provisionally; the chosen setting removes the
-   most outside presences within it. The three readings (layer 5 alone, the whole run counting everything, the whole run counting drops only) are
-   reported for the chosen setting and the design's;
+   and 5 counting removals only (a presence a fold moved is moved, not lost), as Markus ruled on 2026-11-01. The setting is chosen by the knee rule
+   (`realms.calibrate.knee`): the Pareto frontier of the settings on native presences lost and outside presences removed is walked from the lowest native
+   loss, and a step is accepted while it costs at most `MAX_MARGINAL` (4) native presences for each extra outside presence removed and the setting stays within 5%;
+   the last setting accepted is chosen. `report.json` has the whole frontier with its marginal costs (`knee_rule`), the step into the chosen setting and the step after
+   it, and the choice of the rule of before, the most outside presences removed within 5% (`chosen_by_old_rule`), for comparison. The three readings (layer 5 alone, the whole
+   run counting everything, the whole run counting drops only) are reported for the chosen setting and the design's;
 3. the cross-check of layer 5 against GRIIS on half A's animals (`realms.calibrate.griis_cross_check`, `griis_cross_check.json`): layers 1, 2, 4 and 5 with layer 3
    off, at the chosen setting and at the design's, reporting the share of the animal presences that GRIIS lists as introduced (by its own establishment means,
    from the lists with distributions) that layer 5 takes, against the share of all the other animal presences. Reports only;
 4. the native loss of the chosen setting per TDWG level 3 region (`regions.csv`, layer 5's reading), whose top 20 regions of at least 100 native presences
    show whether islands lose more.
 
-It writes `results/calibrate/res<r>/`: `settings.csv` (the 81 settings), `regions.csv`, `known_cases.json`, `griis_cross_check.json`, `calibrate.log`, and `report.json` last,
+It writes `results/calibrate/res<r>/`: `settings.csv` (the 144 settings), `regions.csv`, `known_cases.json`, `griis_cross_check.json`, `calibrate.log`, and `report.json` last,
 with the `chosen` setting and the ingest's marker. References are loaded once and need about 16 GB at the peak.
 
 **The scoring of half B** (`--score-half-b --setting N`) is the only call before the freeze that opens half B, listed in `DECISIONS.md`, and a run of its own, so that the
-setting is Markus's choice after he has seen the dry run, and half A's data is not in memory when half B is loaded. It scores setting `N` of the 81 on half B's calibration
+setting is Markus's choice after he has seen the dry run, and half A's data is not in memory when half B is loaded. It scores setting `N` of the 144 on half B's calibration
 species: the plants and the other species of their groups, which are not all plants (some are of other kingdoms or of none, as in the group `eukaryotes`). It loads the
 references and those species of half B, and nothing else: no known cases, no grid of settings, no regions, no cross-check, and nothing of half A. It prints and saves rates
 and counts only, and nothing per taxon. Before anything is loaded it refuses:
@@ -58,6 +61,7 @@ import polars as pl
 from realms.calibrate import (
     CASES,
     GRID,
+    MAX_MARGINAL,
     NATIVE_LOSS_LIMIT,
     SCORE,
     baseline,
@@ -67,6 +71,7 @@ from realms.calibrate import (
     choose,
     griis_cross_check,
     kingdom_counts,
+    knee,
     known_cases,
     readings,
     region_loss,
@@ -139,6 +144,26 @@ def described(index: int, setting: Settings, start, refs, grid, met: bool | None
     """A setting of the grid with its thresholds and its three readings (`readings`), and whether it met the limit if that is known."""
     out = {"setting": index, **{k: getattr(setting, k) for k in GRID}, "readings": readings(start, refs, grid, setting)}
     return out if met is None else {**out, "limit_met": met}
+
+
+def knee_report(found) -> dict:
+    """The knee rule's walk for `report.json`: the whole frontier with each step's marginal cost, the step into the chosen setting and the step after it, which the walk refused.
+
+    A step's marginal cost is the native presences it loses for each extra outside presence it removes. The step after says which test stopped the walk: `cost` (over
+    `MAX_MARGINAL`), `limit` (the setting loses over the limit) or both. It is `None`, as is `stopped_by`, if the chosen setting is the last of the frontier.
+    """
+    after = found.step_after()
+    return {
+        "rule": "knee",
+        "reading": "run",
+        "max_marginal": MAX_MARGINAL,
+        "native_loss_limit": NATIVE_LOSS_LIMIT,
+        "limit_met": found.met,
+        "frontier": found.steps.to_dicts(),
+        "step_into": found.step_into(),
+        "step_after": after,
+        "stopped_by": None if after is None else [name for name, ok in (("cost", after["affordable"]), ("limit", after["within_limit"])) if not ok],
+    }
 
 
 def refuse_a_second_scoring(args: argparse.Namespace, resolution: int) -> None:
@@ -233,7 +258,7 @@ def main() -> None:
         action="store_true",
         help="instead of the dry run, score setting --setting on half B's calibration species (WCVP plants and the other species of their groups): the one call before the freeze that opens half B. Resolution 7 only, after the dry run at 7, run once",
     )
-    parser.add_argument("--setting", type=int, help="with --score-half-b, and only with it: the setting of the 81 to score, by its number in the dry run's settings.csv")
+    parser.add_argument("--setting", type=int, help="with --score-half-b, and only with it: the setting of the 144 to score, by its number in the dry run's settings.csv")
     args = parser.parse_args()
     if args.score_half_b and args.setting is None:
         raise SystemExit("FAILED --score-half-b needs --setting N, the setting of the dry run at resolution 7 that Markus chose")
@@ -252,7 +277,7 @@ def main() -> None:
 
 
 def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
-    """The known cases, the 81 settings, the regions and the cross-check, on half A. Never loads half B, and writes `report.json` last."""
+    """The known cases, the 144 settings, the regions and the cross-check, on half A. Never loads half B, and writes `report.json` last."""
     directory = args.results / f"res{resolution}"
     reference = args.reference
     gpkg = reference / "grids" / f"ISEA3H-{resolution}.gpkg"
@@ -330,20 +355,26 @@ def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
     lap("layer_5_per_setting", begun)
     table = table.with_columns(within_limit(reading="run").alias("within_limit"), within_limit(reading="layer5").alias("within_limit_layer5"))
     table.write_csv(directory / "settings.csv")
-    index_chosen, met = choose(table)  # the whole run counting drops only
-    index_layer5, met_layer5 = choose(table, reading="layer5")
+    found = knee(table)  # the whole run counting drops only
+    index_chosen, met = found.setting, found.met
+    index_layer5, met_layer5 = choose(table, reading="layer5")  # the knee rule again, by layer 5's reading
+    index_old, met_old = choose(table, rule="most_removed")  # the rule of before the knee, to compare
     index_design = grid_of_settings.index(Settings())
     chosen = grid_of_settings[index_chosen]
     report["chosen"] = described(index_chosen, chosen, start, refs, grid, met)
+    report["knee_rule"] = knee_report(found)
+    report["chosen_by_old_rule"] = described(index_old, grid_of_settings[index_old], start, refs, grid, met_old)
     report["design_setting"] = described(index_design, grid_of_settings[index_design], start, refs, grid)
     report["chosen_by_layer5_reading"] = described(index_layer5, grid_of_settings[index_layer5], start, refs, grid, met_layer5)
     report["within_limit"] = {"run": int(table["within_limit"].sum()), "layer5": int(table["within_limit_layer5"].sum())}
     ranked = table.sort(["within_limit", "run_outside_removed", "run_native_lost", "setting"], descending=[True, True, False, False]).head(LEADERS)
     report["top_settings"] = ranked.to_dicts()
     with pl.Config(tbl_rows=LEADERS + 5, tbl_cols=24, fmt_float="mixed"):
-        say(f"top {LEADERS} of the 81 settings (within the limit first, then most outside removed, whole run counting drops only):\n{ranked}")
-    say(f"settings that lose at most {NATIVE_LOSS_LIMIT:.0%} of native presences: {report['within_limit']['run']} of 81 counting the whole run's drops, {report['within_limit']['layer5']} by layer 5 alone")
-    for name in ("chosen", "design_setting", "chosen_by_layer5_reading"):
+        say(f"top {LEADERS} of the {table.height} settings (within the limit first, then most outside removed, whole run counting drops only):\n{ranked}")
+    say(f"settings that lose at most {NATIVE_LOSS_LIMIT:.0%} of native presences: {report['within_limit']['run']} of {table.height} counting the whole run's drops, {report['within_limit']['layer5']} by layer 5 alone")
+    with pl.Config(tbl_rows=found.steps.height + 5, tbl_cols=12, fmt_float="mixed"):
+        say(f"the frontier of the {table.height} settings, whole run counting drops only, walked from the lowest native loss (accepted while each step costs at most {MAX_MARGINAL} natives per outside presence):\n{found.steps}")
+    for name in ("chosen", "knee_rule", "chosen_by_old_rule", "design_setting", "chosen_by_layer5_reading"):
         say(f"{name}: {report[name]}")
 
     # ---- the chosen setting in detail: native loss per region, by layer 5's reading
