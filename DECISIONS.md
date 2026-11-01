@@ -1532,8 +1532,8 @@ joining with nulls unequal.
 *History: the run of the 81 settings, with its rule and its rulings still open. Markus's rulings, the knee rule, the 144-setting grid and the dry run that replaces this one are in "The knee rule, the 144-setting grid and the resolution 7 dry run" at the end of the log; this run's files are kept in `results/calibrate/res7-grid81/`.*
 
 `uv run python scripts/calibrate.py --counts data/gbif/0020744-261023074918325`, half A only, with no `--score-half-b`, so nothing of half B was loaded. It ran
-in 666 s (layer 5 at 81 settings 499 s) and peaked at 21.7 GB. The outputs are in `results/calibrate/res7/` (git-ignored). This is the run that `--score-half-b --setting N` checks
-for, and it still waits on Markus's choices below.
+in 666 s (layer 5 at 81 settings 499 s) and peaked at 21.7 GB. The outputs are in `results/calibrate/res7-grid81/` (git-ignored; moved there when the 144-setting run replaced them in `res7/`, which is what `--score-half-b --setting N` checks
+for), and the run waited on Markus's choices below.
 
 - **Within the 5% limit** (whole run of layers 1, 2, 4 and 5, drops only, the provisional reading): 58 of the 81 settings. By layer 5 alone, all 81 are within the limit.
 - **Chosen by the rule** (the most outside presences removed within the limit): setting 7, with record share 0.5%, cell share 2%, rate factor 2% and group minimum 1,000. It removes 24.28% of the
@@ -1609,6 +1609,8 @@ against 860 now). The 250 lists hold 80,017 species entries now against 68,170 i
 Nothing is cleaned or calibrated here. The numbers of the section "GRIIS by its own establishment means" above, of Task 11a and of the dry run before this one, were made with the old manifest, and the GRIIS rules of the cleaning and the calibration are to be run again on this one.
 
 ### The knee rule, the 144-setting grid and the resolution 7 dry run (2026-11-01)
+
+*History in its rule and its choice: the walk along the Pareto frontier itself, with `MAX_MARGINAL = 4`, which chose setting 36 and stopped at a dent of the grid. Markus replaced it the same day by a walk along the convex hull at break-even, in "The knee walks the convex hull, at break-even" at the end of the log. His other decisions (reading c, B's calibration species, the grid), the fixture, the dry-run table and the known cases stand; the choice, the frontier table, the GRIIS cross-check at the chosen setting and the region table below are those of setting 36 and are redone for the new choice there.*
 
 **Markus's decisions on 2026-11-01**, made after the res 7 dry run of the 81 settings (above, kept as history):
 
@@ -1704,3 +1706,87 @@ reads it as before. `report.json` has, besides `chosen`, `design_setting` and `c
   | California | 33 | 38,840 | 2,270 | 5.8% |
 
 **Not done here:** the scoring of half B (Step 6, after review). The setting the rule chose is 36, and `res7/report.json` has `chosen.setting` 36 from the same ingest, so `--score-half-b --setting N` would find its guard satisfied.
+
+### The knee walks the convex hull, at break-even (2026-11-01)
+
+**Markus's decision, 2026-11-01**, after he had seen the walk along the Pareto frontier stop at setting 36 on a dent of the grid: **a walk along the upper convex hull, with `MAX_MARGINAL = 1.0`**, that is break-even, one native presence lost for each non-native presence removed.
+Reading c, B's calibration species and the 144-setting grid stand as decided above.
+
+**Why the hull.** The frontier of the 144 settings is smooth as a whole (81 settings, 70 of them within the limit, and from 36 every later within-limit setting but one costs at most 3.0 natives per extra outside presence), but it has dents of the grid: single dear steps, 62 (17.4), 17 (10.0)
+and 44 (25.4) within the limit, where the lowest-loss rung of a new family of the other three thresholds joins it, after which the cost falls again. A walk from one frontier setting to the next ends at the first of them, which was 62, 65 more outside presences for 1,129 more natives, and with
+it 5 points of outside removal short of settings that cost about one native for one non-native. The hull steps over a dent (its point is below the line between its neighbours), and along a hull the cost of a step only rises, so that stopping at the first step that costs more than the price is exact:
+there is no cheaper step after it.
+
+**The rule.** (1) Keep the settings that lose at most 5% of the native presences (reading c). (2) Build their Pareto frontier as before: sort by native lost ascending, outside removed descending, setting ascending, and keep each row that removes more outside presences than every row before it.
+(3) Take the upper convex hull of that frontier in (native lost, outside removed): a point on or below the segment between its neighbours is dropped, collinear points with it. (4) Walk the hull from the lowest native loss and accept each step while (extra native lost) / (extra outside removed) is at most `MAX_MARGINAL`,
+compared as counts with a tolerance of 1e-9. The chosen setting is the last vertex accepted. The settings past the limit are dropped **before** the hull is built, so a point beyond the limit cannot pull a point within it off the hull. If no setting is within the limit, the one that loses the fewest native
+presences is taken (the first row of the frontier: of those that tie, the one that removes most), and the caller is told, as before.
+
+**The code** (`src/realms/calibrate.py`). `frontier` is split into `pareto` (the rows), `with_marginals` (the step into each row from the one before, and its marginal cost) and `frontier` (the two in turn), and `hull(points)` is new. `knee` returns a `Knee` with the chosen `setting` and `met`, the whole Pareto frontier
+as `steps` (with `within_limit` and `on_hull` per row, so a dent such as 62 stays in sight), the `hull` (with each vertex's step, `affordable` and `accepted`), and **the `limit`, `reading` and `max_marginal` it was made with**, which `report.json` copies and no longer hard-codes. `step_into()` and
+`step_after()` are of the hull. `MAX_MARGINAL = 1.0`; the rule is `hull_knee` (the default of `choose`), and `choose(rule="most_removed")` stays for comparison. The first form of the knee, which walked the frontier and which this replaces, has no rule name any more. `report.json`'s `knee_rule` has `rule`
+`"hull_knee"`, `reading`, `max_marginal`, `native_loss_limit`, `limit_met`, `frontier` (all 81 rows with `on_hull`), `hull`, `step_into`, `step_after` and `stopped_by` (`"cost"`, or `None` if the walk reached the end of the hull, where the limit ended it).
+Tests (the suite has 1,051, all passing): the hull drops a dent point and collinear points; the walk is along the hull and a dent does not stop it; the price, the limit and the fallback; `step_after` and `stopped_by` are `None` at the end of the hull; both tables of counts, **the 81-setting one gives 72** (0.02, 0.10, 0.005, 300; hull
+[2, 20, 47, 74, 73, 72, 75, 7], the step after, to 75, costs 1.27) **and the 144-setting one 132** (hull [2, 38, 86, 134, 133, 132, 135, 138], the step into 132 from 133 costs 0.71, the step after, to 135, 1.29); at a price of 4 the walk gives 75 on the 81-setting table and 138 on the 144-setting one. The fixtures are `tests/fixtures/res7_grid81_settings.csv`
+and `tests/fixtures/res7_grid144_settings.csv`, aggregate counts of half A with the thresholds, no taxon or cell.
+
+**The one-shot guard.** `dry_run_choice` (the check that `--score-half-b` makes before it loads anything) now also refuses a dry run of another grid: its chosen setting must be an index of the 144 and have the four thresholds that the grid's setting of that number has (a number means something only in the grid it was made on),
+and `settings.csv` next to the report must exist and have one row for each of the 144 settings. Tested for a table of 81 rows, no table, other thresholds, no thresholds at all, and a number outside the grid (above and below). Checked on the real `res7/`: it accepts 132; it refuses a copy of the report with 132's thresholds changed, one with the number
+changed to 75 and one next to the 81-row table of the first run. **It does not refuse another `--setting N`:** `score_half_b` takes any N of the 144, and records `dry_run_chosen` and `setting_is_dry_run_choice` (false for any N but 132) in both markers and in `held_out.json`, which also has the thresholds, which is the design of the run
+(N is Markus's choice after he has read the dry run). Nothing was loosened, and the guard was not changed on that point.
+
+**The dry run again** (`uv run python scripts/calibrate.py --counts data/gbif/0020744-261023074918325`, half A only): 1,101 s (layer 5 at 144 settings 922 s), peak 22.3 GB. **The table of the 144 settings is the same as the first run's** (checked against the fixture), so only what depends on the choice differs below; the known cases are at the design's thresholds and are as in
+the section above. No `held_out*` file exists under `results/calibrate/` or `data/split/`, before or after, and half B was not loaded. `results/calibrate/res7/report.json` has `chosen.setting` 132.
+
+- **Chosen by the hull walk at break-even: setting 132**, satellite record share 2%, satellite cell share 20%, under-reported rate factor 0.5% and group minimum 300. Its three readings:
+
+  | Reading | Outside presences removed | Native presences lost |
+  |---|---|---|
+  | whole run, removals only (`run_drops`, the one that chooses) | 21.99% (191,887 of 872,784) | 3.26% (98,636 of 3,029,872) |
+  | whole run, everything counted (`run_all`) | 21.99% (191,901 of 872,784) | 3.26% (98,751 of 3,029,872) |
+  | layer 5 alone | 15.71% (128,453 of 817,911) | 1.94% (58,555 of 3,012,793) |
+
+  The hull walk by layer 5's reading also takes 132. **The hull** (whole run, removals only; 8 vertices of the 81 frontier settings; a step's cost is `extra native / extra outside`):
+
+  | Setting (record share, cell share, rate factor, group min) | Outside removed | Native lost | Step: extra outside, extra native | Cost | |
+  |---|---|---|---|---|---|
+  | 2 (0.5%, 2%, 0.5%, 3,000) | 163,804 | 86,936 | | | start |
+  | 38 (0.5%, 20%, 0.5%, 3,000) | 178,363 | 91,429 | +14,559, +4,493 | 0.31 | accepted |
+  | 86 (1%, 20%, 0.5%, 3,000) | 185,912 | 95,360 | +7,549, +3,931 | 0.52 | accepted |
+  | 134 (2%, 20%, 0.5%, 3,000) | 191,478 | 98,345 | +5,566, +2,985 | 0.54 | accepted |
+  | 133 (2%, 20%, 0.5%, 1,000) | 191,835 | 98,599 | +357, +254 | 0.71 | accepted |
+  | **132 (2%, 20%, 0.5%, 300)** | **191,887** | **98,636** | **+52, +37** | **0.71** | **accepted, chosen** |
+  | 135 (2%, 20%, 1%, 300) | 210,308 | 122,384 | +18,421, +23,748 | **1.29** | refused (cost) |
+  | 138 (2%, 20%, 1.5%, 300) | 224,288 | 143,410 | +13,980, +21,026 | 1.50 | not reached |
+
+  The walk ends at 132 on the price: the step to 135 loses 1.29 natives for each outside presence it removes, and the end of the hull, 138, is the last setting within the limit (and the old rule's choice). **The dent rows are in `report.json`'s frontier and not on the hull:** 62 (1%, 5%, 0.5%, 3,000) is 65 outside for 1,129 natives from 36, and 36 itself, the choice of the walk
+  along the frontier (20.49% and 3.03%), is under the hull too. From 36 to 132 the cost is 0.53 natives per extra outside presence (13,083 outside for 6,915 natives). At a price of 4 the walk would reach 138. **The design's setting (64: 1%, 5%, 1%, 1,000)**, 22.73% (198,417) and 3.85% (116,786) (layer 5 alone 16.52% and 2.56%), is on the frontier and off the hull. **The old rule's** 138
+  (2%, 20%, 1.5%, 300): 25.70% (224,288) and 4.73% (143,410).
+- **GRIIS cross-check, animals** (layers 1, 2, 4 and 5, layer 3 off): at the chosen setting layer 5 takes **9.12%** of the animal presences GRIIS lists as introduced (9,451 of 103,595) against **5.71%** of the others (363,252 of 6,366,558), 1.60 times; records 0.03% against 0.04%. At the design's setting 10.50% against 5.81%, 1.81 times, as before.
+- **Native loss by region** (TDWG level 3, at least 100 native presences, 325 of 366 regions, setting 132, layer 5's reading, whose total loss is 1.94%; the median region loses 1.16%). Regions of at most 5 land parts (56) lose 1.59% (1,279 of 80,372), larger ones (269) 1.70% (69,937 of 4,123,626), so islands still do not lose more as a rule, though island groups head the list
+  with the sampled mainland. The top 20 (a presence counts in each region its part touches, so the rows do not add up):
+
+  | Region | Land parts | Native presences | Lost | Loss |
+  |---|---|---|---|---|
+  | Marianas | 6 | 251 | 45 | 17.9% |
+  | Caroline Is. | 15 | 642 | 108 | 16.8% |
+  | Andaman Is. | 7 | 271 | 40 | 14.8% |
+  | Marquesas | 5 | 267 | 36 | 13.5% |
+  | Cape Verde | 3 | 434 | 55 | 12.7% |
+  | France | 38 | 57,815 | 7,232 | 12.5% |
+  | Ogasawara-shoto | 2 | 109 | 12 | 11.0% |
+  | Libya | 94 | 1,144 | 118 | 10.3% |
+  | Chatham Is. | 2 | 322 | 32 | 9.9% |
+  | Oman | 28 | 2,375 | 197 | 8.3% |
+  | Tubuai Is. | 3 | 111 | 9 | 8.1% |
+  | Seychelles | 2 | 211 | 17 | 8.1% |
+  | Maldives | 7 | 163 | 13 | 8.0% |
+  | Madeira | 2 | 629 | 50 | 7.9% |
+  | Sudan | 138 | 4,331 | 344 | 7.9% |
+  | Germany | 27 | 32,534 | 2,560 | 7.9% |
+  | Sri Lanka | 8 | 2,431 | 187 | 7.7% |
+  | Norfolk Is. | 2 | 224 | 17 | 7.6% |
+  | Fiji | 14 | 1,261 | 93 | 7.4% |
+  | Society Is. | 4 | 424 | 30 | 7.1% |
+
+**Not done here:** the scoring of half B. Setting 132 is the setting the rule chooses, and `res7/report.json` has it, from the same ingest, so `--score-half-b --setting 132` would find its guards satisfied.

@@ -45,10 +45,12 @@ from realms.calibrate import (
     evaluate_case,
     frontier,
     griis_cross_check,
+    hull,
     kingdom_counts,
     knee,
     known_cases,
     native_status,
+    pareto,
     rates,
     readings,
     region_loss,
@@ -58,6 +60,7 @@ from realms.calibrate import (
     tally,
     tdwg_regions,
     top_regions,
+    with_marginals,
     within_limit,
 )
 from realms.clean import RULES, SWITCHABLE, Settings, clean, outlier_rows
@@ -316,7 +319,7 @@ def test_the_old_rule_breaks_a_tie_by_lower_native_loss_and_then_by_the_order_of
 
 def test_a_native_loss_of_exactly_the_limit_is_within_it_whatever_the_float():
     # 3 of 60 is 5% and 0.05 * 60 is 3.0000000000000004, but 0.1 * 3 style noise must not push it out either
-    for rule in ("most_removed", "knee"):
+    for rule in ("most_removed", "hull_knee"):
         assert choose(table((10, 3), (5, 0), outside=10, native=60), rule=rule, max_marginal=1e6) == (0, True)
         assert choose(table((10, 150), (5, 0), outside=10, native=3000), rule=rule, max_marginal=1e6) == (0, True)
         assert choose(table((10, 151), (5, 0), outside=10, native=3000), rule=rule, max_marginal=1e6) == (1, True)
@@ -330,10 +333,11 @@ def test_the_old_rule_reports_when_no_setting_is_within_the_limit_and_takes_the_
 def test_choose_reads_the_whole_run_by_default_and_layer_5_alone_on_request():
     # layer 5 alone would take setting 0 (49 of 1,000 lost), but over the whole run it loses 7% and is out, so setting 1 is chosen
     t = table((90, 49), (60, 10), run=[(50, 70), (40, 20)])
-    for rule in ("most_removed", "knee"):
-        assert choose(t, rule=rule) == (1, True)
-        assert choose(t, reading="run", rule=rule) == (1, True)
-        assert choose(t, reading="layer5", rule=rule) == (0, True)
+    for rule in ("most_removed", "hull_knee"):
+        assert choose(t, rule=rule, max_marginal=2.0) == (1, True)
+        assert choose(t, reading="run", rule=rule, max_marginal=2.0) == (1, True)
+        assert choose(t, reading="layer5", rule=rule, max_marginal=2.0) == (0, True)  # the step to 0 costs 39 natives for 30 outside, 1.3
+    assert choose(t, reading="layer5") == (1, True)  # and at the default price of 1.0 it is too dear
     assert t.filter(within_limit(reading="run"))["setting"].to_list() == [1]
     assert t.filter(within_limit(reading="layer5"))["setting"].to_list() == [0, 1]
     # and where no setting is within the limit of the whole run, the lowest whole-run native loss is taken
@@ -352,11 +356,13 @@ def test_choose_refuses_an_empty_table_and_an_unknown_rule():
         choose(table())
     with pytest.raises(ValueError, match="no settings"):
         frontier(table())
+    with pytest.raises(ValueError, match="no settings"):
+        knee(table())
     with pytest.raises(ValueError, match="rule"):
-        choose(table((10, 5)), rule="max")
+        choose(table((10, 5)), rule="knee")  # the rule that walked the Pareto frontier itself is gone: it stopped at a dent of the grid
 
 
-# ---- the knee rule
+# ---- the Pareto frontier, its convex hull and the walk along the hull
 
 # the settings of this table, as (outside removed, native lost): the frontier is 1, 2 and 5
 FRONT = table((50, 10), (40, 5), (60, 10), (45, 20), (60, 30), (80, 40), (30, 5), (40, 5), native=10_000)
@@ -382,83 +388,183 @@ def test_frontier_keeps_only_settings_that_remove_more_for_their_loss():
     assert frontier(other)["setting"].to_list() == [0, 2]
 
 
+def test_the_frontier_is_the_pareto_step_and_the_step_and_marginal_step_in_turn():
+    points = pareto(FRONT)
+    assert points.columns == ["setting", "outside_removed", "native_lost", "native"] and points["setting"].to_list() == [1, 2, 5]
+    assert with_marginals(points).equals(frontier(FRONT))
+    assert with_marginals(points.head(0)).columns == [*points.columns, "extra_outside", "extra_native", "marginal"]
+    assert with_marginals(points.head(1))["marginal"].to_list() == [None]
+
+
 def test_a_frontier_of_one_setting_is_that_setting_and_has_no_step():
     steps = frontier(table((7, 3)))
     assert steps["setting"].to_list() == [0] and steps["marginal"].to_list() == [None]
     assert choose(table((7, 3))) == (0, True)
 
 
-def test_knee_rule_stops_at_the_first_step_dearer_than_max_marginal():
-    # four frontier settings, 100 more outside removed at each step but the last, which removes 700 more: the native lost by each step is 20, 80 and 1
-    t = table((100, 10), (200, 30), (300, 110), (1000, 111), native=10_000)
-    assert frontier(t)["marginal"].to_list() == [None, 0.2, 0.8, pytest.approx(1 / 700)]
-    assert MAX_MARGINAL == 4.0
-    assert choose(t) == (3, True)  # at the default every step is dear enough to pay
-    assert choose(t, max_marginal=0.5) == (1, True)  # 0.8 is over: stop there, though the step after it is the cheapest of all
-    assert choose(t, max_marginal=0.1) == (0, True)  # even the first step is over
-    assert choose(t, max_marginal=0.2) == (1, True)  # a step that costs exactly max_marginal is accepted: at most
-    found = knee(t, max_marginal=0.5)
-    assert (found.setting, found.met) == (1, True)
-    assert found.steps["accepted"].to_list() == [True, True, False, False]  # the walk stopped at the first step it refused
-    assert found.steps["affordable"].to_list() == [True, True, False, True]
-    # the same at the default: 40 natives for 10 outside is 4.0, which is accepted, and 41 is not
-    assert choose(table((100, 10), (110, 50), native=10_000)) == (1, True)
-    assert choose(table((100, 10), (110, 51), native=10_000)) == (0, True)
-    assert choose(table((100, 10), (110, 50), (120, 91), (500, 92), native=10_000)) == (1, True)
+# (outside removed, native lost) of the frontier below, by setting: 0, 1 and 3 and 4 are on the upper convex hull of it, 2 is a dent and 3 is collinear with 1 and 4
+#   0 (100, 10)  1 (150, 20)  2 (155, 30)  3 (240, 40)  4 (330, 60)
+# the slopes of outside removed over native lost are 5, 0.5, 8.5 and 4.5; 1 to 3 is 4.5 as is 3 to 4, so 1, 3 and 4 lie on a line and 3 goes
+DENT = table((100, 10), (150, 20), (155, 30), (240, 40), (330, 60), native=10_000)
 
 
-def test_knee_rule_never_passes_the_native_loss_limit():
-    # every step is cheap, but the third loses 51 of 1,000 natives, past the 5%, which ends the walk there
+def test_hull_drops_a_dent_point_and_collinear_points():
+    points = pareto(DENT)
+    assert points["setting"].to_list() == [0, 1, 2, 3, 4]  # every setting is on the frontier: each removes more than the one before
+    assert hull(points)["setting"].to_list() == [0, 1, 4]  # 2 lies below the line from 1 to 3, and 3 on the line from 1 to 4
+    assert hull(points).columns == points.columns
+    # a point on the segment between its neighbours goes, and one just above it stays
+    assert hull(pareto(table((0, 0), (10, 10), (20, 20), native=100)))["setting"].to_list() == [0, 2]
+    assert hull(pareto(table((0, 0), (11, 10), (20, 20), native=100)))["setting"].to_list() == [0, 1, 2]
+    assert hull(pareto(table((0, 0), (9, 10), (20, 20), native=100)))["setting"].to_list() == [0, 2]  # one just below it goes
+    # the first and the last of the frontier are always on it, and short frontiers are their own hull
+    assert hull(points.head(1))["setting"].to_list() == [0] and hull(points.head(2))["setting"].to_list() == [0, 1]
+    assert hull(points.head(0)).is_empty()
+    assert hull(pareto(table((100, 10), (200, 20), (300, 30), (400, 40), native=100)))["setting"].to_list() == [0, 3]  # a straight line has its two ends
+    # it is the upper hull: with outside removed, which a setting wants more of, on the vertical axis, so a convex dent (cheap first, dear after) is not on it
+    assert hull(pareto(table((100, 10), (101, 20), (300, 60), native=100)))["setting"].to_list() == [0, 2]  # 1 buys 1 for 10 natives and then 199 for 40: below the line
+
+
+def test_the_walk_is_along_the_hull_so_a_dent_does_not_stop_it():
+    # 1 to 2 costs 10 natives for 5 outside, 2.0, which stops a walk along the Pareto frontier at 1 at the price of 1.0, but 2 is not on the hull: 1 to 3 costs 20 for 90
+    found = knee(DENT, max_marginal=1.0)
+    assert frontier(DENT)["marginal"].to_list() == [None, 0.2, 2.0, pytest.approx(10 / 85), pytest.approx(20 / 90)]
+    assert found.steps["on_hull"].to_list() == [True, True, False, False, True]  # the Pareto frontier is all there, with the hull marked
+    assert found.hull["setting"].to_list() == [0, 1, 4]
+    assert found.hull["marginal"].to_list() == [None, 0.2, pytest.approx(40 / 180)]  # the steps of the hull, from 1 to 4 over 180 outside and 40 natives
+    assert (found.setting, found.met) == (4, True) == choose(DENT)
+    assert found.hull["affordable"].to_list() == [True, True, True] and found.hull["accepted"].to_list() == [True, True, True]
+    # the same table by the Pareto frontier's own step would stop at 1, which is the step that costs 2.0
+    assert max(m for m in frontier(DENT)["marginal"].to_list() if m is not None) == 2.0
+
+
+def test_the_walk_accepts_a_hull_step_while_it_costs_at_most_the_price_and_stops_at_the_first_dearer():
+    # outside removed 100, 200, 250 at native lost 10, 60, 140: the steps cost 0.5 and 1.6, and the hull is all three (slopes 2 and 0.625)
+    t = table((100, 10), (200, 60), (250, 140), native=10_000)
+    assert hull(pareto(t))["setting"].to_list() == [0, 1, 2]
+    assert MAX_MARGINAL == 1.0
+    assert choose(t) == (1, True)  # the default price is break-even: one native lost for each outside presence removed
+    assert choose(t, max_marginal=1.6) == (2, True)  # a step that costs exactly the price is accepted: at most
+    assert choose(t, max_marginal=0.5) == (1, True)
+    assert choose(t, max_marginal=0.4) == (0, True)
+    found = knee(t)
+    assert found.hull["accepted"].to_list() == [True, True, False] and found.hull["affordable"].to_list() == [True, True, False]
+    assert (found.reading, found.max_marginal, found.limit) == ("run", 1.0, NATIVE_LOSS_LIMIT)  # what it was asked, kept on the result
+    other = knee(t, reading="layer5", max_marginal=2.0, limit=0.5)
+    assert (other.reading, other.max_marginal, other.limit) == ("layer5", 2.0, 0.5)
+    # on a hull the steps only get dearer, so a walk that stops has no cheaper step after it
+    assert found.hull["marginal"].drop_nulls().is_sorted()
+
+
+def test_the_rows_past_the_limit_are_dropped_before_the_hull_is_built_and_the_walk_never_passes_it():
+    # 1 lies below the line from 0 to 2, so with 2 in the hull it would not be on it, but 2 loses 6% of the natives and is out
+    t = table((100, 10), (150, 30), (400, 60), native=1000)
+    assert hull(pareto(t))["setting"].to_list() == [0, 2]
+    found = knee(t)
+    assert found.hull["setting"].to_list() == [0, 1] and (found.setting, found.met) == (1, True)  # the hull of the settings within the limit
+    assert found.steps["within_limit"].to_list() == [True, True, False] and found.steps["on_hull"].to_list() == [True, True, False]
+    # cheap steps up to the limit: every step costs under 0.3, and the walk ends where the limit does
     t = table((100, 10), (200, 40), (300, 51), (400, 52), native=1000)
     assert max(frontier(t)["marginal"].drop_nulls()) < 1
     assert choose(t) == (1, True)
     assert choose(t, limit=0.051) == (2, True)  # at 5.1% the third is within it, and the fourth, at 5.2%, is not
-    assert choose(t, limit=0.052) == (3, True)  # and at 5.2% all four are, and the last step is cheap too
+    assert choose(t, limit=0.052) == (3, True)
     assert choose(table((100, 10), (200, 40), (300, 50), native=1000)) == (2, True)  # exactly 5% is within it
-    assert knee(t).steps["within_limit"].to_list() == [True, True, False, False]
-    assert knee(t).steps["accepted"].to_list() == [True, True, False, False]
     # a cheap step does not rescue a setting past the limit, whatever max_marginal is
     assert choose(t, max_marginal=1e9) == (1, True)
-    # where even the setting that loses least is past the limit, it is the one taken, and the caller is told
-    assert choose(table((100, 60), (200, 70), native=1000)) == (0, False)
-    assert choose(table((100, 60), (200, 70), native=1000), limit=0.07) == (1, True)
-    assert knee(table((100, 60), (200, 70), native=1000)).steps["accepted"].to_list() == [False, False]
-    # and by the whole run's reading, not layer 5's
+    # by the whole run's reading, not layer 5's
     t = table((100, 10), (200, 20), run=[(100, 10), (200, 60)], native=1000)
     assert choose(t, reading="layer5") == (1, True) and choose(t, reading="run") == (0, True)
 
 
+def test_where_no_setting_is_within_the_limit_the_lowest_native_loss_is_taken_and_the_caller_is_told():
+    t = table((100, 60), (200, 70), native=1000)
+    assert choose(t) == (0, False)
+    found = knee(t)
+    assert (found.setting, found.met) == (0, False) and found.hull.is_empty()
+    assert found.steps["setting"].to_list() == [0, 1] and found.steps["within_limit"].to_list() == [False, False] and found.steps["on_hull"].to_list() == [False, False]
+    assert found.step_into() is None and found.step_after() is None
+    assert choose(t, limit=0.07) == (1, True)  # at 7% both are within it, and 1 costs 10 natives for 100 outside
+    assert choose(table((90, 10), (60, 10), run=[(50, 90), (40, 70)])) == (1, False)  # by the whole run: 70 is the lowest loss
+    # of two that tie on the lowest loss, the one that removes more
+    assert choose(table((100, 60), (150, 60), native=1000)) == (1, False)
+
+
+def test_the_step_into_the_chosen_setting_and_the_step_after_it_are_of_the_hull():
+    found = knee(DENT, max_marginal=0.2)  # 0 to 1 costs 0.2, 1 to 4 costs 0.22
+    assert (found.setting, found.met) == (1, True)
+    into, after = found.step_into(), found.step_after()
+    assert (into["setting"], into["extra_outside"], into["extra_native"], into["marginal"], into["accepted"]) == (1, 50, 10, 0.2, True)
+    assert (after["setting"], after["extra_outside"], after["extra_native"], after["accepted"], after["affordable"]) == (4, 180, 40, False, False)
+    assert after["marginal"] == pytest.approx(40 / 180)  # not the step to 2, the next row of the Pareto frontier, which is not on the hull
+    # the first vertex has no step into it
+    first = knee(DENT, max_marginal=0.1)
+    assert first.setting == 0 and first.step_into()["marginal"] is None and first.step_into()["extra_outside"] is None and first.step_after()["setting"] == 1
+
+
+def test_a_walk_that_reaches_the_end_of_the_hull_has_no_step_after_it():
+    found = knee(DENT, max_marginal=1.0)
+    assert found.setting == 4 and found.step_after() is None
+    assert found.step_into()["setting"] == 4
+    report = load_script().knee_report(found)
+    assert report["step_after"] is None and report["stopped_by"] is None
+    assert report["step_into"]["setting"] == 4 and report["hull"][-1]["accepted"] is True
+    # and one that stops has the step after it, refused on cost
+    stopped = load_script().knee_report(knee(DENT, max_marginal=0.2))
+    assert stopped["step_after"]["setting"] == 4 and stopped["stopped_by"] == "cost" and stopped["step_into"]["setting"] == 1
+    # nothing within the limit: no hull, no step, and not stopped by anything
+    none = load_script().knee_report(knee(table((100, 60), (200, 70), native=1000)))
+    assert none["step_into"] is None and none["step_after"] is None and none["stopped_by"] is None and none["limit_met"] is False and none["hull"] == []
+
+
 def test_the_knee_rule_chooses_a_setting_the_old_rule_would_not():
-    # the old rule takes the most removed within the limit, however much each extra costs: here 29 natives for 2 outside, a step that the knee rule refuses
+    # the old rule takes the most removed within the limit, however much each extra costs: here 29 natives for 2 outside, a step that the knee refuses
     t = table((100, 10), (120, 20), (122, 49), native=1000)
     assert choose(t, **OLD) == (2, True)
-    assert choose(t) == (1, True)
+    assert choose(t) == (1, True)  # 0 to 1 costs 10 natives for 20 outside, 0.5, and 1 to 2 costs 29 for 2, 14.5: the walk stops at 1
+    assert choose(t, max_marginal=0.5) == (1, True)
+    assert choose(t, max_marginal=0.4) == (0, True)
 
 
-FIXTURE = ROOT / "tests" / "fixtures" / "res7_grid81_settings.csv"
+FIXTURE_81 = ROOT / "tests" / "fixtures" / "res7_grid81_settings.csv"
+FIXTURE_144 = ROOT / "tests" / "fixtures" / "res7_grid144_settings.csv"
 
 
-def test_knee_rule_on_the_resolution_7_table_of_81_chooses_75():
+def test_knee_rule_on_the_resolution_7_table_of_81_chooses_72():
     # the aggregate counts of half A's dry run at resolution 7 over the 81 settings of the first grid, with the thresholds, and no taxon or cell
-    t = pl.read_csv(FIXTURE)
+    t = pl.read_csv(FIXTURE_81)
     assert t.height == 81 and t["setting"].to_list() == list(range(81))
-    steps = knee(t)
-    assert (steps.setting, steps.met) == (75, True) == choose(t)
-    chosen = t.filter(pl.col("setting") == 75).row(0, named=True)
-    assert (chosen["satellite_record_share"], chosen["satellite_cell_share"], chosen["under_rate_factor"], chosen["group_min_records"]) == (0.02, 0.10, 0.01, 300)
-    walk = steps.steps
-    ids = walk["setting"].to_list()
-    at = ids.index(75)
-    assert ids[at + 1] == 8  # the step after it is to setting 8, which the rule refuses
-    marginals = walk["marginal"].to_list()
-    assert all(m <= 3.4 for m in marginals[1 : at + 1])  # every step up to 75 costs at most 3.4 natives for each outside presence
-    assert marginals[at + 1] == pytest.approx(9.1, abs=0.05)  # and the next one 9.1
-    assert walk["accepted"].to_list() == [True] * (at + 1) + [False] * (len(ids) - at - 1)
-    # the frontier is a few settings of the 81, and the rule chose in it
-    assert 1 < walk.height < 81
-    # the old rule, which took the most removed within 5%, took setting 7: it removes more outside presences for 5% of the native ones, at about 9 natives each
+    found = knee(t)
+    assert (found.setting, found.met) == (72, True) == choose(t)
+    chosen = t.filter(pl.col("setting") == 72).row(0, named=True)
+    assert (chosen["satellite_record_share"], chosen["satellite_cell_share"], chosen["under_rate_factor"], chosen["group_min_records"]) == (0.02, 0.10, 0.005, 300)
+    assert found.hull["setting"].to_list() == [2, 20, 47, 74, 73, 72, 75, 7]
+    assert found.step_after()["setting"] == 75 and found.step_after()["marginal"] == pytest.approx(1.27, abs=0.005)
+    assert found.hull["accepted"].to_list() == [True] * 6 + [False] * 2
+    # at four natives for each outside presence the walk goes on to 75, which is what the walk along the Pareto frontier chose, and stops before 7
+    assert choose(t, max_marginal=4.0) == (75, True)
+    # the old rule, which took the most removed within 5%, took setting 7: it removes more outside presences for 5% of the native ones
     assert choose(t, **OLD) == (7, True)
     assert t.filter(within_limit()).height == 58  # 58 of the 81 settings are within the limit of the whole run, as the dry run said
+
+
+def test_knee_rule_on_the_resolution_7_table_of_144_chooses_132():
+    t = pl.read_csv(FIXTURE_144)
+    assert t.height == 144 and t["setting"].to_list() == list(range(144)) and t.filter(within_limit()).height == 112
+    found = knee(t)
+    assert (found.setting, found.met) == (132, True) == choose(t)
+    chosen = t.filter(pl.col("setting") == 132).row(0, named=True)
+    assert (chosen["satellite_record_share"], chosen["satellite_cell_share"], chosen["under_rate_factor"], chosen["group_min_records"]) == (0.02, 0.20, 0.005, 300)
+    assert found.hull["setting"].to_list() == [2, 38, 86, 134, 133, 132, 135, 138]
+    assert found.step_into()["marginal"] == pytest.approx(0.71, abs=0.005) and found.step_into()["setting"] == 132
+    assert found.step_after()["setting"] == 135 and found.step_after()["marginal"] == pytest.approx(1.29, abs=0.005)
+    # the dent that stopped the walk along the Pareto frontier at 36 is on the frontier and not on the hull
+    assert found.steps.filter(pl.col("setting") == 62)["marginal"][0] == pytest.approx(17.37, abs=0.005)
+    assert found.steps.filter(pl.col("setting") == 62)["on_hull"].to_list() == [False] and 36 not in found.hull["setting"].to_list()
+    assert found.steps.filter(pl.col("on_hull"))["setting"].to_list() == found.hull["setting"].to_list()
+    assert found.steps.height == 81 and found.steps.filter(pl.col("within_limit")).height == 70
+    # at four natives for each outside presence the walk reaches the end of the hull, setting 138, the last within the limit and what the old rule chose
+    assert choose(t, max_marginal=4.0) == (138, True) == choose(t, **OLD)
 
 
 # ---- the plants that are calibrated
@@ -1053,23 +1159,27 @@ def test_the_dry_run_loads_half_a_only_and_writes_its_report_with_the_choice_and
     assert not world7.seal.exists() and not list(world7.results.glob("res*/held_out.*"))
 
 
-def test_the_dry_run_reports_the_knee_walk_and_what_the_old_rule_would_have_chosen(world7):
+def test_the_dry_run_reports_the_hull_walk_and_what_the_old_rule_would_have_chosen(world7):
     world7.run()
     report = world7.report()
     table = pl.read_csv(world7.results / "res7" / "settings.csv")
     assert table.height == 144
     walk = report["knee_rule"]
-    assert (walk["rule"], walk["max_marginal"], walk["native_loss_limit"], walk["reading"]) == ("knee", MAX_MARGINAL, NATIVE_LOSS_LIMIT, "run")
+    assert (walk["rule"], walk["max_marginal"], walk["native_loss_limit"], walk["reading"]) == ("hull_knee", MAX_MARGINAL, NATIVE_LOSS_LIMIT, "run")
+    found = knee(table)
+    # the whole Pareto frontier, with a flag for the rows on the hull, so that a dent stays in sight, and the hull with the cost of each of its steps
     assert [row["setting"] for row in walk["frontier"]] == frontier(table)["setting"].to_list()
-    assert report["chosen"]["setting"] == choose(table)[0] == walk["step_into"]["setting"]  # the chosen setting is the last the walk accepted, and the step into it is reported
-    ids = [row["setting"] for row in walk["frontier"]]
+    assert [row["setting"] for row in walk["frontier"] if row["on_hull"]] == [row["setting"] for row in walk["hull"]] == found.hull["setting"].to_list()
+    assert all(row["within_limit"] for row in walk["frontier"] if row["on_hull"])  # the hull is built of the settings within the limit only
+    assert report["chosen"]["setting"] == choose(table)[0] == found.setting == walk["step_into"]["setting"]  # the last vertex the walk accepted, and the step into it is reported
+    assert [row["setting"] for row in walk["hull"] if row["accepted"]][-1] == report["chosen"]["setting"]
+    hull_ids = [row["setting"] for row in walk["hull"]]
     after = walk["step_after"]
     if after is None:
-        assert ids[-1] == report["chosen"]["setting"] and walk["stopped_by"] is None
-    else:  # the step after is the next row of the frontier, with its marginal cost and the test that stopped the walk
-        assert after["setting"] == ids[ids.index(report["chosen"]["setting"]) + 1] and after["accepted"] is False
-        assert walk["stopped_by"] and set(walk["stopped_by"]) <= {"cost", "limit"}
-        assert after["marginal"] == pytest.approx(after["extra_native"] / after["extra_outside"])
+        assert hull_ids[-1] == report["chosen"]["setting"] and walk["stopped_by"] is None
+    else:  # the step after is the next vertex of the hull, with its marginal cost, refused on cost
+        assert after["setting"] == hull_ids[hull_ids.index(report["chosen"]["setting"]) + 1] and after["accepted"] is False and walk["stopped_by"] == "cost"
+        assert after["marginal"] == pytest.approx(after["extra_native"] / after["extra_outside"]) and after["marginal"] > walk["max_marginal"]
     old = report["chosen_by_old_rule"]
     assert old["setting"] == choose(table, rule="most_removed")[0] and set(old["readings"]) == {"layer5", "run_all", "run_drops"}
     assert set(report["chosen"]["readings"]) == {"layer5", "run_all", "run_drops"}
@@ -1142,12 +1252,16 @@ def test_scoring_half_b_needs_a_setting_and_a_setting_needs_the_scoring(world7):
     assert world7.loads == [] and not world7.results.exists()
 
 
-def fake_dry_run(world: ScriptWorld, **changes) -> Path:
-    """A `report.json` of a finished dry run at resolution 7 on the world's ingest, with `changes`, and nothing else."""
-    report = {"half": "A", "resolution": 7, "chosen": {"setting": 75}, "ingest": json.loads((world.counts_dir / "_COMPLETE").read_text()), **changes}
+def fake_dry_run(world: ScriptWorld, rows: int | None = len(settings_grid()), **changes) -> Path:
+    """A `report.json` of a finished dry run at resolution 7 on the world's ingest, with `changes`, and a `settings.csv` of `rows` settings (none if `rows` is `None`)."""
+    setting = settings_grid()[75]
+    chosen = {"setting": 75, **{k: getattr(setting, k) for k in THRESHOLDS}}
+    report = {"half": "A", "resolution": 7, "chosen": chosen, "ingest": json.loads((world.counts_dir / "_COMPLETE").read_text()), **changes}
     path = world.results / "res7" / "report.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({k: v for k, v in report.items() if v is not None}))
+    if rows is not None:
+        pl.DataFrame({"setting": list(range(rows))}).write_csv(path.parent / "settings.csv")
     return path
 
 
@@ -1168,6 +1282,35 @@ def test_scoring_half_b_refuses_without_a_finished_dry_run_at_7_on_the_same_inge
     with pytest.raises(SystemExit, match=message):
         world7.run("--score-half-b", "--setting", "75")
     assert world7.loads == [] and not world7.seal.exists() and not list(world7.results.glob("res*/held_out.*"))
+
+
+@pytest.mark.parametrize(
+    "rows, changes, message",
+    [
+        (81, {}, "settings.csv has 81 rows"),  # a dry run of the 81 settings that the 144 reads as its own
+        (None, {}, "no settings.csv"),
+        (144, {"chosen": {"setting": 75, "satellite_record_share": 0.02, "satellite_cell_share": 0.10, "under_rate_factor": 0.01, "group_min_records": 1000}}, "thresholds"),
+        (144, {"chosen": {"setting": 75}}, "thresholds"),  # no thresholds to compare is no match
+        (144, {"chosen": {"setting": 144, **{k: v[0] for k, v in THRESHOLDS.items()}}}, "not one of the 144"),
+        (144, {"chosen": {"setting": -1, **{k: v[0] for k, v in THRESHOLDS.items()}}}, "not one of the 144"),
+    ],
+)
+def test_scoring_half_b_refuses_a_dry_run_of_another_grid_before_it_loads_anything(world7, rows, changes, message):
+    """The one scoring reads the dry run's `chosen` setting by its number, which means something only in the grid it was made on."""
+    fake_dry_run(world7, rows, **changes)
+    with pytest.raises(SystemExit, match=message):
+        world7.run("--score-half-b", "--setting", "75")
+    assert world7.loads == [] and not world7.seal.exists() and not list(world7.results.glob("res*/held_out.*"))
+
+
+def test_the_dry_runs_choice_is_the_one_its_thresholds_and_its_table_say(world7):
+    """`dry_run_choice` accepts the report of a dry run of this grid, and hands back the number of its chosen setting."""
+    marker = json.loads((world7.counts_dir / "_COMPLETE").read_text())
+    args = type("Args", (), {"results": world7.results, "counts": world7.counts_dir})()
+    fake_dry_run(world7)
+    assert world7.script.dry_run_choice(args, marker) == 75
+    fake_dry_run(world7, chosen={"setting": 132, **{k: getattr(settings_grid()[132], k) for k in THRESHOLDS}})
+    assert world7.script.dry_run_choice(args, marker) == 132  # the dry run's choice, whatever number it has in the grid
 
 
 @pytest.mark.parametrize("setting", ["-1", "144"])

@@ -9,12 +9,13 @@ loads half B):
    cell share 2, 5, 10 and 20%, under-reported rate factor 0.5, 1, 1.5 and 2%, group minimum 300, 1,000 and 3,000 records), with layer 3 off, on the plants
    WCVP gives a native region and the other species of their taxonomic groups (the group totals need them). Each setting is measured by the share of
    outside presences it removes and the share of native presences it loses. The limit of 5% native loss is read over the whole run of layers 1, 2, 4
-   and 5 counting removals only (a presence a fold moved is moved, not lost), as Markus ruled on 2026-11-01. The setting is chosen by the knee rule
-   (`realms.calibrate.knee`): the Pareto frontier of the settings on native presences lost and outside presences removed is walked from the lowest native
-   loss, and a step is accepted while it costs at most `MAX_MARGINAL` (4) native presences for each extra outside presence removed and the setting stays within 5%;
-   the last setting accepted is chosen. `report.json` has the whole frontier with its marginal costs (`knee_rule`), the step into the chosen setting and the step after
-   it, and the choice of the rule of before, the most outside presences removed within 5% (`chosen_by_old_rule`), for comparison. The three readings (layer 5 alone, the whole
-   run counting everything, the whole run counting drops only) are reported for the chosen setting and the design's;
+   and 5 counting removals only (a presence a fold moved is moved, not lost), as Markus ruled on 2026-11-01. The setting is chosen by the knee rule on the convex hull
+   (`realms.calibrate.knee`, Markus, 2026-11-01): the settings within 5% are kept, the upper convex hull of their Pareto frontier on native presences lost and outside presences
+   removed is walked from the lowest native loss, and a step is accepted while it costs at most `MAX_MARGINAL` (1, break-even) native presences for each extra outside presence removed;
+   the last vertex accepted is chosen. `report.json` has the whole Pareto frontier with an `on_hull` flag per setting (`knee_rule.frontier`, so a dent stays in sight), the hull with the
+   cost of each step and whether it was accepted (`knee_rule.hull`), the step into the chosen setting and the step after it (`step_into`, `step_after`, of the hull), the reading and the
+   price it was made with, and the choice of the rule before the knee, the most outside presences removed within 5% (`chosen_by_old_rule`), for comparison. The three readings (layer 5
+   alone, the whole run counting everything, the whole run counting drops only) are reported for the chosen setting and the design's;
 3. the cross-check of layer 5 against GRIIS on half A's animals (`realms.calibrate.griis_cross_check`, `griis_cross_check.json`): layers 1, 2, 4 and 5 with layer 3
    off, at the chosen setting and at the design's, reporting the share of the animal presences that GRIIS lists as introduced (by its own establishment means,
    from the lists with distributions) that layer 5 takes, against the share of all the other animal presences. Reports only;
@@ -61,7 +62,6 @@ import polars as pl
 from realms.calibrate import (
     CASES,
     GRID,
-    MAX_MARGINAL,
     NATIVE_LOSS_LIMIT,
     SCORE,
     baseline,
@@ -147,22 +147,26 @@ def described(index: int, setting: Settings, start, refs, grid, met: bool | None
 
 
 def knee_report(found) -> dict:
-    """The knee rule's walk for `report.json`: the whole frontier with each step's marginal cost, the step into the chosen setting and the step after it, which the walk refused.
+    """The knee rule's walk for `report.json`, with the reading, price and limit it was made with (from `found`, a `realms.calibrate.Knee`).
 
-    A step's marginal cost is the native presences it loses for each extra outside presence it removes. The step after says which test stopped the walk: `cost` (over
-    `MAX_MARGINAL`), `limit` (the setting loses over the limit) or both. It is `None`, as is `stopped_by`, if the chosen setting is the last of the frontier.
+    `frontier` is the whole Pareto frontier of the 144 settings, with each row's `within_limit` and `on_hull` flags and the marginal cost of its step from the row before it on the
+    frontier. `hull` is the upper convex hull of the settings within the limit, which is what is walked, with each vertex's step from the vertex before it (`extra_outside`,
+    `extra_native`, `marginal`) and the flags `affordable` and `accepted`. `step_into` is the hull vertex of the chosen setting and `step_after` the next vertex, whose step the walk
+    refused on cost (`stopped_by` is `"cost"`); both are of the hull, and `step_after` and `stopped_by` are `None` if the chosen setting is the last vertex (the limit ended the
+    walk). Where no setting is within the limit the hull is empty and all three are `None`.
     """
     after = found.step_after()
     return {
-        "rule": "knee",
-        "reading": "run",
-        "max_marginal": MAX_MARGINAL,
-        "native_loss_limit": NATIVE_LOSS_LIMIT,
+        "rule": "hull_knee",
+        "reading": found.reading,
+        "max_marginal": found.max_marginal,
+        "native_loss_limit": found.limit,
         "limit_met": found.met,
         "frontier": found.steps.to_dicts(),
+        "hull": found.hull.to_dicts(),
         "step_into": found.step_into(),
         "step_after": after,
-        "stopped_by": None if after is None else [name for name, ok in (("cost", after["affordable"]), ("limit", after["within_limit"])) if not ok],
+        "stopped_by": None if after is None else "cost",
     }
 
 
@@ -196,6 +200,22 @@ def dry_run_choice(args: argparse.Namespace, marker: dict) -> int:
         raise SystemExit(f"FAILED {report_path} is not a complete dry run on half A at resolution {SCORE_RESOLUTION} with a `chosen` setting. {first}")
     if report.get("ingest", {}).get("zip_sha256") != marker["zip_sha256"]:
         raise SystemExit(f"FAILED {report_path} was made from another ingest than {args.counts} (the zip's sha256 differs). {first}")
+    grid_of_settings = settings_grid()
+    if isinstance(chosen, bool) or not 0 <= chosen < len(grid_of_settings):
+        raise SystemExit(f"FAILED {report_path} is of another grid: its chosen setting {chosen} is not one of the {len(grid_of_settings)} settings of this one. {first}")
+    thresholds = {k: report["chosen"].get(k) for k in GRID}
+    expected = {k: getattr(grid_of_settings[chosen], k) for k in GRID}
+    if thresholds != expected:
+        raise SystemExit(f"FAILED {report_path} is of another grid: its chosen setting {chosen} has the thresholds {thresholds}, and this grid's setting {chosen} has {expected}. {first}")
+    table_path = report_path.parent / "settings.csv"
+    if not table_path.exists():
+        raise SystemExit(f"FAILED {report_path} has no settings.csv next to it, with one row for each of the {len(grid_of_settings)} settings of the grid. {first}")
+    try:
+        rows = pl.read_csv(table_path, columns=["setting"]).height
+    except pl.exceptions.PolarsError as error:
+        raise SystemExit(f"FAILED {table_path} cannot be read as the table of the settings (a `setting` column): {error}. {first}") from error
+    if rows != len(grid_of_settings):
+        raise SystemExit(f"FAILED {report_path} is of another grid: its settings.csv has {rows} rows, and this grid has {len(grid_of_settings)} settings. {first}")
     return chosen
 
 
@@ -355,7 +375,7 @@ def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
     lap("layer_5_per_setting", begun)
     table = table.with_columns(within_limit(reading="run").alias("within_limit"), within_limit(reading="layer5").alias("within_limit_layer5"))
     table.write_csv(directory / "settings.csv")
-    found = knee(table)  # the whole run counting drops only
+    found = knee(table)  # the settings within the limit of the whole run counting drops only, the hull of their frontier, walked at break-even
     index_chosen, met = found.setting, found.met
     index_layer5, met_layer5 = choose(table, reading="layer5")  # the knee rule again, by layer 5's reading
     index_old, met_old = choose(table, rule="most_removed")  # the rule of before the knee, to compare
@@ -373,7 +393,8 @@ def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
         say(f"top {LEADERS} of the {table.height} settings (within the limit first, then most outside removed, whole run counting drops only):\n{ranked}")
     say(f"settings that lose at most {NATIVE_LOSS_LIMIT:.0%} of native presences: {report['within_limit']['run']} of {table.height} counting the whole run's drops, {report['within_limit']['layer5']} by layer 5 alone")
     with pl.Config(tbl_rows=found.steps.height + 5, tbl_cols=12, fmt_float="mixed"):
-        say(f"the frontier of the {table.height} settings, whole run counting drops only, walked from the lowest native loss (accepted while each step costs at most {MAX_MARGINAL} natives per outside presence):\n{found.steps}")
+        say(f"the Pareto frontier of the {table.height} settings, whole run counting drops only, with the flags of the settings within the limit and on the hull:\n{found.steps}")
+        say(f"the convex hull of the settings within the limit, walked from the lowest native loss (accepted while each step costs at most {found.max_marginal} natives per outside presence):\n{found.hull}")
     for name in ("chosen", "knee_rule", "chosen_by_old_rule", "design_setting", "chosen_by_layer5_reading"):
         say(f"{name}: {report[name]}")
 

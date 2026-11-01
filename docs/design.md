@@ -199,7 +199,13 @@ The thresholds are checked against independent knowledge rather than guessed.
 
 1. On a random half of WCVP plant species, with layer 3 off, measure two rates per threshold setting: the share of
    out-of-native presences removed, and the share of native presences lost.
-2. Choose settings that lose at most 5% of native presences and remove as many out-of-native presences as possible.
+2. Try a grid of 144 settings of layer 5's four thresholds (satellite record share 0.5, 1 and 2%, satellite cell share 2, 5, 10 and 20%,
+   under-reported rate factor 0.5, 1, 1.5 and 2%, group minimum 300, 1,000 and 3,000 records). Take the settings that lose at most 5% of the
+   native presences, read over the whole run of layers 1, 2, 4 and 5 and counting removals only (a presence that a fold moved is not lost), and
+   walk the upper convex hull of their Pareto frontier (native presences lost against out-of-native presences removed) from the lowest native
+   loss. Accept a step while it costs at most one native presence lost for each extra out-of-native presence removed (break-even), and take the
+   last setting accepted. The walk is along the hull and not from one setting of the frontier to the next, because a grid can have a dent in its
+   frontier: one dear step, after which the cost falls again, which would end a walk there (see `DECISIONS.md`, 2026-11-01).
 3. Evaluate on the other half of plants (B's calibration species, loaded once: see "Exploring and confirming"), and on GRIIS
    animal entries as a cross-check outside plants.
 4. Report the remaining error as an estimate.
