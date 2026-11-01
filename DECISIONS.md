@@ -1790,3 +1790,33 @@ the section above. No `held_out*` file exists under `results/calibrate/` or `dat
   | Society Is. | 4 | 424 | 30 | 7.1% |
 
 **Not done here:** the scoring of half B. Setting 132 is the setting the rule chooses, and `res7/report.json` has it, from the same ingest, so `--score-half-b --setting 132` would find its guards satisfied.
+
+### Half B's held-out rates: the one unsealed call (2026-11-01)
+
+The one `unsealed=True` call before the freeze ran once:
+`uv run python scripts/calibrate.py --counts data/gbif/0020744-261023074918325 --score-half-b --setting 132`, at resolution 7, after the dry run on half A above chose
+setting 132 by the hull walk at break-even (Markus, 2026-11-01). It loaded the references and half B's calibration species only, meaning the WCVP plants plus the species of their tax groups:
+197,567 species, 194,981 Plantae and 2,586 not. It printed and saved counts and rates only, nothing per taxon. It took 37 s and peaked at 17.9 GB.
+
+The fixed marker, `data/split/held_out-315557.started`, copied here as the durable record (`results/calibrate/res7/held_out.started` is identical):
+
+```
+started 2026-11-01T16:19:27+00:00
+commit 792815c605c4481bba6f2fd1c9cbd512cdc5074d
+setting 132
+dry_run_chosen 132
+setting_is_dry_run_choice True
+counts data/gbif/0020744-261023074918325
+zip_sha256 7f0bbb6e4d0d012387a26436d2962043a38f41c54bdcaede620438a420ab7003
+```
+
+**Held-out rates of setting 132** (record share 2%, cell share 20%, rate factor 0.5%, group minimum 300). Half A's are from the dry run that chose it:
+
+| Reading | Half B: outside removed | Half B: native lost | Half A: outside removed | Half A: native lost |
+|---|---|---|---|---|
+| Whole run, layers 1, 2, 4 and 5, removals only (the binding reading) | 24.53% (153,880 of 627,285) | **3.19%** (82,129 of 2,572,615) | 21.99% | 3.26% |
+| Layer 5 alone | 17.56% (102,135 of 581,492) | 1.97% (50,456 of 2,560,544) | 15.71% | 1.94% |
+
+The setting holds on the held-out half. Native loss is 3.19% against A's 3.26%, within the 5% limit, and it removes slightly more of B's outside presences than A's. Nothing points to the thresholds being fitted to A's plants. These are the remaining error rates of the cleaning that the design asks to report.
+
+From now on half B stays sealed until M3. Both markers stop any second scoring. A retry would need Markus's explicit decision, and none is planned.
