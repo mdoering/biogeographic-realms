@@ -19,6 +19,19 @@ WCVP = 2232
 WRIMS = 26853
 GAZETTEERS = "https://raw.githubusercontent.com/CatalogueOfLife/col-gazetteers/main"
 NATURAL_EARTH_LAND = "https://naciscdn.org/naturalearth/10m/physical/ne_10m_land.zip"
+# Admin-1 places the sub-national GRIIS lists (Hawaii, the Azores) on the grid
+NATURAL_EARTH_ADMIN1 = "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_1_states_provinces.zip"
+NATURAL_EARTH_LICENCE = "public domain (https://www.naturalearthdata.com/about/terms-of-use/: 'in the public domain ... No permission is needed to use Natural Earth')"
+# WCVP's distributions are TDWG level 3 codes, whose polygons put them on the grid
+# pinned to master's last commit (2021-07-15), so that a rerun cannot change the polygons
+WGSRPD_LEVEL3 = "https://raw.githubusercontent.com/tdwg/wgsrpd/52da7828aba9d461dd133c27b3bd7a4407161f54/geojson/level3.geojson"
+# The repository has no licence file. Its level3 shapefile metadata (level3/level3.shp.xml) says Access_Constraints None and Use_Constraints
+# 'None, but dataset is in first release', with ESRI's copyright notice for the administrative boundaries it derives from.
+WGSRPD_LICENCE = (
+    "none stated: github.com/tdwg/wgsrpd has no licence file, and level3.shp.xml gives Access_Constraints 'None' and Use_Constraints 'None, but dataset is "
+    "in first release' with the notice 'Administrative boundary files are the intellectual property of ESRI and its licensors and are using herein with "
+    "permission. (c) 1992-1997 ESRI, GMi. All Rights Reserved.' Data by Justin Moat, RBG Kew, for Brummitt 2001 (TDWG, Plant Taxonomic Database Standards No. 2)"
+)
 ISEA3H_GRID = "https://download.gbif.org/grids/ISEA3H/ISEA3H-{}.gpkg"
 ISEA3H_RESOLUTIONS = (5, 6, 7)
 
@@ -69,6 +82,11 @@ def main() -> None:
 
     land = fetch(NATURAL_EARTH_LAND, ROOT / "natural_earth" / "ne_10m_land.zip")
     manifest["natural_earth_land"] = {"path": str(land), "size": land.stat().st_size}
+
+    admin1 = fetch(NATURAL_EARTH_ADMIN1, ROOT / "natural_earth" / "ne_10m_admin_1_states_provinces.zip")
+    manifest["natural_earth_admin1"] = {"path": str(admin1), "size": admin1.stat().st_size, "source": NATURAL_EARTH_ADMIN1, "licence": NATURAL_EARTH_LICENCE}
+    level3 = fetch(WGSRPD_LEVEL3, ROOT / "wgsrpd" / "level3.geojson")
+    manifest["wgsrpd_level3"] = {"path": str(level3), "size": level3.stat().st_size, "source": WGSRPD_LEVEL3, "licence": WGSRPD_LICENCE}
 
     for resolution in ISEA3H_RESOLUTIONS:
         grid = fetch(ISEA3H_GRID.format(resolution), ROOT / "grids" / f"ISEA3H-{resolution}.gpkg")

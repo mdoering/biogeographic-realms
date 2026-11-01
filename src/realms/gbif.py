@@ -35,6 +35,8 @@ class Match:
     usage_id: str | None
     rank: str | None
     match_type: str | None
+    accepted_id: str | None = None  # the accepted usage, when the match is a synonym
+    accepted_rank: str | None = None
 
 
 def get_json(url: str) -> tuple[int, dict | None]:
@@ -78,7 +80,8 @@ def gbif_match(name: str, api: str = GBIF_API) -> Match:
         # no match is a 200 with matchType NONE, so a 404 means the endpoint itself has gone
         raise ApiError(f"species match answered {status} for {name!r}")
     usage = body.get("usage") or {}
-    return Match(usage.get("key"), usage.get("rank"), (body.get("diagnostics") or {}).get("matchType"))
+    accepted = body.get("acceptedUsage") or {}
+    return Match(usage.get("key"), usage.get("rank"), (body.get("diagnostics") or {}).get("matchType"), accepted.get("key"), accepted.get("rank"))
 
 
 _NON_NATIVE_MEANS = "'introduced','introducedAssistedColonisation','vagrant'"

@@ -81,7 +81,7 @@ any where over a third of the sample wasn't a garden, zoo or held organism.
   alien in that country. Joining them to COL has to go through names: `col:ID`s are GBIF URLs (`https://www.gbif.org/species/8825970`) in the lists
   that have them. Lists also hold higher ranks, which need filtering out.
 - **Missing, needing a POST on production to create:** WRiMS (26853), and GRIIS for AQ, AS, BL, BQ-Bonaire, BQ-Saba, FK, GQ, GS, GW, KP, KR, KY, KY-Grand,
-  KY-Little, MF, PG, PS, SH-Ascension, SH-StHelena, SH-Tristan, SS, TR, VG. Nothing requested yet.
+  KY-Little, MF, PG, PS, SH-Ascension, SH-StHelena, SH-Tristan, SS, TR, VG. Nothing requested yet. *(Since requested and finished, see "Reference joins" below.)*
 
 ### Null model
 
@@ -581,3 +581,128 @@ one worker because five times the links makes a worker 24 GB. The decision is no
 measure scaled, and the first real resolution 7 stage will be the check. At Markov time 0.75 half A still leaves 5 units after the floor and one map
 (k = 5), where a selection run assumes 56, and `excess_table` is still not run on the pilot's own map (zero-area parts), so neither is settled here. The
 bootstrap measure ran 2 draws at once, not 12.
+
+## 2026-11-01
+
+### Reference joins
+
+`src/realms/natives.py` and `lists.py` join WCVP, GRIIS and WRiMS to COL 315557 ids, and `load_references(grid)` returns them as `References`.
+Figures are from `scripts/check_natives.py` on the real exports (`results/natives.json`).
+
+**The 24 missing exports now exist.** Markus requested WRiMS and the 23 GRIIS lists. `fetch_reference.py` again: 316 items, 0 missing,
+and WRiMS (26853) has an extended export of 2026-10-31T23:47 (4.5 MB). Layer 3 therefore runs with WRiMS and all 304 GRIIS lists.
+`load_references` still skips and names (`References.missing`) a WRiMS or GRIIS export the manifest lists as missing, and raises only for
+COL, WCVP, the two polygon files and the grid.
+
+**Licences, as found in the sources** (also in `manifest.json`):
+
+- **WGSRPD level 3** (`github.com/tdwg/wgsrpd`, `geojson/level3.geojson`, pinned to commit `52da782`, 2021-07-15). The repository has no
+  licence file and the GitHub API reports none. The shapefile metadata (`level3/level3.shp.xml`) says Access_Constraints "None" and
+  Use_Constraints "None, but dataset is in first release. Thanks to ESRI for use of the Orginal Administration Boundaries", with ESRI's
+  notice "Administrative boundary files are the intellectual property of ESRI and its licensors and are using herein with permission.
+  (c) 1992-1997 ESRI, GMi. All Rights Reserved." Credit: Justin Moat, RBG Kew, for Brummitt 2001 (TDWG, Plant Taxonomic Database Standards
+  No. 2). **That is no open licence.** The polygons stay in `data/` and are not committed or republished, and the published result
+  should cite Brummitt 2001 and say where the regions came from.
+- **Natural Earth admin-1** (`ne_10m_admin_1_states_provinces`, 5.1.1): public domain, per naturalearthdata.com/about/terms-of-use/.
+
+**The name index.** `name_index` has 4,715,525 rows: the 2,354,462 accepted and 174,878 provisionally accepted species, and 2,186,185
+names of species-rank synonyms pointing to one of them. A synonym of a subspecies or variety rolls up to that taxon's species (about 160,800
+of 2.3M species-rank synonyms), as GBIF counts those records for the species. Synonyms whose accepted taxon is a genus (1,150) or higher are
+left out, as are ambiguous synonyms (129,976) and misapplied names (6,093), since a pro parte name could belong to several species. The index
+has a `status` column besides the brief's columns, which the matching and `NO_WILD_RANGE` need. It takes 4 s and 3.2 GB to build.
+
+**Matching** is by exact `col:scientificName` (no authorship) and kingdom, with the clash narrowed to Animalia, Plantae and Fungi as in the
+occurrence query: a plant never matches an animal homonym, while `Bacteria` or `Viruses` against COL's `Bacillati` or new virus kingdoms is
+no clash. WCVP has no kingdom column, so its names count as Plantae. A plain GRIIS list has none either, and takes the kingdom row above
+each entry.
+
+- **Ties are broken by standing, not guessed.** The brief reads: a name that fits several accepted species is ambiguous. Read strictly,
+  10,037 of WCVP's 371,830 names (2.7%, which is 8.6% of its distribution rows) and 4,660 of GRIIS's 31,575 (14.8%, which is 26.5% of its
+  entries) are ambiguous. 7,948 of WCVP's are one accepted and one provisionally accepted species of the same name (*Zea mays* is `5CXX5` and `VJSFD`), as
+  are most of GRIIS's, which are the duplicates the "Taxa by id" section already found. Now an accepted species wins over a provisionally
+  accepted one and that over a synonym's, as COL and GBIF rank them, and only a tie within a standing stays ambiguous, never guessed:
+  102 WCVP names (0.1% of its rows) and 136 GRIIS names (0.4% of its entries). Accepted over synonyms alone would leave 8,071 names (7.3%
+  of rows) and 3,665 (22.5% of entries). **Markus can revert this** by dropping the standing order in `match_names`; the cost is the
+  8.6% of WCVP's rows and the 26.5% of GRIIS's entries that then join to nothing.
+- **Match rates** (distinct names; rows in brackets). Ambiguous names count as neither matched nor failed.
+
+| Source | Names | Matched | Ambiguous | Unmatched |
+|---|---|---|---|---|
+| WCVP | 371,830 | 98.3% | 102 | 6,217 (1.7%) |
+| WRiMS | 2,511 | 98.6% | 0 | 35 (1.4%) |
+| GRIIS, 304 lists pooled | 31,575 | 91.0% (95.7% of 120,547 entries) | 136 | 2,704 (8.6%) |
+
+  A further 617,893 of WCVP's 1,984,179 distribution rows (31%) are of genera (338,608) and infraspecific taxa (279,285), which no species
+  name joins, and 12,800 more belong to the unmatched names. Of the unmatched GRIIS names, 743 hold non-ASCII text, because some lists
+  carry authorship in `scientificName` with its accents broken (`ForsskÃ¥l`), and 488 hold punctuation. Nine of the 303 GRIIS lists that have entries have more than
+  10% unmatched (CY-Cyprus, DZ, IL, KW, MH-Namdrik-2, SY, TC, TK, WF; the largest is IL with 762 names and 10.5%). No whole source does.
+- **GBIF fallback for those nine only.** `gbif_fallback` asked the match API v2 (`checklistKey`, at most 5 requests a second, GET only)
+  about their 132 unmatched names and took 97, as `EXACT` or `VARIANT` matches whose accepted usage is a species of 315557 and whose
+  kingdom doesn't clash; a synonym of a subspecies, a higher rank or a species not in this release is refused. They are saved to
+  `data/reference/gbif_fallback.parquet`, which `load_references` applies to any name still unmatched, so a rerun doesn't depend on
+  GBIF. GRIIS rose to 91.3% of names (2,607 unmatched) and WRiMS to 98.7%.
+
+**WCVP.** Species rank only; WCVP's genus and infraspecific distributions aren't added (of 371,856 species, 3 have a subspecies' or
+variety's distribution and none of their own). An empty `establishmentMeans` is native (the "Reference data" section above), `introduced`
+isn't, and the 2,324 `uncertain` rows are dropped. 330 rows hold a level 1 or 2 code (`84`, `7`) and are dropped, as they can't say which
+region. Both native and introduced regions stay, each with its level 3 code, since Task 11 has three modes. Where one species gets both for a
+region (two WCVP names that COL holds as one species) it is native. Result: 1,341,114 rows of 356,880 species, 1,198,410 native and 142,704
+introduced.
+
+**GRIIS.** Only accepted species-rank entries are alien taxa: the 66,316 higher ranks (families 32,434, orders 15,608, `other` 5,761, classes
+4,453, genera 2,230, phyla 2,111, kingdoms 878) and 1,924 subspecies are dropped, and so are synonyms. The country and subdivision come from
+the file name. Result: 112,116 pairs of 27,389 species. **A finding the plain lists can't show:** 3,457 of the 52,462 species of the 55
+extended lists carry `native` distribution rows (`GRIIS-EC` and `GRIIS-SR` flag every species so, though *Cajanus cajan* is no native of
+Ecuador, and the US list's own remarks say "Native to: Eurasia" for species flagged native). The flag looks like an import artefact, and as
+the plain exports lack it, **every listed species is kept as alien**, as "Reference data" above argued.
+
+**WRiMS.** 8,573 area rows are `introduced` (of 11,093: 380 `native`, 8 `uncertain` and 727 with no means, which are left out) and 99 of
+them belong to genera and infraspecific taxa. Result: 8,347 pairs of 2,139 species in 686 areas. `References.wrims` has `species_id`,
+`area_id`, `area` and `country`. **The areas don't map to sea parts.** They are Marine Regions places (MRGIDs) with no geometry in the
+export: 244 of the 686 are the part of a sea inside one country's waters ("Italian part of the Tyrrhenian Sea"), 78 are exclusive economic
+zones, and the rest are whole seas, countries, states and harbours. `country` is read from the name (a table of 100 demonyms and country
+names in `MARINE_COUNTRIES`) for 6,352 of 8,347 pairs (76%), and is null for an open sea, a bay or a harbour. Placing a pair on sea parts needs
+the polygons from Marine Regions' WFS, which isn't fetched. Whether GBIF's `countrycode` is set for marine records at sea is **not
+checked**, so `country` may not be usable to clean them.
+
+**Land parts and TDWG regions.** `tdwg3_parts(grid, level3)` gives each land part (`land_km2` above 1000 m2) every level 3 region whose polygon
+shares some area with the cell's polygon, which is the whole cell and not its land, as WGSRPD draws its own coast. Cell polygons are drawn as
+in `grid.py`, and regions are tried a turn of longitude to either side for the antimeridian. At resolution 6, 3,145 land parts: 3,065 have a
+region (1.57 on average, at most 7) and 80 have none (specks of coast and ice the scheme leaves out, the largest the Ross Ice Shelf at 1,150
+km2). At resolution 7: 8,279 parts, 163 without. The polygons are in the grid file, not in `Grid`, so the function reads the file named in
+the manifest (`isea3h_<resolution>`).
+
+**Sub-national GRIIS lists on the grid.** `admin1_cells(grid, admin1, subdivisions)` places a list's subdivision on Natural Earth's admin-1
+polygon of that name (compared in any of its name fields, folded to letters and digits; the list's own country where several polygons carry
+it, any country where one polygon alone does, since GRIIS says `BQ` for Saba and Natural Earth `NL`). `GRIIS-US-United` is the conterminous
+states, which is the US less Alaska and Hawaii. A cell belongs by its centre, as the brief says, and **islands that no centre falls on take the
+cells whose polygon overlaps them** instead (`via` = `overlap`), as the cells are 70,000 km2 at resolution 6: by centre alone only Alaska,
+Svalbard and the US list got any cell, and Hawaii, the Azores, Madeira, Réunion and 17 others got none. Result at resolution 6: 186 cells for 24
+of the 85 subdivisions (138 by centre, 48 by overlap; 457 cells at resolution 7). **61 subdivisions have no polygon in Natural Earth** and
+their 7,468 pairs (6.7%) can't be placed: the 33 Marshall Islands atolls, the 7 Canary Islands (`IC`), 5 Tuvalu islands, Tonga's Niua and
+Protected, St Helena, Tristan, Juan Fernández, Rapa Nui, Galápagos, Pitcairn, Cyprus, Clipperton, Cayman, Soqotra, Huvalu and the two French
+southern lists. The country of a sub-national list is the alias's, which is the sovereign's for overseas places (`FR-Reunion`) and `IC` for
+the Canaries, so Task 11 should match those on the cells and not on GBIF's `countrycode`.
+
+**`NO_WILD_RANGE`: 17 names, 18 COL ids** (*Capra hircus* has a provisionally accepted duplicate). Humans, 14 domestic animals and 2 crops.
+Each was checked against 315557: the name must be an accepted species there (`resolve_no_wild_range` checks it again at load, taking every
+id of the name within its kingdom, and drops with a warning a name COL has as a synonym, like `Gallus domesticus`), and COL must not file a
+wild form of the taxon under it. Entries, each with its reason in `lists.py`: *Homo sapiens*; *Bos taurus*, *Bos indicus*, *Bubalus bubalis*,
+*Capra hircus*, *Equus caballus*, *Equus asinus*, *Canis familiaris*, *Felis catus*, *Sus domesticus*, *Camelus dromedarius*, *Camelus
+bactrianus*, *Lama glama*, *Vicugna pacos*, *Cavia porcellus*; *Triticum aestivum*, *Brassica napus*.
+
+- **Dropped for covering wild populations** (`NO_WILD_RANGE_DROPPED`): *Ovis aries* (COL holds *Ovis orientalis*, the mouflon, as
+  its synonym), *Gallus gallus domesticus* (COL has no such species, *Gallus domesticus* being a synonym of *Gallus gallus*, which holds the
+  red junglefowl), *Zea mays* (accepted subspecies *parviglumis* and *huehuetenangensis*, the wild teosintes), *Hordeum vulgare* (wild barley as
+  subspecies *spontaneum*), *Glycine max* (wild soybean as subspecies *soja* and the synonym *Glycine soja*), *Solanum tuberosum* (186
+  species-rank synonyms, wild potatoes among them, and WCVP gives it an Andean native range), and from the first look *Oryza sativa*,
+  *Sorghum bicolor* and *Capsicum annuum*. **The brief named maize, barley, soybean and potato as examples, and these four are the ones
+  dropped.** Markus can put them back in `NO_WILD_RANGE`; the cost is the teosinte, wild barley, wild soybean and wild potato records going
+  with them.
+- **Kept with a caveat:** *Canis familiaris* also holds the dingo (a feral dog, with no natural range) and *Capra hircus* one local
+  synonym, the Chiltan markhor. COL holds the dog apart from the wolf (*Canis lupus*, left out like *Sus scrofa*, which holds the wild boar),
+  so the case the brief imagined, a dog as *Canis lupus*, doesn't occur here.
+
+**Cost.** The check of all sources takes 53 s and peaks at 16.2 GB, almost all of it `load_taxa`, which `load_references` calls and which was
+already known to need about 15 GB. Everything new reads the exports through Polars scans and peaks at 3.2 GB (`name_index`).
+

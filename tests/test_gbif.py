@@ -49,6 +49,20 @@ def test_gbif_match_reads_usage_and_diagnostics(api):
     assert query == {"checklistKey": [CHECKLIST_KEY], "scientificName": ["Agave rafaeliorum"]}
 
 
+def test_gbif_match_reads_the_accepted_usage_of_a_synonym(api):
+    api.routes["/v2/species/match"] = (
+        200,
+        {
+            "synonym": True,
+            "usage": {"key": "5G6ZJ", "rank": "SUBSPECIES"},
+            "acceptedUsage": {"key": "QLXF", "rank": "SPECIES"},
+            "diagnostics": {"matchType": "EXACT"},
+        },
+    )
+    match = gbif_match("Canis lupus familiaris", api.base)
+    assert (match.usage_id, match.accepted_id, match.accepted_rank, match.match_type) == ("5G6ZJ", "QLXF", "SPECIES", "EXACT")
+
+
 def test_gbif_match_with_no_usage(api):
     api.routes["/v2/species/match"] = (200, {"diagnostics": {"matchType": "NONE"}})
     match = gbif_match("Nothing", api.base)
