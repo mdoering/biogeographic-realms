@@ -27,6 +27,10 @@ species. `kingdom_counts` says how many of a set of species are not Plantae, fro
 **The setting** is chosen by `choose`: the one that removes the most outside presences while losing at most 5% of the native ones. A tie goes to
 the lower native loss, and then to the order of the grid. Where no setting loses so little, the one that loses least is taken, and the caller is told.
 
+**The animal cross-check against GRIIS** (`griis_cross_check`) sets layer 5 against what GRIIS says is introduced. The heuristics have no range to go by,
+so the animals that GRIIS lists as introduced (by its own establishment means, from the lists with distributions) tell how much of that layer 5 finds on its own,
+set against what it takes of the other animals. Reports only.
+
 **Known cases** (`CASES`) are checked on the fully cleaned half A with `known_cases`. An area is the cells whose land touches a TDWG level 3 region (or
 the regions of a level 1 region), so both parts of a coastal cell count. The cases of a family in half B are not run (the half is looked up in the split
 file, which holds no occurrences), and are returned with nothing but the family and the half.
@@ -43,6 +47,7 @@ from typing import Literal
 import polars as pl
 
 from realms.clean import RULES, SWITCHABLE, Settings, clean, outlier_rows
+from realms.clean_report import GRIIS_RULES
 from realms.grid import Grid, cell_of
 from realms.natives import References, match_names
 
@@ -358,6 +363,54 @@ def region_loss(status: pl.DataFrame, removed: pl.DataFrame, wcvp: pl.DataFrame,
 def top_regions(losses: pl.DataFrame, min_native: int = 100, n: int = 20) -> pl.DataFrame:
     """The `n` regions of `region_loss` with the highest loss among those with at least `min_native` native presences."""
     return losses.filter(pl.col("native") >= min_native).head(n)
+
+
+# ---- the cross-check against GRIIS
+
+def _unit_counts(frame: pl.DataFrame) -> dict:
+    """How many (species, cell) pairs, (species, part) presences and records `frame` holds, and how many layer 5 took, with the shares."""
+    pairs = frame.group_by("species_id", "cell").agg(pl.col("removed").any(), pl.col("records").sum())
+    out = {
+        "pairs": pairs.height,
+        "pairs_removed": int(pairs["removed"].sum() or 0),
+        "presences": frame.height,
+        "presences_removed": int(frame["removed"].sum() or 0),
+        "records": int(frame["records"].sum() or 0),
+        "records_removed": int(frame.filter(pl.col("removed"))["records"].sum() or 0),
+        "species": frame["species_id"].n_unique(),
+    }
+    return {**out, **{f"{k}_share": _share(out[f"{k}_removed"], out[k]) for k in ("pairs", "presences", "records")}}
+
+
+def griis_cross_check(counts: pl.DataFrame, refs: References, grid: Grid, settings: Settings = Settings()) -> dict:
+    """What layer 5 takes of the animals that GRIIS lists as introduced, against what it takes of all the other animals, at the thresholds of `settings`.
+
+    Layers 1, 2 and 4 run on everything `counts` holds, so that layer 5 sees the group totals of the real run, with layer 3 off, and layer 5 is
+    `clean.outlier_rows`, the code that `clean` runs. An animal presence (a species on a part) is **listed** where the species' rows in its cell are taken by a
+    GRIIS rule of layer 3 (`griis` or `griis_subnational`), that is where GRIIS lists the species as introduced in that country or sub-national place, and
+    **other** where not. The lists are those with a distribution table, whatever `settings.griis_without_status` says, and an entry applies as in `clean`:
+    introduced, or with no value, but not native or uncertain. Layer 5 judges cells, so the units are the (species, cell) pairs it judges, the presences (species, part)
+    and the records; the shares are those layer 5 takes. A listed presence is one the real run's layer 3 takes first, so the share is how much of
+    that the heuristics would find unaided. Reports only: nothing is changed, and nothing of half B is read (the caller passes half A's counts).
+    """
+    listing = replace(settings, wcvp_mode="off", rules_off=frozenset({"wrims"}), griis_without_status="skip")
+    taken = clean(counts, refs, grid, frozenset({1, 2, 3}), listing).removed.filter(pl.col("rule").is_in(GRIIS_RULES))
+    listed = taken.select("species_id", cell_of(pl.col("part")).alias("cell")).unique().with_columns(pl.lit(True).alias("listed"))
+    early = clean(counts, refs, grid, BEFORE_5, settings)
+    gone = outlier_rows(early.presence, refs, grid, settings).select("species_id", "part").unique().with_columns(pl.lit(True).alias("removed"))
+    animals = refs.taxa.filter(pl.col("kingdom") == "Animalia").select("species_id")
+    judged = (
+        early.presence.join(animals, on="species_id", how="semi")
+        .with_columns(cell_of(pl.col("part")).alias("cell"))
+        .join(listed, on=["species_id", "cell"], how="left")
+        .join(gone, on=["species_id", "part"], how="left")
+        .with_columns(pl.col("listed").fill_null(False), pl.col("removed").fill_null(False))
+    )
+    return {
+        "listed": _unit_counts(judged.filter(pl.col("listed"))),
+        "other": _unit_counts(judged.filter(~pl.col("listed"))),
+        "animal_presences": judged.height,
+    }
 
 
 # ---- the known cases

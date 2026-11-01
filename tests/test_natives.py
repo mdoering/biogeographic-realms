@@ -14,7 +14,9 @@ from realms.natives import (
     admin1_cells,
     admin1_places,
     gbif_fallback,
+    griis_lists,
     griis_names,
+    griis_name_only_pairs,
     griis_pairs,
     load_references,
     marine_country,
@@ -273,9 +275,24 @@ PLAIN = ["col:ID", "col:parentID", "col:status", "col:rank", "col:scientificName
 EXTENDED = ["col:ID", "col:parentID", "col:status", "col:rank", "col:scientificName", "col:kingdom"]
 
 
-def griis_zip(tmp_path, alias, rows, columns=PLAIN):
+GRIIS_DIST = ["col:taxonID", "col:sourceID", "col:areaID", "col:area", "col:gazetteer", "col:establishmentMeans"]
+
+
+def griis_zip(tmp_path, alias, rows, columns=PLAIN, means="introduced"):
+    """A GRIIS export. `means` is the `establishmentMeans` of every accepted species entry ("" for none), `None` for a plain export with no
+    `Distribution.tsv`, or a dict of entry id to a means (or a list of them, one distribution row each) for the entries it names, the rest `introduced`."""
+    files = {"NameUsage.tsv": (columns, rows)}
+    if means is not None:
+        given = means if isinstance(means, dict) else {}
+        default = means if isinstance(means, str) else "introduced"
+        dist = []
+        for entry, _, status, rank, *_ in rows:
+            if rank == "species" and status == "accepted":
+                values = given.get(entry, default)
+                dist += [[entry, "", "ZW", "Zedland", "iso", v] for v in (values if isinstance(values, list) else [values])]
+        files["Distribution.tsv"] = (GRIIS_DIST, dist)
     path = tmp_path / f"{alias}.zip"
-    write_zip(path, {"NameUsage.tsv": (columns, rows)})
+    write_zip(path, files)
     return path
 
 
@@ -333,6 +350,79 @@ def test_a_file_that_is_not_a_griis_list_is_refused(tmp_path):
 
 def test_no_lists_give_no_pairs(index):
     assert griis_pairs([], index).height == 0
+    assert griis_name_only_pairs([], index).height == 0
+
+
+def listed(lists, alias):
+    return lists.filter(pl.col("alias") == alias).row(0, named=True)
+
+
+def test_griis_native_entries_are_not_alien(tmp_path, index):
+    # GRIIS lists some species that are native where it lists them (invasive natives): they are no aliens there
+    path = griis_zip(tmp_path, "GRIIS-ZW", plain_rows("Aus bus", "Aus cus"), means={"s0": "native"})
+    assert griis_pairs([path], index).rows() == [("A2", "ZW", None)]
+    # and the list says how many it left out
+    counted = listed(griis_lists(griis_names([path])), "GRIIS-ZW")
+    assert (counted["entries"], counted["introduced"], counted["native"], counted["uncertain"], counted["unstated"]) == (2, 1, 1, 0, 0)
+
+
+def test_griis_uncertain_entries_are_not_alien(tmp_path, index):
+    path = griis_zip(tmp_path, "GRIIS-ZW", plain_rows("Aus bus", "Aus cus"), means={"s1": "uncertain"})
+    assert griis_pairs([path], index).rows() == [("A1", "ZW", None)]
+    counted = listed(griis_lists(griis_names([path])), "GRIIS-ZW")
+    assert (counted["entries"], counted["introduced"], counted["uncertain"]) == (2, 1, 1)
+
+
+def test_griis_empty_means_counts_as_introduced(tmp_path, index):
+    # a GRIIS list is a list of aliens, so an entry with no value is introduced, and the list says how many had none
+    path = griis_zip(tmp_path, "GRIIS-ZW", plain_rows("Aus bus", "Aus cus"), means={"s0": ""})
+    assert griis_pairs([path], index).rows() == [("A1", "ZW", None), ("A2", "ZW", None)]
+    counted = listed(griis_lists(griis_names([path])), "GRIIS-ZW")
+    assert (counted["introduced"], counted["unstated"], counted["native"]) == (1, 1, 0)
+
+
+def test_griis_list_without_distributions_is_not_applied(tmp_path, index):
+    # a plain export has no distribution table: nothing says what the entries are, so none is applied. It is reported, and its pairs kept apart
+    path = griis_zip(tmp_path, "GRIIS-ZW", plain_rows("Aus bus", "Aus cus"), means=None)
+    assert griis_pairs([path], index).height == 0
+    assert griis_name_only_pairs([path], index).rows() == [("A1", "ZW", None), ("A2", "ZW", None)]
+    counted = listed(griis_lists(griis_names([path])), "GRIIS-ZW")
+    assert counted["table"] is False and counted["entries"] == 2
+    assert (counted["introduced"], counted["unstated"], counted["native"], counted["uncertain"]) == (0, 0, 0, 0)  # nothing is known of them
+    # a list with a table is no name-only list
+    assert griis_name_only_pairs([griis_zip(tmp_path, "GRIIS-NO", plain_rows("Aus bus"))], index).height == 0
+
+
+def test_an_entry_native_in_any_distribution_row_is_native(tmp_path, index):
+    # as WCVP: a species that is native somewhere in the list is not an alien of it. An uncertain row beside an introduced one leaves it introduced
+    path = griis_zip(tmp_path, "GRIIS-ZW", plain_rows("Aus bus", "Aus cus", "Aus syn"), means={"s0": ["introduced", "native"], "s1": ["introduced", "uncertain"], "s2": ["uncertain"]})
+    assert griis_pairs([path], index).rows() == [("A2", "ZW", None)]  # A1 is native in one row, A7 only uncertain
+
+
+def test_two_entries_of_one_species_are_native_if_either_says_so(tmp_path, index):
+    # `Aus sub` is a synonym of a subspecies of A2, which the index rolls up to A2: two entries for one species
+    rows = plain_rows("Aus cus", "Aus sub")
+    path = griis_zip(tmp_path, "GRIIS-ZW", rows, means={"s1": "native"})
+    assert griis_pairs([path], index).height == 0
+    assert griis_pairs([griis_zip(tmp_path, "GRIIS-NO", rows)], index).rows() == [("A2", "NO", None)]
+
+
+def test_an_establishment_means_nobody_judged_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="doubtful"):
+        griis_names([griis_zip(tmp_path, "GRIIS-ZW", plain_rows("Aus bus"), means="doubtful")])
+
+
+def test_the_counts_of_a_list_say_what_each_entry_is(tmp_path):
+    rows = plain_rows("Aus bus", "Aus cus", "Aus twin", "Aus prov", "Aus syn")
+    means = {"s0": "native", "s1": "native", "s2": "uncertain", "s3": ""}
+    one = griis_zip(tmp_path, "GRIIS-US-Hawaii", rows, means=means)
+    two = griis_zip(tmp_path, "GRIIS-NO", rows, means=None)
+    lists = griis_lists(griis_names([one, two]))
+    assert lists.columns == ["alias", "country", "subdivision", "table", "entries", "introduced", "unstated", "native", "uncertain"]
+    assert lists.sort("alias").rows() == [
+        ("GRIIS-NO", "NO", None, False, 5, 0, 0, 0, 0),
+        ("GRIIS-US-Hawaii", "US", "Hawaii", True, 5, 1, 1, 2, 1),
+    ]
 
 
 # ---------------------------------------------------------------- WRiMS
@@ -637,6 +727,28 @@ def test_load_references_joins_everything_and_reports_what_is_missing(reference_
     assert refs.missing == ("griis/GRIIS-GQ", "wrims")
     assert "griis/GRIIS-GQ has no export" in caplog.text
     assert "1 GRIIS pairs of 1 sub-national lists have no admin-1 cells" in caplog.text
+
+
+def test_load_references_applies_griis_by_its_own_means_and_reports_the_rest(reference_dir, caplog):
+    root, grid = reference_dir
+    manifest = json.loads((root / "manifest.json").read_text())
+    # ZW names Aus bus as native and Homo sapiens as introduced, Hawaii has Aus bus as introduced, and the Tenerife list is a plain export with no distributions
+    manifest["griis/GRIIS-ZW"] = {"path": str(griis_zip(root, "GRIIS-ZW", plain_rows("Aus bus", "Homo sapiens"), means={"s0": "native"}))}
+    manifest["griis/GRIIS-IC-Tenerife"] = {"path": str(griis_zip(root, "GRIIS-IC-Tenerife", plain_rows("Aus bus"), means=None))}
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    with caplog.at_level(logging.WARNING):
+        refs = load_references(grid, root)
+    assert refs.griis.rows() == [("A1", "US", "Hawaii"), ("H1", "ZW", None)]  # Aus bus is native in ZW, and Tenerife says nothing
+    assert refs.griis_name_only.rows() == [("A1", "IC", "Tenerife")]
+    assert refs.griis_no_cells.height == 0  # Hawaii has cells
+    assert refs.griis_name_only_no_cells.rows() == [("A1", "IC", "Tenerife")]  # Natural Earth has no polygon for it
+    assert refs.griis_lists.columns == ["alias", "country", "subdivision", "table", "entries", "introduced", "unstated", "native", "uncertain"]
+    assert refs.griis_lists.sort("alias").rows() == [
+        ("GRIIS-IC-Tenerife", "IC", "Tenerife", False, 1, 0, 0, 0, 0),
+        ("GRIIS-US-Hawaii", "US", "Hawaii", True, 1, 1, 0, 0, 0),
+        ("GRIIS-ZW", "ZW", None, True, 2, 1, 0, 1, 0),
+    ]
+    assert "1 GRIIS pairs of 1 sub-national lists with no distributions have no admin-1 cells" in caplog.text
 
 
 def test_load_references_uses_wrims_when_there_is_an_export(reference_dir, caplog):

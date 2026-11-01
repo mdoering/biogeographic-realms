@@ -52,7 +52,9 @@ def taxon(species, kingdom="Animalia", cls="Insecta", environment=None, extinct=
     return {"species_id": species, "kingdom": kingdom, "class": cls, "environment": environment, "extinct": extinct}
 
 
-def refs(taxa=(), groups=None, wcvp=(), griis=(), wrims=(), tdwg3=(), admin1=(), griis_no_cells=(), wrims_no_country=(), no_wild_range=()) -> References:
+def refs(
+    taxa=(), groups=None, wcvp=(), griis=(), wrims=(), tdwg3=(), admin1=(), griis_no_cells=(), wrims_no_country=(), no_wild_range=(), griis_name_only=(), griis_name_only_no_cells=()
+) -> References:
     taxa = pl.DataFrame(list(taxa), schema={"species_id": pl.String, "kingdom": pl.String, "class": pl.String, "environment": pl.String, "extinct": pl.Boolean})
     griis_schema = {"species_id": pl.String, "country": pl.String, "subdivision": pl.String}
     wrims_schema = {"species_id": pl.String, "area_id": pl.String, "area": pl.String, "country": pl.String}
@@ -67,6 +69,8 @@ def refs(taxa=(), groups=None, wcvp=(), griis=(), wrims=(), tdwg3=(), admin1=(),
         tdwg3_parts=pl.DataFrame(list(tdwg3), schema={"part": pl.String, "tdwg3": pl.String}, orient="row"),
         admin1_cells=pl.DataFrame(list(admin1), schema={"cell": pl.String, "country": pl.String, "subdivision": pl.String, "via": pl.String}, orient="row"),
         griis_no_cells=pl.DataFrame(list(griis_no_cells), schema=griis_schema, orient="row"),
+        griis_name_only=pl.DataFrame(list(griis_name_only), schema=griis_schema, orient="row"),
+        griis_name_only_no_cells=pl.DataFrame(list(griis_name_only_no_cells), schema=griis_schema, orient="row"),
         wrims_no_country=pl.DataFrame(list(wrims_no_country), schema=wrims_schema, orient="row"),
         no_wild_range=frozenset(no_wild_range),
     )

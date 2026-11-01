@@ -17,7 +17,7 @@ import unicodedata
 import zipfile
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import geopandas as gpd
@@ -43,6 +43,16 @@ SYNONYM = "synonym"
 STATUS_ORDER = {"accepted": 0, "provisionally accepted": 1, SYNONYM: 2}  # which of two usages with one name COL would have us read
 TDWG3 = r"^[A-Z]{3}$"  # level 3 codes, as against the level 1 and 2 codes (digits) that WCVP sometimes gives
 WCVP_MEANS = (None, "introduced", "uncertain")
+# What a GRIIS list says an entry is, as `griis_names` gives it. `unstated` is an entry whose distribution has no `establishmentMeans` (or has no
+# row at all): a GRIIS list is a list of aliens, so that is introduced. `name_only` is an entry of a list whose export has no distribution table,
+# which says nothing. In the order that settles an entry with several: native wins, as in WCVP, and uncertain only if nothing else is said.
+GRIIS_MEANS = ("native", "introduced", "unstated", "uncertain")
+GRIIS_ALIEN = ("introduced", "unstated")
+NAME_ONLY = "name_only"
+GRIIS_LIST_SCHEMA = {
+    "alias": pl.String, "country": pl.String, "subdivision": pl.String, "table": pl.Boolean,
+    "entries": pl.UInt32, "introduced": pl.UInt32, "unstated": pl.UInt32, "native": pl.UInt32, "uncertain": pl.UInt32,
+}
 TDWG_LEVEL3_CODE = "LEVEL3_COD"
 FALLBACK_FILE = "gbif_fallback.parquet"  # what `scripts/check_natives.py` got from GBIF for the names that failed
 # the names Natural Earth gives an admin-1 polygon, in the languages it holds
@@ -50,6 +60,7 @@ NAME_COLUMNS = ("name", "name_alt", "name_local", "woe_name", "woe_label", "gn_n
 # `GRIIS-US-United` lists the conterminous United States, which has no admin-1 polygon of its own: the country less its two outliers
 WHOLE_COUNTRY_EXCEPT = {("US", "United"): ("Alaska", "Hawaii")}
 ADMIN1_SCHEMA = {"cell": pl.String, "country": pl.String, "subdivision": pl.String, "via": pl.String}
+GRIIS_PAIR_SCHEMA = {"species_id": pl.String, "country": pl.String, "subdivision": pl.String}
 
 
 @contextmanager
@@ -71,6 +82,15 @@ def _member(path: Path, member: str) -> Iterator[Path]:
             with archive.open(name) as source, target.open("wb") as out:
                 shutil.copyfileobj(source, out, 1 << 20)
             yield target
+
+
+def has_member(path: Path, member: str) -> bool:
+    """Whether the COLDP zip (or unzipped export) at `path` holds `member`."""
+    path = Path(path)
+    if path.is_dir():
+        return (path / member).is_file()
+    with zipfile.ZipFile(path) as archive:
+        return any(n.rsplit("/", 1)[-1] == member for n in archive.namelist())
 
 
 def read_tsv(path: Path, member: str, columns: Sequence[str], optional: Sequence[str] = ()) -> pl.DataFrame:
@@ -241,12 +261,39 @@ def _kingdoms(usages: pl.DataFrame) -> pl.Series:
     return pl.Series("kingdom", found, dtype=pl.String)
 
 
+def _griis_means(path: Path) -> pl.DataFrame | None:
+    """`col:ID` and `means` of each taxon the distribution table of a GRIIS export gives an establishment means, or None for an export with no table.
+
+    An entry's means is that of its distribution rows, and where they differ native wins and then introduced, then an empty value (`unstated`), and
+    `uncertain` only where nothing else is said: a species native somewhere in a list is no alien of it. A value other than `native`,
+    `introduced` and `uncertain` is refused, as nobody has judged it.
+    """
+    if not has_member(path, "Distribution.tsv"):
+        return None
+    rows = read_tsv(path, "Distribution.tsv", ["col:taxonID", "col:establishmentMeans"])
+    unknown = sorted(set(rows["col:establishmentMeans"].drop_nulls().unique().to_list()) - set(GRIIS_MEANS))
+    if unknown:
+        raise ValueError(f"{path} has establishmentMeans values nobody has judged, {unknown}: native, introduced or uncertain?")
+    order = {m: i for i, m in enumerate(GRIIS_MEANS)}
+    return (
+        rows.select(pl.col("col:taxonID").alias("col:ID"), pl.col("col:establishmentMeans").fill_null("unstated").alias("means"))
+        .with_columns(pl.col("means").replace_strict(order, return_dtype=pl.Int64).alias("_order"))
+        .sort("_order")
+        .unique("col:ID", keep="first", maintain_order=True)
+        .select("col:ID", "means")
+    )
+
+
 def griis_names(griis_dirs: Sequence[Path], species_only: bool = True) -> pl.DataFrame:
-    """The entries of GRIIS checklists, as `alias`, `country`, `subdivision`, `name`, `kingdom` and `rank`.
+    """The entries of GRIIS checklists, as `alias`, `country`, `subdivision`, `name`, `kingdom`, `rank` and `means`.
 
     Country and subdivision come from the file name (`GRIIS-US-Hawaii.zip`). A plain export has no kingdom column, so the kingdom is
     that of the kingdom row above the entry. Only accepted entries are alien taxa: a synonym is another name of one. With
     `species_only` False the other ranks stay, which is how to count what the default drops.
+
+    `means` is what the list says the entry is, from its distribution table (see `_griis_means`): `native`, `introduced`, `uncertain` or `unstated`,
+    which is an empty value or no row in a list that has a table. An export with no table, the plain exports, says nothing and its entries
+    are `name_only`.
     """
     frames = []
     for path in griis_dirs:
@@ -259,6 +306,11 @@ def griis_names(griis_dirs: Sequence[Path], species_only: bool = True) -> pl.Dat
         kingdom = usages["col:kingdom"] if "col:kingdom" in usages.columns else pl.Series([None] * usages.height, dtype=pl.String)
         # most of an extended export's own kingdom is empty too, so those entries fall back on the kingdom row above them
         usages = usages.with_columns(pl.coalesce(kingdom, _kingdoms(usages)).alias("kingdom"))
+        means = _griis_means(path)
+        if means is None:
+            usages = usages.with_columns(pl.lit(NAME_ONLY).alias("means"))
+        else:
+            usages = usages.join(means, on="col:ID", how="left").with_columns(pl.col("means").fill_null("unstated"))
         entries = usages.filter(pl.col("col:status").is_in(ACCEPTED))
         if species_only:
             entries = entries.filter(pl.col("col:rank") == "species")
@@ -270,17 +322,68 @@ def griis_names(griis_dirs: Sequence[Path], species_only: bool = True) -> pl.Dat
                 pl.col("col:scientificName").alias("name"),
                 "kingdom",
                 pl.col("col:rank").alias("rank"),
+                "means",
             )
         )
     if not frames:
-        return pl.DataFrame(schema={"alias": pl.String, "country": pl.String, "subdivision": pl.String, "name": pl.String, "kingdom": pl.String, "rank": pl.String})
+        return pl.DataFrame(
+            schema={"alias": pl.String, "country": pl.String, "subdivision": pl.String, "name": pl.String, "kingdom": pl.String, "rank": pl.String, "means": pl.String}
+        )
     return pl.concat(frames).drop_nulls("name")
 
 
+def griis_lists(names: pl.DataFrame) -> pl.DataFrame:
+    """What each GRIIS list holds, from `griis_names`: `alias`, `country`, `subdivision`, `table`, `entries`, and the entries that are `introduced`,
+    `unstated` (an empty value, counted as introduced), `native` and `uncertain`, which `griis_pairs` leaves out.
+
+    `table` is whether the list's export has a distribution table. A list without one says nothing of its entries, so its counts of the kinds are 0
+    and `entries` is all there is to say. Entries are those of the list (accepted species, as named), whether COL knows them or not.
+    """
+    kinds = ["introduced", "unstated", "native", "uncertain"]
+    return (
+        names.group_by("alias", "country", "subdivision")
+        .agg(
+            (pl.col("means") != NAME_ONLY).all().alias("table"),
+            pl.len().cast(pl.UInt32).alias("entries"),
+            *(pl.col("means").eq(kind).sum().cast(pl.UInt32).alias(kind) for kind in kinds),
+        )
+        .select(*GRIIS_LIST_SCHEMA)
+        .sort("alias")
+    )
+
+
+def griis_entries(names: pl.DataFrame, index: pl.DataFrame, fallback: pl.DataFrame | None = None) -> pl.DataFrame:
+    """`species_id`, `country`, `subdivision` and `means` for each COL species the entries of `names` (`griis_names`) fit, one row per species and list.
+
+    Two entries of one list that fit one species (a name and its synonym) are one row, whose means is the one that wins (see `_griis_means`).
+    """
+    order = {m: i for i, m in enumerate([*GRIIS_MEANS, NAME_ONLY])}
+    matched = match_names(names, index, fallback).filter(pl.col("status") == MATCHED)
+    return (
+        matched.with_columns(pl.col("means").replace_strict(order, return_dtype=pl.Int64).alias("_order"))
+        .sort("_order")
+        .unique(["species_id", "country", "subdivision"], keep="first", maintain_order=True)
+        .select("species_id", "country", "subdivision", "means")
+    )
+
+
+def _pairs(entries: pl.DataFrame, means: Sequence[str]) -> pl.DataFrame:
+    keep = entries.filter(pl.col("means").is_in(list(means))).select("species_id", "country", "subdivision")
+    return keep.unique(maintain_order=True).sort("species_id", "country", "subdivision", nulls_last=True)
+
+
 def griis_pairs(griis_dirs: Sequence[Path], index: pl.DataFrame, fallback: pl.DataFrame | None = None) -> pl.DataFrame:
-    """`species_id`, `country` and `subdivision` for each COL species an alien list names. Ranks above species (and below) are dropped."""
-    matched = match_names(griis_names(griis_dirs), index, fallback).filter(pl.col("status") == MATCHED)
-    return matched.select("species_id", "country", "subdivision").unique(maintain_order=True).sort("species_id", "country", "subdivision", nulls_last=True)
+    """`species_id`, `country` and `subdivision` for each COL species an alien list names as an alien. Ranks above species (and below) are dropped.
+
+    An entry is an alien where its distribution says `introduced`, or says nothing (`unstated`: a GRIIS list is a list of aliens). `native` and `uncertain`
+    entries are left out, and so are the entries of a list whose export has no distribution table (`griis_name_only_pairs`).
+    """
+    return _pairs(griis_entries(griis_names(griis_dirs), index, fallback), GRIIS_ALIEN)
+
+
+def griis_name_only_pairs(griis_dirs: Sequence[Path], index: pl.DataFrame, fallback: pl.DataFrame | None = None) -> pl.DataFrame:
+    """The pairs of `griis_pairs`' shape for the lists whose export has no distribution table, which say nothing of what their entries are."""
+    return _pairs(griis_entries(griis_names(griis_dirs), index, fallback), (NAME_ONLY,))
 
 
 def _cell_shapes(grid: Grid, gpkg: Path) -> np.ndarray:
@@ -545,14 +648,19 @@ class References:
     taxa: pl.DataFrame  # `load_taxa`: accepted species with their classification, `extinct` and `environment`
     groups: pl.DataFrame  # `species_id`, `tax_group`
     wcvp: pl.DataFrame  # `species_id`, `tdwg3`, `native`: native and introduced regions both, as the cleaning can use either
-    griis: pl.DataFrame  # `species_id`, `country`, `subdivision`: the species an alien list names, for a country or part of one
+    griis: pl.DataFrame  # `species_id`, `country`, `subdivision`: the species a list with distributions names as introduced, for a country or part of one
     wrims: pl.DataFrame  # `species_id`, `area_id`, `area`, `country`: the marine areas WRiMS lists a species as introduced in
     tdwg3_parts: pl.DataFrame  # `part`, `tdwg3`: each land part, with the WGSRPD regions its cell overlaps
-    admin1_cells: pl.DataFrame  # `cell`, `country`, `subdivision`, `via`: the cells of the sub-national GRIIS lists
+    admin1_cells: pl.DataFrame  # `cell`, `country`, `subdivision`, `via`: the cells that overlap a sub-national GRIIS list's subdivision
     griis_no_cells: pl.DataFrame  # the `griis` rows of a subdivision with no admin-1 cells, which can't be placed on the grid
     wrims_no_country: pl.DataFrame  # the `wrims` rows whose area names no country: open seas, bays, harbours
     no_wild_range: frozenset[str]  # COL ids of humans, livestock and crops that have no wild range
     missing: tuple[str, ...] = ()  # manifest items with no export, which the references go without
+    # the pairs of the lists whose export has no distribution table (a plain export), which say nothing of what their entries are. `clean` applies them
+    # only under `Settings.griis_without_status="apply"`, and `griis_name_only_no_cells` is their `griis_no_cells`
+    griis_name_only: pl.DataFrame = field(default_factory=lambda: pl.DataFrame(schema=GRIIS_PAIR_SCHEMA))
+    griis_name_only_no_cells: pl.DataFrame = field(default_factory=lambda: pl.DataFrame(schema=GRIIS_PAIR_SCHEMA))
+    griis_lists: pl.DataFrame = field(default_factory=lambda: pl.DataFrame(schema=GRIIS_LIST_SCHEMA))  # `griis_lists`: what each list holds, native entries and all
 
 
 def griis_without_cells(griis: pl.DataFrame, cells: pl.DataFrame) -> pl.DataFrame:
@@ -611,14 +719,25 @@ def load_references(grid: Grid, reference_dir: Path = Path("data/reference")) ->
             "%d WCVP level 3 codes are not in %s of %s, so no land part has them (%d rows): %s",
             unknown.height, TDWG_LEVEL3_CODE, needed["wgsrpd_level3"], unknown["rows"].sum(), shown,
         )
-    griis_joined = griis_pairs(list(griis.values()), index, fallback)
+    names = griis_names(list(griis.values()))
+    entries = griis_entries(names, index, fallback)
+    griis_joined = _pairs(entries, GRIIS_ALIEN)
+    griis_name_only = _pairs(entries, (NAME_ONLY,))
+    lists = griis_lists(names)
+    del names, entries
     wrims_ = wrims_pairs(wrims, index, fallback) if wrims else pl.DataFrame(schema={"species_id": pl.String, "area_id": pl.String, "area": pl.String, "country": pl.String})
     cells = admin1_cells(grid, needed["natural_earth_admin1"], subdivisions, gpkg)
     griis_no_cells = griis_without_cells(griis_joined, cells)
+    griis_name_only_no_cells = griis_without_cells(griis_name_only, cells)
     wrims_no_country = wrims_.filter(pl.col("country").is_null())
     if griis_no_cells.height:
         log.warning(
             "%d GRIIS pairs of %d sub-national lists have no admin-1 cells on the grid", griis_no_cells.height, griis_no_cells.select("country", "subdivision").unique().height
+        )
+    if griis_name_only_no_cells.height:
+        log.warning(
+            "%d GRIIS pairs of %d sub-national lists with no distributions have no admin-1 cells on the grid",
+            griis_name_only_no_cells.height, griis_name_only_no_cells.select("country", "subdivision").unique().height,
         )
     if wrims_no_country.height:
         log.warning("%d of %d WRiMS pairs are in areas that name no country", wrims_no_country.height, wrims_.height)
@@ -636,4 +755,7 @@ def load_references(grid: Grid, reference_dir: Path = Path("data/reference")) ->
         wrims_no_country=wrims_no_country,
         no_wild_range=no_wild_range,
         missing=missing,
+        griis_name_only=griis_name_only,
+        griis_name_only_no_cells=griis_name_only_no_cells,
+        griis_lists=lists,
     )

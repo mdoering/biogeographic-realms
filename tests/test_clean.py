@@ -28,6 +28,7 @@ def test_settings_hold_the_design_values():
     assert (s.under_max_records, s.under_rate_factor, s.thin_max_records, s.thin_km) == (5, 0.01, 5, 1000)
     assert (s.core_share, s.heuristic_min_records, s.wcvp_mode) == (0.9, 20, "native_only")
     assert (s.side_conflict, s.rules_off) == ("environment", frozenset())
+    assert s.griis_without_status == "skip"  # a GRIIS list with no distributions is not applied
     with pytest.raises(AttributeError):
         s.land_share = 0.5
 
@@ -37,6 +38,8 @@ def test_settings_refuse_what_they_do_not_know():
         Settings(wcvp_mode="strict")
     with pytest.raises(ValueError, match="side_conflict"):
         Settings(side_conflict="records")
+    with pytest.raises(ValueError, match="griis_without_status"):
+        Settings(griis_without_status="guess")
     with pytest.raises(ValueError, match="land_share"):
         Settings(land_share=0.5)  # a species could then be on both sides
     with pytest.raises(ValueError, match="zero_area_part"):
@@ -275,6 +278,37 @@ def test_the_country_list_applies_to_the_rest_of_the_country_and_the_sub_nationa
     assert gone(out, 3, "griis") == {("s1", "10:land", "FR")}
     assert gone(out, 3, "griis_subnational") == {("s2", "11:land", "FR")}
     assert set(kept(out)) == {("s1", "11:land"), ("s2", "10:land")}
+
+
+def test_a_list_with_no_distributions_is_applied_only_where_asked():
+    # the name-only pairs of a list whose export has no distribution table: not applied by default, applied name-only under `apply`
+    r = refs(
+        [taxon("s1"), taxon("s2")],
+        griis=[("s1", "AA", None)],
+        griis_name_only=[("s2", "AA", None), ("s2", "FR", "Reunion")],
+        admin1=FR_CELLS,
+    )
+    c = counts(row("s1", "10:land"), row("s2", "10:land"), row("s2", "11:land", country="FR"))
+    skipped = clean(c, r, GRID)
+    assert gone(skipped, 3) == {("s1", "10:land", "AA")}
+    assert set(kept(skipped)) == {("s2", "10:land"), ("s2", "11:land")}
+    applied = clean(c, r, GRID, settings=Settings(griis_without_status="apply"))
+    assert gone(applied, 3, "griis") == {("s1", "10:land", "AA"), ("s2", "10:land", "AA")}
+    assert gone(applied, 3, "griis_subnational") == {("s2", "11:land", "FR")}
+
+
+def test_what_a_list_with_no_distributions_could_not_place_is_unplaced_only_where_it_is_applied():
+    r = refs(
+        [taxon("s1"), taxon("s2")],
+        griis=[("s1", "FR", "Clipperton")],
+        griis_no_cells=[("s1", "FR", "Clipperton")],
+        griis_name_only=[("s2", "FR", "Clipperton")],
+        griis_name_only_no_cells=[("s2", "FR", "Clipperton")],
+    )
+    c = counts(row("s1", "10:land", country="FR", n=5), row("s2", "10:land", country="FR", n=4))
+    assert clean(c, r, GRID).unplaced.select("species_id", "records").rows() == [("s1", 5)]
+    both = clean(c, r, GRID, settings=Settings(griis_without_status="apply")).unplaced
+    assert both.select("species_id", "records").rows() == [("s1", 5), ("s2", 4)]
 
 
 def test_what_task_10_could_not_place_is_not_applied_and_is_counted():

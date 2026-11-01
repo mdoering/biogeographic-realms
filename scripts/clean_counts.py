@@ -9,8 +9,13 @@ for them). The report of the whole run is `results/clean/res<r>/report.json`, wi
 presences, layer 5 in records, presences, species and cells per rule with its suspect cells, the effect of each WCVP mode, the fold of
 zero-area parts, the Caspian check and the provisionally accepted species whose name also has an accepted species.
 
+`--griis-without-status` says what layer 3 does with a GRIIS list that has no distribution table, which is 250 of the 304 lists until they have an
+extended export: `skip`, the default, does not apply them and `apply` applies them name-only, as every list was before GRIIS was read by its own
+establishment means. The report has what the lists say (`griis_lists`: entries, introduced, unstated, native and uncertain, for the lists with a table).
+
 References are loaded once and need about 16 GB at the peak (`load_taxa`), so the modes share them. The counts are a download:
-`uv run python -I scripts/clean_counts.py --counts data/gbif/<key> [--modes native_only introduced off]`.
+`uv run python -I scripts/clean_counts.py --counts data/gbif/<key> [--modes native_only introduced off] [--griis-without-status skip|apply]`.
+Run it once for each setting with its own `--results` to have both.
 """
 
 import argparse
@@ -24,7 +29,7 @@ from pathlib import Path
 
 import polars as pl
 
-from realms.clean import LAYERS, WCVP_MODES, Settings, clean
+from realms.clean import GRIIS_WITHOUT_STATUS, LAYERS, WCVP_MODES, Settings, clean
 from realms.clean_report import provisional_twin_records, provisional_twins, removal_summary
 from realms.grid import KINDS, ZERO_KM2, cell_of, load_grid, parts
 from realms.natives import load_references, name_index
@@ -150,6 +155,9 @@ def main() -> None:
     parser.add_argument("--counts", type=Path, required=True, help="the Parquet parts of an ingested download, data/gbif/<key>")
     parser.add_argument("--resolution", type=int, default=6, help="the ISEA3H resolution of the counts, default 6")
     parser.add_argument("--modes", nargs="+", choices=WCVP_MODES, default=list(WCVP_MODES), help="the WCVP modes to run, default all three")
+    parser.add_argument(
+        "--griis-without-status", choices=GRIIS_WITHOUT_STATUS, default="skip", help="a GRIIS list with no distribution table: `skip` it (default) or `apply` it name-only"
+    )
     parser.add_argument("--reference", type=Path, default=Path("data/reference"), help="default data/reference")
     parser.add_argument("--split", type=Path, default=Path("data/split/halves-315557.parquet"))
     parser.add_argument("--results", type=Path, default=Path("results/clean"), help="where res<r>/ goes, default results/clean")
@@ -167,7 +175,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[logging.StreamHandler(), logging.FileHandler(directory / "clean.log", mode="w")])
     say = logging.getLogger("clean_counts").info
 
-    report: dict = {"half": "A", "resolution": args.resolution, "counts": str(args.counts), "layers": list(LAYERS), "modes": {}}
+    report: dict = {"half": "A", "resolution": args.resolution, "counts": str(args.counts), "layers": list(LAYERS), "griis_without_status": args.griis_without_status, "modes": {}}
     started = time.perf_counter()
 
     twins = twins_of(col)
@@ -201,14 +209,27 @@ def main() -> None:
     }
     say(f"provisional twins in half A: {report['provisional_twins']}")
     del clean_rows
-    report["unplaced_in_references"] = {"griis_pairs": refs.griis_no_cells.height, "wrims_pairs": refs.wrims_no_country.height}
+    unplaced_griis = refs.griis_no_cells.height + (refs.griis_name_only_no_cells.height if args.griis_without_status == "apply" else 0)
+    report["unplaced_in_references"] = {"griis_pairs": unplaced_griis, "wrims_pairs": refs.wrims_no_country.height}
+    with_table = refs.griis_lists.filter(pl.col("table"))
+    report["griis_lists"] = {
+        "with_table": with_table.height,
+        "without_table": refs.griis_lists.height - with_table.height,
+        "entries_without_table": int(refs.griis_lists.filter(~pl.col("table"))["entries"].sum() or 0),
+        **{k: int(with_table[k].sum() or 0) for k in ("entries", "introduced", "unstated", "native", "uncertain")},
+        "pairs_applied": refs.griis.height,
+        "pairs_name_only": refs.griis_name_only.height,
+        "admin1_cells": refs.admin1_cells.height,
+        "admin1_cells_by_via": dict(refs.admin1_cells.group_by("via").len().iter_rows()),
+    }
+    say(f"GRIIS: {report['griis_lists']}; without a table: {args.griis_without_status}")
 
     for mode in args.modes:
         say(f"--- wcvp_mode {mode}")
         begun = time.perf_counter()
         out = directory / mode
         out.mkdir(exist_ok=True)
-        cleaned = clean(counts, refs, grid, frozenset(LAYERS), Settings(wcvp_mode=mode))
+        cleaned = clean(counts, refs, grid, frozenset(LAYERS), Settings(wcvp_mode=mode, griis_without_status=args.griis_without_status))
         seconds = time.perf_counter() - begun
         cleaned.presence.write_parquet(out / "presence.parquet")
         cleaned.removed.write_parquet(out / "removed.parquet")

@@ -40,6 +40,7 @@ from realms.calibrate import (
     calibration_species,
     choose,
     evaluate_case,
+    griis_cross_check,
     kingdom_counts,
     known_cases,
     native_status,
@@ -105,6 +106,57 @@ def status_table(*rows_) -> pl.DataFrame:
 
 def pairs(*rows_) -> pl.DataFrame:
     return pl.DataFrame(list(rows_), schema={"species_id": pl.String, "part": pl.String}, orient="row")
+
+
+# ---- the cross-check against GRIIS
+
+def cross_check_world(**given):
+    """The world's counts and references with three more animals, `a1` to `a3`: each has a range of 45 cells, `a1` and `a3` a satellite of 1 record
+    (a1 two of them, in cells 100 and 102, a3 one in cell 100) and `a2` 3 records in 103 that layer 5 leaves. GRIIS lists `a1` as introduced in AA, the country of all rows."""
+    animals = [*range_of("a1", {"100": 1, "102": 1}), *range_of("a2", {"103": 3}), *range_of("a3", {"100": 1})]
+    taxa = TAXA + [taxon(s, "Animalia", "Insecta") for s in ("a1", "a2", "a3")]
+    groups = GROUPS + [(s, "insects") for s in ("a1", "a2", "a3")]
+    return pl.concat([COUNTS, counts(*animals)]), refs(taxa, groups, WCVP, tdwg3=TDWG, griis=[("a1", "AA", None)], **given)
+
+
+def test_the_cross_check_sets_what_layer_5_takes_of_listed_animals_against_the_other_animals():
+    c, r = cross_check_world()
+    found = griis_cross_check(c, r, WORLD)
+    listed, other = found["listed"], found["other"]
+    # a1's 45 cells of range and its two satellites; the other animals are a2, a3 and the bird, and layer 5 takes both satellites of a1 and the one of a3
+    assert (listed["pairs"], listed["pairs_removed"], listed["presences"], listed["presences_removed"], listed["species"]) == (47, 2, 47, 2, 1)
+    assert (listed["records"], listed["records_removed"]) == (1002, 2)
+    assert (other["pairs"], other["pairs_removed"], other["presences"], other["presences_removed"], other["species"]) == (94, 1, 94, 1, 3)
+    assert (other["records"], other["records_removed"]) == (3004, 1)
+    assert listed["pairs_share"] == pytest.approx(2 / 47) and other["presences_share"] == pytest.approx(1 / 94) and listed["records_share"] == pytest.approx(2 / 1002)
+    assert found["animal_presences"] == 141  # the plants are not animals
+
+
+def test_the_cross_check_is_what_clean_does_with_layer_3_off():
+    c, r = cross_check_world()
+    full = clean(c, r, WORLD, frozenset({1, 2, 4, 5}))
+    taken = full.removed.filter(pl.col("layer") == 5, pl.col("species_id").is_in(["a1", "a2", "a3", "bird"]))
+    found = griis_cross_check(c, r, WORLD)
+    assert found["listed"]["presences_removed"] + found["other"]["presences_removed"] == taken.select("species_id", "part").unique().height
+    # at a looser setting layer 5 takes fewer, and the cross-check follows the setting it is given
+    mild = replace(Settings(), satellite_record_share=0.0005)
+    assert griis_cross_check(c, r, WORLD, mild)["listed"]["presences_removed"] <= found["listed"]["presences_removed"]
+
+
+def test_the_cross_check_lists_only_what_a_list_with_distributions_names_as_introduced():
+    # a2 is on a list with no distribution table: it is not listed as introduced whatever `griis_without_status` says, and so stays among the others
+    c, r = cross_check_world(griis_name_only=[("a2", "AA", None)])
+    for setting in (Settings(), Settings(griis_without_status="apply")):
+        found = griis_cross_check(c, r, WORLD, setting)
+        assert found["listed"]["species"] == 1 and found["other"]["species"] == 3
+
+
+def test_an_animal_taken_by_the_sub_national_list_is_listed_too():
+    c, r = cross_check_world()
+    r = replace(r, griis=pl.concat([r.griis, pl.DataFrame({"species_id": ["a3"], "country": ["AA"], "subdivision": ["Sub"]})]), admin1_cells=pl.DataFrame([("100", "AA", "Sub", "overlap")], schema=r.admin1_cells.schema, orient="row"))
+    found = griis_cross_check(c, r, WORLD)
+    # cell 100 is Sub's. There a3 is listed, and a1 is not, as AA's list leaves Sub's cells to Sub's: a1 keeps its other 46 pairs and a3 has 1
+    assert found["listed"]["species"] == 2 and found["listed"]["pairs"] == 47 and found["listed"]["pairs_removed"] == 2
 
 
 # ---- native_status

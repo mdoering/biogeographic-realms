@@ -15,7 +15,8 @@ Order and attribution:
 - **Layer 3** takes out what the alien lists and WCVP say is not wild there. The rules run in this order, and a row goes with the first
   rule that catches it: the country's GRIIS list, the sub-national lists, WRiMS, then WCVP last. A row that is both on a list and outside
   WCVP's native regions is therefore the list's, and what `wcvp_*` reports is what no list had already removed. To measure one source
-  alone, switch the others off (`Settings.rules_off`, `wcvp_mode`).
+  alone, switch the others off (`Settings.rules_off`, `wcvp_mode`). A GRIIS list applies by what it says its entries are: introduced ones (an
+  empty value counts), never native or uncertain ones, and not at all a list with no distribution table, unless `griis_without_status` is `apply`.
 - **Layer 4** folds a clearly land or clearly sea species' records on the wrong side to the right side. COL's environment is the surer
   word of the two ways to be clear, so where it disagrees with the records `Settings.side_conflict` lets it decide, or leaves the species be.
 - **Layer 5**, the rare-outlier heuristics of `realms.outliers`, judges cells and not parts: what one of its rules flags in a species' cell goes with
@@ -43,6 +44,7 @@ from realms.outliers import flag_outliers
 
 LAYERS = (1, 2, 3, 4, 5)
 WCVP_MODES = ("native_only", "introduced", "off")
+GRIIS_WITHOUT_STATUS = ("skip", "apply")
 SIDE_CONFLICTS = ("environment", "leave")
 # the rules that can be switched off one at a time. WCVP has `wcvp_mode`, layer 1 and layer 4 have their layers, and the fold of
 # zero-area parts has no switch.
@@ -93,6 +95,9 @@ class Settings:
 
     `land_share` is the share of a species' records on one side that makes it a land or a sea species, whichever it is. `wcvp_mode` is how
     layer 3 uses WCVP (see `clean`): `native_only` is the design's rule, and which mode the analysis takes is decided in M1.
+    `griis_without_status` is what layer 3 does with a GRIIS list whose export has no distribution table, so that nothing says which of its
+    entries are introduced: `skip` (the rule, and the default) does not apply it, and `apply` applies it name-only, as every list was before
+    GRIIS was read by its own establishment means. `apply` is an interim setting until the 250 lists with a plain export have an extended one.
     `side_conflict` is what layer 4 does where COL's environment and the records disagree about a species' side, such as a species
     that is exactly terrestrial with nearly all its records in a sea part: `environment` lets COL decide, `leave` leaves the species
     alone. `rules_off` names rules of `SWITCHABLE` to leave out one at a time.
@@ -112,12 +117,15 @@ class Settings:
     core_share: float = 0.9
     heuristic_min_records: int = 20
     wcvp_mode: Literal["native_only", "introduced", "off"] = "native_only"
+    griis_without_status: Literal["skip", "apply"] = "skip"
     side_conflict: Literal["environment", "leave"] = "environment"
     rules_off: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if self.wcvp_mode not in WCVP_MODES:
             raise ValueError(f"wcvp_mode is one of {WCVP_MODES}, not {self.wcvp_mode!r}")
+        if self.griis_without_status not in GRIIS_WITHOUT_STATUS:
+            raise ValueError(f"griis_without_status is one of {GRIIS_WITHOUT_STATUS}, not {self.griis_without_status!r}")
         if self.side_conflict not in SIDE_CONFLICTS:
             raise ValueError(f"side_conflict is one of {SIDE_CONFLICTS}, not {self.side_conflict!r}")
         if not 0.5 < self.land_share <= 1:
@@ -262,12 +270,20 @@ def _layer_2(run: _Run, refs: References, settings: Settings) -> None:
             run.drop(run.rows.join(species, on="species_id", how="semi"), rule)
 
 
+def _griis(refs: References, settings: Settings) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """The GRIIS pairs layer 3 applies, and those of them that could not be placed on the grid: the lists with distributions, and under
+    `griis_without_status="apply"` the name-only pairs of the lists without."""
+    if settings.griis_without_status == "apply":
+        return pl.concat([refs.griis, refs.griis_name_only]).unique(), pl.concat([refs.griis_no_cells, refs.griis_name_only_no_cells]).unique()
+    return refs.griis, refs.griis_no_cells
+
+
 def _unplaced(rows: pl.DataFrame, refs: References, settings: Settings) -> pl.DataFrame:
     """The pairs that Task 10 could not place and layer 3 therefore cannot apply, of the species that have records, with their records."""
     found = []
     if "griis_subnational" not in settings.rules_off:
         found.append(
-            refs.griis_no_cells.select(pl.lit("griis_subnational").alias("rule"), "species_id", "country", pl.col("subdivision").alias("place"))
+            _griis(refs, settings)[1].select(pl.lit("griis_subnational").alias("rule"), "species_id", "country", pl.col("subdivision").alias("place"))
         )
     if "wrims" not in settings.rules_off:
         found.append(
@@ -320,20 +336,21 @@ def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings
     off = settings.rules_off
     run.unplaced = _unplaced(run.rows, refs, settings)
     places = meta.select("part", "cell", "kind")
+    griis, _ = _griis(refs, settings)
 
     def located() -> pl.DataFrame:
         return run.rows.join(places, on="part", how="left")
 
     if "griis" not in off:
         # a country's list is for its rows by country code, except in the cells of its sub-national lists, which have lists of their own
-        country = refs.griis.filter(pl.col("subdivision").is_null()).select("species_id", pl.col("country").alias("countrycode")).unique()
+        country = griis.filter(pl.col("subdivision").is_null()).select("species_id", pl.col("country").alias("countrycode")).unique()
         covered = refs.admin1_cells.select("cell", pl.col("country").alias("countrycode")).unique()
         hit = located().join(country, on=["species_id", "countrycode"], how="semi").join(covered, on=["cell", "countrycode"], how="anti")
         run.drop(hit, "griis")
     if "griis_subnational" not in off:
         # by the cell alone: an overseas place carries the sovereign's country code in its list and GBIF's own in its records
         listed = (
-            refs.griis.filter(pl.col("subdivision").is_not_null())
+            griis.filter(pl.col("subdivision").is_not_null())
             .join(refs.admin1_cells.select("cell", "country", "subdivision"), on=["country", "subdivision"])
             .select("species_id", "cell")
             .unique()
@@ -475,7 +492,8 @@ def clean(
     - `off`: WCVP removes nothing, and GRIIS and WRiMS still apply.
 
     A country's GRIIS list applies to rows by `countrycode`, except in the cells of its sub-national lists, which apply by cell whatever
-    the code (`griis_subnational`). WRiMS applies to sea parts, by `countrycode` (`wrims`). What `refs` could not place is not applied,
+    the code (`griis_subnational`). Which GRIIS entries apply is `Settings.griis_without_status` and what the lists say (`References.griis`).
+    WRiMS applies to sea parts, by `countrycode` (`wrims`). What `refs` could not place is not applied,
     and is listed in `Cleaned.unplaced`.
 
     Layer 4 folds a land species' row on a sea part, and a sea species' on a land part, into the other part of its cell if that has

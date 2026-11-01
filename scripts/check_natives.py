@@ -4,7 +4,7 @@ WCVP, each GRIIS list and WRiMS are matched to COL species by name. A source wit
 are counted apart, as they are never guessed) is sent to GBIF's match API v2 for those names, at most 5 requests a second, and what GBIF
 places on a COL species is saved to `data/reference/gbif_fallback.parquet` for `load_references` to use. This only reads from GBIF.
 
-Writes results/natives.json. Usage: uv run python -I scripts/check_natives.py [--resolution 6] [--no-references]
+Writes results/natives.json, with what each GRIIS list says its entries are (`griis_means`) and the references' counts. Usage: uv run python -I scripts/check_natives.py [--resolution 6] [--no-references]
 """
 
 import argparse
@@ -22,6 +22,7 @@ from realms.natives import (
     FALLBACK_FILE,
     UNMATCHED,
     gbif_fallback,
+    griis_lists,
     griis_names,
     load_references,
     match_names,
@@ -71,7 +72,26 @@ def main() -> None:
     other_ranks = everything.filter(pl.col("rank") != "species")
     print("  accepted entries of other ranks dropped:", dict(sorted(other_ranks.group_by("rank").len().iter_rows(), key=lambda r: -r[1])[:8]), f"({other_ranks.height:,} in all)")
 
-    report: dict = {"release": manifest["col"]["release"], "sources": {}, "griis_lists": {}}
+    # what each list says its entries are: introduced (an empty value counts), native or uncertain, or nothing for a list with no distribution table
+    held = griis_lists(listed)
+    kinds = ("entries", "introduced", "unstated", "native", "uncertain")
+    with_table, without_table = held.filter(pl.col("table")), held.filter(~pl.col("table"))
+    totals = {k: int(with_table[k].sum()) for k in kinds}
+    print(
+        f"  GRIIS entries by their own establishment means: {len(with_table)} lists with a distribution table hold {totals['entries']:,} species entries, "
+        f"{totals['introduced']:,} introduced, {totals['unstated']:,} with no value (counted as introduced), {totals['native']:,} native and {totals['uncertain']:,} uncertain, "
+        f"which are left out; {len(without_table)} lists with none hold {int(without_table['entries'].sum()):,} entries that say nothing"
+    )
+    left_out = with_table.filter((pl.col("native") + pl.col("uncertain")) > 0).sort(pl.col("native") + pl.col("uncertain"), descending=True)
+    print("  lists that name native or uncertain entries:", ", ".join(f"{r['alias']} {r['native']}n/{r['uncertain']}u of {r['entries']}" for r in left_out.head(12).iter_rows(named=True)))
+
+    report: dict = {
+        "release": manifest["col"]["release"],
+        "sources": {},
+        "griis_lists": {},
+        "griis_means": {"lists_with_table": with_table.height, "lists_without_table": without_table.height, "entries_without_table": int(without_table["entries"].sum()), **totals},
+        "griis_means_by_list": with_table.to_dicts(),
+    }
     matched = {name: match_names(frame, index) for name, frame in sources.items()}
     matched["GRIIS"] = match_names(listed, index)
     print("\nMatch rates (distinct names, then the names of one list each)")
@@ -136,6 +156,11 @@ def main() -> None:
             "groups": refs.groups.height,
             "wcvp": {"rows": refs.wcvp.height, "species": refs.wcvp["species_id"].n_unique(), "native": int(refs.wcvp["native"].sum())},
             "griis": {"rows": refs.griis.height, "species": refs.griis["species_id"].n_unique(), "lists": refs.griis.select("country", "subdivision").unique().height},
+            "griis_name_only": {
+                "rows": refs.griis_name_only.height,
+                "species": refs.griis_name_only["species_id"].n_unique(),
+                "lists": refs.griis_name_only.select("country", "subdivision").unique().height,
+            },
             "wrims": {"rows": refs.wrims.height, "species": refs.wrims["species_id"].n_unique(), "with_country": refs.wrims["country"].drop_nulls().len()},
             "land_parts": refs.tdwg3_parts["part"].n_unique(),
             "land_parts_without_region": refs.tdwg3_parts.filter(pl.col("tdwg3").is_null()).height,
@@ -146,6 +171,9 @@ def main() -> None:
         unplaced = refs.griis_no_cells.select("country", "subdivision").unique().sort("country", "subdivision")
         report["references"]["admin1"]["subdivisions_without_cells"] = [f"{c}-{s}" for c, s in unplaced.iter_rows()]
         report["references"]["admin1"]["pairs_without_cells"] = refs.griis_no_cells.height
+        name_only_unplaced = refs.griis_name_only_no_cells.select("country", "subdivision").unique().sort("country", "subdivision")
+        report["references"]["admin1"]["name_only_subdivisions_without_cells"] = [f"{c}-{s}" for c, s in name_only_unplaced.iter_rows()]
+        report["references"]["admin1"]["name_only_pairs_without_cells"] = refs.griis_name_only_no_cells.height
         report["references"]["wrims"]["pairs_without_country"] = refs.wrims_no_country.height
         print("\nReferences:")
         for key, value in report["references"].items():

@@ -11,15 +11,21 @@ Reads the ingested download (`data/gbif/<key>`), the frozen split and the refere
    and 5 counting drops only (a presence a fold moved is moved, not lost), as the controller ruled, provisionally; the chosen setting removes the
    most outside presences within it. The three readings (layer 5 alone, the whole run counting everything, the whole run counting drops only) are
    reported for the chosen setting and the design's;
-3. the native loss of the chosen setting per TDWG level 3 region (`regions.csv`, layer 5's reading), whose top 20 regions of at least 100 native presences
+3. the cross-check of layer 5 against GRIIS on half A's animals (`realms.calibrate.griis_cross_check`, `griis_cross_check.json`): layers 1, 2, 4 and 5 with layer 3
+   off, at the chosen setting and at the design's, reporting the share of the animal presences that GRIIS lists as introduced (by its own establishment means,
+   from the lists with distributions) that layer 5 takes, against the share of all the other animal presences. Reports only;
+4. the native loss of the chosen setting per TDWG level 3 region (`regions.csv`, layer 5's reading), whose top 20 regions of at least 100 native presences
    show whether islands lose more;
-4. with `--score-half-b`, the one setting chosen on A scored on half B's calibration species: the plants and the other species of their groups, which
+5. with `--score-half-b`, the one setting chosen on A scored on half B's calibration species: the plants and the other species of their groups, which
    are not all plants (some are of other kingdoms or of none, as in the group `eukaryotes`). That is the only call before the freeze that opens half B. It is
    listed in `DECISIONS.md`, prints and saves rates and counts only, and nothing per taxon. It runs at resolution 7 only. It writes
    `held_out.started` (the time and the commit) before it loads half B, and refuses if any `res*/held_out.started` or `res*/held_out.json` is already
    there: a run that fails after the load has to be decided on by Markus, and there is no flag to override it.
 
-Everything goes to `results/calibrate/res<r>/`: `settings.csv` (the 81 settings), `regions.csv`, `known_cases.json`, `report.json`, `calibrate.log`,
+`--griis-without-status skip|apply` is what layer 3 does with the GRIIS lists that have no distribution table in the known cases (see `scripts/clean_counts.py`),
+`skip` by default. It changes nothing in the calibration, where layer 3 is off.
+
+Everything goes to `results/calibrate/res<r>/`: `settings.csv` (the 81 settings), `regions.csv`, `known_cases.json`, `griis_cross_check.json`, `report.json`, `calibrate.log`,
 `held_out.started` before a scoring of half B, and `held_out.json` after it. The binding calibration is at the analysis resolution (7), where the counts of that download are the
 input: `uv run python -I scripts/calibrate.py --counts data/gbif/<key> --resolution 7 --score-half-b`. At resolution 6 it is a dry run.
 References are loaded once and need about 16 GB at the peak.
@@ -48,6 +54,7 @@ from realms.calibrate import (
     calibration_counts,
     calibration_species,
     choose,
+    griis_cross_check,
     kingdom_counts,
     known_cases,
     readings,
@@ -58,7 +65,7 @@ from realms.calibrate import (
     top_regions,
     within_limit,
 )
-from realms.clean import LAYERS, Settings, clean, outlier_rows
+from realms.clean import GRIIS_WITHOUT_STATUS, LAYERS, Settings, clean, outlier_rows
 from realms.grid import load_grid
 from realms.natives import load_references, name_index
 from realms.occurrences import load_country_counts
@@ -133,6 +140,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--counts", type=Path, required=True, help="the Parquet parts of an ingested download, data/gbif/<key>")
     parser.add_argument("--resolution", type=int, default=6, help="the ISEA3H resolution of the counts, default 6. The binding calibration is at 7")
+    parser.add_argument(
+        "--griis-without-status", choices=GRIIS_WITHOUT_STATUS, default="skip", help="the known cases' layer 3 on a GRIIS list with no distribution table: `skip` (default) or `apply` it name-only"
+    )
     parser.add_argument("--reference", type=Path, default=Path("data/reference"), help="default data/reference")
     parser.add_argument("--split", type=Path, default=Path("data/split/halves-315557.parquet"))
     parser.add_argument("--results", type=Path, default=Path("results/calibrate"), help="where res<r>/ goes, default results/calibrate")
@@ -160,7 +170,14 @@ def main() -> None:
 
     started = time.perf_counter()
     seconds: dict[str, float] = {}
-    report: dict = {"half": "A", "resolution": args.resolution, "counts": str(args.counts), "calibration_layers": [1, 2, 4, 5], "native_loss_limit": NATIVE_LOSS_LIMIT}
+    report: dict = {
+        "half": "A",
+        "resolution": args.resolution,
+        "counts": str(args.counts),
+        "calibration_layers": [1, 2, 4, 5],
+        "native_loss_limit": NATIVE_LOSS_LIMIT,
+        "known_cases_griis_without_status": args.griis_without_status,
+    }
 
     def lap(name: str, since: float) -> None:
         seconds[name] = round(time.perf_counter() - since, 1)
@@ -179,7 +196,7 @@ def main() -> None:
     # ---- the known cases, on everything half A has, all five layers at the design's thresholds
     begun = time.perf_counter()
     index = name_index(col)
-    cleaned = clean(counts, refs, grid, frozenset(LAYERS), Settings(wcvp_mode="native_only"))
+    cleaned = clean(counts, refs, grid, frozenset(LAYERS), Settings(wcvp_mode="native_only", griis_without_status=args.griis_without_status))
     say(f"cleaned half A with all layers: {cleaned.presence.height} presences of {cleaned.presence['species_id'].n_unique()} species")
     cases = known_cases(CASES, index, split, counts, cleaned, refs, regions)
     del index, cleaned
@@ -250,6 +267,21 @@ def main() -> None:
     with pl.Config(tbl_rows=TOP + 5, tbl_cols=8, fmt_str_lengths=30):
         say(f"the {TOP} regions with the highest native loss among {eligible.height} with at least {MIN_NATIVE} native presences:\n{top}")
     lap("chosen_detail", begun)
+
+    # ---- layer 5 against GRIIS, on half A's animals: reports only
+    begun = time.perf_counter()
+    cross = {}
+    for name, setting in (("chosen", chosen), ("design", grid_of_settings[index_design])):
+        found = griis_cross_check(counts, refs, grid, setting)
+        cross[name] = {"setting": index_chosen if name == "chosen" else index_design, **{k: getattr(setting, k) for k in GRID}, **found}
+        say(
+            f"GRIIS cross-check at the {name} setting: animal presences listed as introduced {found['listed']['presences_removed']} of {found['listed']['presences']} taken by layer 5 "
+            f"({found['listed']['presences_share']:.2%}), the other animal presences {found['other']['presences_removed']} of {found['other']['presences']} ({found['other']['presences_share']:.2%}); "
+            f"records {found['listed']['records_share']:.2%} against {found['other']['records_share']:.2%}"
+        )
+    (directory / "griis_cross_check.json").write_text(json.dumps(cross, indent=2) + "\n")
+    report["griis_cross_check"] = cross
+    lap("griis_cross_check", begun)
 
     # ---- half B, once
     if args.score_half_b:
