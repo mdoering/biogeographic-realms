@@ -19,6 +19,9 @@ Order and attribution:
   empty value counts), never native or uncertain ones, and not at all a list with no distribution table, unless `griis_without_status` is `apply`.
 - **Layer 4** folds a clearly land or clearly sea species' records on the wrong side to the right side. COL's environment is the surer
   word of the two ways to be clear, so where it disagrees with the records `Settings.side_conflict` lets it decide, or leaves the species be.
+  **Layer 3 then judges again every row that layer 4 moved, where it went**, with the same settings, and a row it takes is logged under the layer 3
+  rule: layer 3's judgement is about a place, so a fold must not put back what it took out of the part a row is folded into (a marine crab that WRiMS
+  takes out of a cell's sea part, refilled from the cell's land part). That holds for a fold into the neighbouring cell too.
 - **Layer 5**, the rare-outlier heuristics of `realms.outliers`, judges cells and not parts: what one of its rules flags in a species' cell goes with
   every row of the species there, under the rule's name. The rules are `detached_satellite`, `under_reported` and `thin_long_range`; each judges
   the rows layers 1 to 4 left, and a cell that several flag goes with the first of `realms.outliers.RULE_ORDER`.
@@ -236,20 +239,21 @@ class _Run:
         self.rows = self.rows.join(hit.select(KEY), on=KEY, how="anti", nulls_equal=True)
         self._log(logged if log is None else logged.filter(log), records)
 
-    def move(self, moves: pl.DataFrame, on: list[str]) -> None:
+    def move(self, moves: pl.DataFrame, on: list[str]) -> pl.DataFrame:
         """Move the rows that `moves` names (by `on`) to its `to_part`, or take them out where that is null, and log each under its `rule`.
 
         A moved row is added to the row of the same species and country at the part it goes to, if there is one. Rows with no records are
-        moved, but not logged: a row that counts for nothing is not a presence.
+        moved, but not logged: a row that counts for nothing is not a presence. Returns the rows' keys (`KEY`) where they went, one row each.
         """
         _check_rules(moves["rule"].unique())
         hit = self.rows.join(moves, on=on, how="inner", nulls_equal=True)
         if hit.is_empty():
-            return
+            return pl.DataFrame(schema={k: pl.String for k in KEY})
         rest = self.rows.join(moves.select(on).unique(), on=on, how="anti", nulls_equal=True)
         moved = hit.filter(pl.col("to_part").is_not_null()).with_columns(pl.col("to_part").alias("part")).select(rest.columns)
         self.rows = _sum_rows(pl.concat([rest, moved]))
         self._log(hit.filter(pl.col("records") > 0))
+        return moved.select(KEY).unique()
 
 
 def _layer_1(run: _Run) -> None:
@@ -331,16 +335,25 @@ def _wcvp(rows: pl.DataFrame, refs: References, mode: str) -> pl.DataFrame:
     return rows.join(outside.select("species_id", "part"), on=["species_id", "part"], how="semi")
 
 
-def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings, seen: pl.DataFrame) -> None:
+def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings, seen: pl.DataFrame, only: pl.DataFrame | None = None) -> None:
     """Layer 3, and `run.unplaced`: the pairs it could not place. `seen` are the `countrycode` and `cell` of every row of the counts, which says
-    where GBIF uses a country code."""
+    where GBIF uses a country code.
+
+    `only`, keys of rows (`KEY`), limits it to those rows: the rows layer 4 moved, judged again where they went. Every rule decides a row by its key
+    alone (species, country code and part, with what `refs` and `seen` say of them), so a row layer 3 kept the first time is kept again, and what it
+    takes is the records the fold brought. `run.unplaced` is set by the first pass only.
+    """
     off = settings.rules_off
-    run.unplaced = _unplaced(run.rows, refs, settings)
+    if only is None:
+        run.unplaced = _unplaced(run.rows, refs, settings)
     places = meta.select("part", "cell", "kind")
     griis, _ = _griis(refs, settings)
 
+    def judged() -> pl.DataFrame:
+        return run.rows if only is None else run.rows.join(only, on=KEY, how="semi", nulls_equal=True)
+
     def located() -> pl.DataFrame:
-        return run.rows.join(places, on="part", how="left")
+        return judged().join(places, on="part", how="left")
 
     if "griis" not in off:
         # a country's list is for its rows by country code, except in the cells of its sub-national lists, which have lists of their own. Only a list that is
@@ -381,7 +394,7 @@ def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings
         run.drop(located().filter(pl.col("kind") == "sea").join(introduced, on=["species_id", "countrycode"], how="semi"), "wrims")
     if settings.wcvp_mode != "off":
         rule = "wcvp_outside_native" if settings.wcvp_mode == "native_only" else "wcvp_introduced"
-        run.drop(_wcvp(run.rows, refs, settings.wcvp_mode), rule)
+        run.drop(_wcvp(judged(), refs, settings.wcvp_mode), rule)
 
 
 def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings: Settings) -> tuple[pl.DataFrame, dict[str, int]]:
@@ -438,7 +451,8 @@ def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings:
     return found.select("species_id", "side"), counts
 
 
-def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settings: Settings) -> None:
+def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settings: Settings) -> pl.DataFrame:
+    """Fold the rows on the wrong side (see `clean`), and return the keys (`KEY`) of the rows it moved, where they went."""
     sides, run.sides = _sides(run.rows, refs.taxa, meta, settings)
     sides = sides.drop_nulls("side")
     places = meta.select("part", "cell", "kind", "other", "other_kind", "other_has_area")
@@ -450,7 +464,7 @@ def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settin
         .filter(pl.col("side") != pl.col("kind"))
     )
     if wrong.is_empty():
-        return
+        return pl.DataFrame(schema={k: pl.String for k in KEY})
     same = wrong.filter(pl.col("other_has_area")).select("species_id", "part", pl.col("other").alias("to_part"), pl.lit("land_sea_fold").alias("rule"))
     far = wrong.filter(~pl.col("other_has_area")).select("species_id", "part", "cell", pl.col("other_kind").alias("right_kind"))
 
@@ -476,7 +490,7 @@ def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settin
         .join(chosen.select("species_id", "part"), on=["species_id", "part"], how="anti")
         .select("species_id", "part", pl.lit(None, dtype=pl.String).alias("to_part"), pl.lit("land_sea_dropped").alias("rule"))
     )
-    run.move(pl.concat([same, chosen, dropped]), ["species_id", "part"])
+    return run.move(pl.concat([same, chosen, dropped]), ["species_id", "part"])
 
 
 def outlier_rows(rows: pl.DataFrame, refs: References, grid: Grid, settings: Settings) -> pl.DataFrame:
@@ -523,6 +537,8 @@ def clean(
     area (`land_sea_fold`), or else into the right-side part of the neighbouring cell that holds most of the species' records, the
     lowest cell id first on a tie (`land_sea_neighbour`), or else out (`land_sea_dropped`). A neighbour counts only if the species has
     records on that part. Where COL's environment and the records disagree about a species' side, `settings.side_conflict` decides.
+    With layer 3 on, its rules then judge every row that layer 4 moved at the part it went to, with the same `settings`, and what they take is logged
+    under their own rule (layer 3), after the fold that brought it (layer 4).
 
     Layer 5 takes what `realms.outliers.flag_outliers` flags, with the three rules of that module (see there), each of which `settings.rules_off`
     can leave out. It needs `refs.groups` for the reporting rate, and the grid for distances.
@@ -553,7 +569,10 @@ def clean(
         seen = counts.select("countrycode", cell_of(pl.col("part")).alias("cell")).drop_nulls("countrycode").unique()
         _layer_3(run, refs, meta, settings, seen)
     if 4 in layers:
-        _layer_4(run, refs, grid, meta, settings)
+        moved = _layer_4(run, refs, grid, meta, settings)
+        if 3 in layers and not moved.is_empty():
+            # layer 3 judges the place a row is in, so a row that layer 4 moved is judged where it went
+            _layer_3(run, refs, meta, settings, seen, only=moved)
     if 5 in layers:
         _layer_5(run, refs, grid, settings)
 

@@ -750,7 +750,8 @@ species' records creates the row there. Rows with no records at all are moved bu
 **Layer 2.** `extinct` (COL's flag) and `no_wild_range` (`NO_WILD_RANGE`), each its own rule.
 
 **Layer 3: order of the rules.** `griis`, then `griis_subnational`, `wrims`, and WCVP last. A row goes with the first rule that catches it, so
-that `removed` never counts a row twice. WCVP is last on purpose: what `wcvp_*` reports is what no alien list had already removed, which is
+that `removed` never counts a row twice. (Since the final review, a row can be logged twice by one layer 3 rule: once, and once more for the records a fold of
+layer 4 brought back to it. See "Layer 3 judges the rows that layer 4 moved" below.) WCVP is last on purpose: what `wcvp_*` reports is what no alien list had already removed, which is
 the number that matters for the worry below. To measure one source alone, switch the others off. The runs of M1 ("layer 2 alone", "GRIIS alone") are
 `layers={1, 2}` and `layers={1, 3}` with `wcvp_mode="off"` and `rules_off={"wrims", "griis_subnational"}`.
 
@@ -804,6 +805,8 @@ right-side part of the neighbouring cell that holds most of the species' records
   neighbour takes a row, and it is a choice of simplicity (one pass, no order among species' rows). It touches only `land_sea_neighbour`, which is
   20,781 records with `native_only` (20,945 with `introduced`, 21,178 with `off`), 0.001% of the clean records.
 - **The lowest id is the lowest as a number** (ids are long integers kept as text, and `9` comes before `100`).
+- **Layer 3 judges again every row that layer 4 moved, where it went** (added after the final review, 2026-11-01, see "Layer 3 judges the rows that layer 4 moved" below):
+  before that, a fold could put back records that layer 3 had taken out of the part it folds into.
 - **Where COL's environment and the records disagree, the environment decides** (`Settings.side_conflict="environment"`; `"leave"` leaves the species alone).
   The brief's "or" lets a species be both: of half A's species, 1,536 are exactly terrestrial with at least 95% of their records in sea parts, and 4,729 are
   exactly marine with that on land parts. They are mostly rare (the median is 2 records) shore molluscs, crustaceans and insects, whose records fall in a
@@ -1186,6 +1189,7 @@ The runs before this task are the baseline (`results/clean-before/res6`, which a
 - What is left of the clean records and presences, with every layer (layer 3 takes WCVP last, so it takes more where GRIIS takes less): `native_only` 6,963,228 presences of 588,877 species and 1,814,972,688 records in `skip` (6,909,903, 588,738 and 1,796,325,353 in `apply`, against 6,905,878, 588,707 and 1,767,233,258 before),
   `introduced` 7,141,188, 589,497 and 1,817,072,357 (7,075,025, 589,368 and 1,798,119,294; before 7,071,587, 589,337 and 1,769,041,809) and `off` 7,254,566, 589,544 and 1,825,239,385 (7,147,634, 589,416 and 1,803,049,778; before 7,146,812, 589,387 and 1,774,293,399).
   `wcvp_outside_native` takes 425,026 rows and 10.4M records in `skip` (349,740 and 6.8M in `apply`, 355,511 and 7.2M before), and `wrims` 3,765 (2,972 and 3,125) rows, for the same reason. Gaps the lists leave: 860 unplaced GRIIS pairs of species with records in `skip` (3,677 in `apply`, 4,027 before) and 1,140 WRiMS pairs.
+  **These figures are from before layer 3 judged the rows that layer 4 moved; the figures after it are in that section below** (`native_only` in `skip`: 6,952,838 presences of 588,865 species and 1,814,830,625 records).
 - **The sub-national rule's records** fell from 47.9M to 30.7M (`skip`), the US's from 47.62M to 30.47M. That is the native entries of the US lists, not the placement: the CA records that the cells of the lower 48 took, **54,020 before, are 0 now**, and the plain Alaska list is added back in `apply` (US 30.55M).
 
 **The 20 species whose GRIIS removals changed most** (records, the two rules together; the change in `skip`, with `apply` beside it where the species is in both lists):
@@ -1313,3 +1317,65 @@ From the final review of the branch. **An ingest is complete when its directory 
 - **`--resolution` of `scripts/clean_counts.py` and `scripts/calibrate.py` is read from the marker** (`realms.occurrences.resolution_of`), before the references are loaded. The flag stays, as a statement
   that must agree with the marker, and a mismatch stops the script at once; before, `--resolution` defaulted to 6 and a mismatch failed only after the 16 GB load of the references (if at all). The grid file
   is the marker's resolution's, and its own resolution is checked against it too. `--score-half-b` checks the marker's resolution, so stating 7 for an ingest of another resolution does not get past it.
+
+### Layer 3 judges the rows that layer 4 moved (2026-11-01)
+
+From the final review of the branch. **Layer 4 put back presences that layer 3 had emptied.** `clean` runs layer 4 after layer 3, and layer 4 folds a species' rows on the wrong side into the
+other part of the cell, or into a neighbour's, including into a part that layer 3 had just emptied. Two hand-made cases: a marine crab that WRiMS lists for AA loses its 50 AA records in the sea part of a
+coastal cell, and layer 4 then folds its 5 AA records from the cell's land part back into the sea part; a terrestrial plant loses a land part to `wcvp_outside_native`, and its records in that cell's
+sea part are folded back into it. On the res 6 data (`skip`, read from the outputs by the reviewer): of the presences WRiMS emptied, 1,057 of 3,403 were back at the end (64,196 records folded in), of
+those `wcvp_outside_native` emptied 6,994 of 394,350 (65,359), and of those `wcvp_introduced` emptied 5,485 of 141,317. So `presence_lost`, and the `presences` of `removal_summary`, said these rules
+had removed presences that were there at the end.
+
+**The ruling, and the fix:** after layer 4, the rules of layer 3 run again on every row that layer 4 moved, at the part it went to, and a row they take is logged under the layer 3 rule (layer 3), after
+the fold (layer 4) that brought it. **Layer 3's judgement is about the place**, so a fold must not bring back what it took out of a place, and that holds for a fold into the neighbouring cell too. It runs
+only when layer 3 is on, with the same `Settings` (`rules_off`, `wcvp_mode`, `griis_without_status`), in the same order of rules. Every rule decides a row by its key alone (species, country code and part,
+with what the references and the counts say of them), so a row the first pass kept is kept again, and what the second pass takes is the records the folds brought.
+
+- **A row can now be logged twice by layer 3**, once before the fold and once for the records the fold brought to it, by the same rule. The rows and the records of the log still add up (each row of the
+  log is records of its own), and the presence is counted once by `removal_summary` and `griis_totals`.
+- **`presence_lost` says what the species had left right after the rule took the row.** A fold of another country's rows, which layer 3 does not take where they went, can still bring the presence back:
+  WRiMS lists the crab for AA, and the BB records folded into the sea part are the sea part's, as they would have been had GBIF put them there. That is the rule as it is, and it is tested. With
+  `native_only` in `skip`, 51 presences are like that at the end (WRiMS 20, `griis` 25, `griis_subnational` 6; `apply` 65), against 8,091 before. None is of WCVP, which judges every country of a part alike.
+- **Tests:** the reviewer's two cases (`test_a_fold_does_not_put_back_what_wrims_took_from_the_part_it_folds_into`, `..._what_wcvp_took_...` in both WCVP modes), a fold into the neighbouring cell, a
+  fold of another country that stays, the same settings (`rules_off`, and a plain sub-national list under `skip` and `apply` reached by a neighbour fold), and layer 3 off. In the random world, which now has 12
+  shore species per seed from a stream of their own and `Sub` on cell 5 as well: **layer 3 run again on what `clean` leaves takes nothing**, over 6 seeds, the three WCVP modes, `skip` and `apply`, and layers
+  1 to 5 and 1 to 4 (the rows are made from the input and the log alone, which also checks that the log accounts for every species, country and part to the record); a row is logged twice by layer 3 only where a
+  fold reached it, and by one rule; and the second pass is reached for `griis`, `wrims` and both WCVP rules (`griis_subnational` by the hand-made neighbour). 49 of the tests fail on the code before.
+
+**Res 6, half A, before and after,** `scripts/clean_counts.py --counts data/gbif/0019721-261023074918325 --resolution 6`, once with `skip` (`results/clean/res6`) and once with `apply`
+(`results/clean-apply/res6`), 79 and 78 s, peaks 21.4 and 22.7 GB. **The rows of layers 0, 1, 2 and 4 are identical in every mode and both settings**, every layer 3 row of before is still there, and every new one is
+at a part a fold of layer 4 reached. Layer 3's rules, rows / presences / records (the presences a rule left with nothing):
+
+| Rule | Mode | `skip` before | `skip` after | `apply` before | `apply` after |
+|---|---|---|---|---|---|
+| `wrims` | every mode | 3,765 / 3,403 / 318,895 | 5,604 / 3,919 / 392,634 | 2,972 / 2,784 / 254,830 | 4,400 / 3,149 / 318,580 |
+| `wcvp_outside_native` | `native_only` | 425,026 / 394,350 / 10,384,403 | 446,813 / 399,264 / 10,473,999 | 349,740 / 332,589 / 6,839,526 | 367,657 / 337,141 / 6,912,036 |
+| `wcvp_introduced` | `introduced` | 164,313 / 141,317 / 8,184,933 | 177,287 / 142,565 / 8,254,445 | 106,168 / 95,411 / 4,949,270 | 115,517 / 96,375 / 5,002,467 |
+| `griis_subnational` | `native_only`, `introduced` | 85,707 / 82,742 / 30,668,327 | 85,708 / 82,742 / 30,668,329 | 88,591 / 85,720 / 30,775,593 | 88,592 / 85,720 / 30,775,595 |
+| `griis` | every mode | 160,442 / 132,928 / 50,648,154 | the same | 317,611 / 255,649 / 72,807,032 | the same |
+
+(`griis_subnational` with WCVP off takes 2 rows and 3 records more, in both settings.) The second pass itself, in `skip`: `wrims` 1,839 rows (1,281 of them on a row it had taken before the fold), 73,739 records,
+1,802 presences of 261 species; `wcvp_outside_native` 21,787 rows (16,385), 89,596 records, 20,787 presences of 5,439 species; `wcvp_introduced` 12,974 rows (11,441), 69,512 records, 12,077 presences of 1,823
+species; `griis_subnational` one row of 2 records. In `apply`: `wrims` 1,428 rows, 63,750 records; `wcvp_outside_native` 17,917 rows, 72,510 records; `wcvp_introduced` 9,349 rows, 53,197 records.
+
+**What is left** (presences, species, records; `skip`, then `apply`):
+
+| Mode | `skip` before | `skip` after | `apply` before | `apply` after |
+|---|---|---|---|---|
+| `native_only` | 6,963,228 / 588,877 / 1,814,972,688 | **6,952,838 / 588,865 / 1,814,830,625** | 6,909,903 / 588,738 / 1,796,325,353 | 6,901,117 / 588,728 / 1,796,206,828 |
+| `introduced` | 7,141,188 / 589,497 / 1,817,072,357 | 7,133,382 / 589,485 / 1,816,939,983 | 7,075,025 / 589,368 / 1,798,119,294 | 7,069,297 / 589,358 / 1,798,011,141 |
+| `off` | 7,254,566 / 589,544 / 1,825,239,385 | 7,253,184 / 589,532 / 1,825,166,230 | 7,147,634 / 589,416 / 1,803,049,778 | 7,146,545 / 589,406 / 1,802,986,488 |
+
+With `native_only` in `skip`, 10,612 presences are gone and 222 are new: every new one is a presence that layer 5 took before and keeps now, as its input changed (a species' own cells, and its group's totals).
+Records are conserved: 1,814,830,625 left + 1,250,685 (layer 2) + 92,183,116 (layer 3) + 38,302 (layer 4, dropped) + 843,619 (layer 5) = 1,909,146,347, the clean records of the input.
+
+**Layer 5 takes less**, as some of what it took were the odd presences the folds made and layer 3 now takes first. With `native_only` in `skip`, rows / records / species, before and after: `detached_satellite`
+241,808 / 471,711 / 45,515 and 233,516 / 457,426 / 43,986; `under_reported` 200,614 / 326,151 / 55,808 and 196,485 / 319,154 / 55,284; `thin_long_range` 55,158 / 67,031 / 22,436 and 55,164 / 67,039 / 22,438;
+all of layer 5 497,580 / 864,893 / 101,444 and 485,165 / 843,619 / 100,495, and 501 suspect cells and 500. With `introduced` 562,739 and 556,590 rows, 508 and 507 suspect cells; with `off` 571,167 and 570,852, 514 and 514.
+
+**The calibration does not change, as it runs with layer 3 off**, and the known cases do not either. `scripts/calibrate.py --resolution 6`, run again in both settings (278 and 277 s, peaks 21.9 and 20.0 GB):
+`settings.csv`, `regions.csv`, `known_cases.json` and `griis_cross_check.json` are byte-identical to the runs before, in `skip` and in `apply`, and so are the chosen setting (75), the readings, the regions and
+the top settings in `report.json`. The known cases come from a full clean with layer 3 on, and none of their figures moved (the starling and the Hawaiian bird are birds, which layer 4 never folds; for the potato and the
+lemurs the second pass changed no presence and no count of `removed_by_rule`, which counts a presence once). `scripts/griis_review.py` (both settings, with and without `--min-neighbour-records 100`): `griis_change.csv` and both
+neighbour tables are identical, and `griis_totals.json` has the one `griis_subnational` row of 2 records more.

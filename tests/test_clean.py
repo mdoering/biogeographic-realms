@@ -9,9 +9,9 @@ import polars as pl
 import pytest
 
 from clean_helpers import GRID, counts, gone, kept, make_grid, refs, row, taxon
-from realms.clean import LAYERS, RULES, SWITCHABLE, Settings, _Run, clean
+from realms.clean import KEY, LAYERS, RULES, SWITCHABLE, Settings, _layer_3, _part_table, _Run, clean
 from realms.clean_report import removal_summary
-from realms.grid import ZERO_KM2, part_adjacency, parts
+from realms.grid import ZERO_KM2, cell_of, part_adjacency, parts
 from realms.matrix import cell_taxa
 from realms.nullmodel import excess_table
 from realms.occurrences import COUNTS
@@ -613,6 +613,73 @@ def test_layer_4_shares_are_taken_after_the_layers_before_it():
     assert len(kept(clean(c, r, L4))) == 2
 
 
+# ---- layer 3 judges again the rows that layer 4 moved, where they went
+
+CRAB = refs([taxon("crab", environment="marine")], wrims=[("crab", "1", "Aa part of the Sea", "AA")])
+HERB = refs([taxon("herb", kingdom="Plantae", cls="Magnoliopsida", environment="terrestrial")], wcvp=[("herb", "N", True), ("herb", "X", False)], tdwg3=[("10:land", "N"), ("11:land", "X")])
+HERB_ROWS = counts(row("herb", "10:land", n=100), row("herb", "11:land", n=20), row("herb", "11:sea", n=3))
+
+
+def test_a_fold_does_not_put_back_what_wrims_took_from_the_part_it_folds_into():
+    # a marine crab introduced in AA: GBIF puts 50 AA records in the sea part of coastal cell 11 and 5 in its land part. WRiMS takes the sea part,
+    # and layer 4 folds the land part's 5 records into it, where WRiMS takes them too
+    out = clean(counts(row("crab", "11:sea", n=50), row("crab", "11:land", n=5)), CRAB, GRID, frozenset({1, 2, 3, 4}), Settings(wcvp_mode="off"))
+    assert kept(out) == {}
+    log = out.removed.select("layer", "rule", "part", "records", "to_part", "presence_lost").sort("layer", "records", descending=[False, True])
+    assert log.rows() == [(3, "wrims", "11:sea", 50, None, True), (3, "wrims", "11:sea", 5, None, True), (4, "land_sea_fold", "11:land", 5, "11:sea", True)]
+
+
+def test_a_fold_does_not_put_back_what_wcvp_took_from_the_part_it_folds_into():
+    # a terrestrial plant native in N (cell 10) and introduced in X (cell 11), recorded in coastal cell 11 on land and, by GADM's coast, in its sea part
+    for mode, rule in (("native_only", "wcvp_outside_native"), ("introduced", "wcvp_introduced")):
+        out = clean(HERB_ROWS, HERB, GRID, frozenset({1, 2, 3, 4}), Settings(wcvp_mode=mode))
+        assert kept(out) == {("herb", "10:land"): 100}, mode
+        assert sorted(out.removed.filter(pl.col("layer") == 3).select("rule", "part", "records").rows()) == [(rule, "11:land", 3), (rule, "11:land", 20)], mode
+        assert gone(out, 4, "land_sea_fold") == {("herb", "11:sea", "AA")}, mode
+    # with WCVP off the fold stands
+    assert kept(clean(HERB_ROWS, HERB, GRID, frozenset({1, 2, 3, 4}), Settings(wcvp_mode="off"))) == {("herb", "10:land"): 100, ("herb", "11:land"): 23}
+
+
+def test_a_row_folded_into_the_neighbouring_cell_is_judged_where_it_went():
+    # 13 is land only and next to 11. The crab's 2 AA records on 13's land fold into 11's sea part, where its BB records are, and WRiMS takes them
+    # there: it lists the crab in AA
+    c = counts(row("crab", "13:land", n=2), row("crab", "11:sea", n=10, country="BB"))
+    out = clean(c, CRAB, L4, frozenset({1, 2, 3, 4}))
+    assert kept(out) == {("crab", "11:sea"): 10}
+    assert gone(out, 4, "land_sea_neighbour") == {("crab", "13:land", "AA")}
+    assert out.removed.filter(pl.col("rule") == "land_sea_neighbour")["to_part"].to_list() == ["11:sea"]
+    assert out.removed.filter(pl.col("layer") == 3).select("rule", "part", "countrycode", "records").rows() == [("wrims", "11:sea", "AA", 2)]
+    assert kept(clean(c, CRAB, L4, frozenset({1, 2, 4}))) == {("crab", "11:sea"): 12}  # layer 3 off: the fold stands
+
+
+def test_a_fold_brings_back_what_layer_3_does_not_judge_out_where_it_went():
+    # WRiMS lists the crab in AA and not in BB: the BB records folded into the sea part are the sea part's, though WRiMS emptied it of its AA records.
+    # `presence_lost` says what the species had left right after the rule, and so it stays true for WRiMS's row
+    c = counts(row("crab", "11:sea", n=50), row("crab", "11:land", n=5, country="BB"))
+    out = clean(c, CRAB, GRID, frozenset({1, 2, 3, 4}), Settings(wcvp_mode="off"))
+    assert kept(out) == {("crab", "11:sea"): 5}
+    assert out.removed.filter(pl.col("layer") == 3).select("rule", "countrycode", "records", "presence_lost").rows() == [("wrims", "AA", 50, True)]
+
+
+def test_layer_3_judges_the_moved_rows_with_the_same_settings():
+    c = counts(row("crab", "11:sea", n=50), row("crab", "11:land", n=5))
+    off = clean(c, CRAB, GRID, frozenset({1, 2, 3, 4}), Settings(rules_off=frozenset({"wrims"})))
+    assert kept(off) == {("crab", "11:sea"): 55} and not gone(off, 3)
+    # a sub-national list with no distribution table, which only `apply` applies. The land species' AA row at open sea (12) folds into the neighbour's
+    # land part (100), in the list's cell, where it already has BB records. GBIF uses AA in cell 100 (the other species' row), so the list applies by code.
+    r = refs(
+        [taxon("land", environment="terrestrial"), taxon("other")],
+        griis_name_only=[("land", "AA", "Sub")],
+        admin1=[("100", "AA", "Sub", "overlap")],
+    )
+    c = counts(row("land", "12:sea", n=2), row("land", "100:land", n=8, country="BB"), row("other", "100:land", n=1))
+    skip = clean(c, r, L4, frozenset({1, 2, 3, 4}), Settings(griis_without_status="skip"))
+    assert kept(skip)[("land", "100:land")] == 10 and not gone(skip, 3)
+    applied = clean(c, r, L4, frozenset({1, 2, 3, 4}), Settings(griis_without_status="apply"))
+    assert kept(applied)[("land", "100:land")] == 8
+    assert applied.removed.filter(pl.col("layer") == 3).select("rule", "part", "countrycode", "records").rows() == [("griis_subnational", "100:land", "AA", 2)]
+
+
 # ---- the layers together
 
 def test_a_narrow_endemic_survives_every_layer():
@@ -703,8 +770,11 @@ RANDOM_PARTS = [f"{cell}:{kind}" for cell in RANDOM_CELLS for kind in ("land", "
 # the land parts with area, and the TDWG regions they touch: 7 is in none, and 5's land has no area
 RANDOM_TDWG3 = [("1:land", "R1"), ("2:land", "R1"), ("2:land", "R2"), ("4:land", "R2"), ("6:land", "R3"), ("7:land", None)]
 # `Isle` is a list of a country, XX, that no row carries (GBIF does not use its code), so the cells alone decide there; it shares cell 6 with `Sub`, whose
-# code AA is used, so that cell takes both lists
-RANDOM_ADMIN1 = [("2", "AA", "Sub", "centre"), ("6", "AA", "Sub", "overlap"), ("4", "XX", "Isle", "overlap"), ("6", "XX", "Isle", "overlap")]
+# code AA is used, so that cell takes both lists. `Sub` also reaches cell 5, which has no land, so that a land species' AA row there, which the country's
+# list leaves to `Sub`, folds into a neighbour that is the country list's
+RANDOM_ADMIN1 = [("2", "AA", "Sub", "centre"), ("6", "AA", "Sub", "overlap"), ("5", "AA", "Sub", "overlap"), ("4", "XX", "Isle", "overlap"), ("6", "XX", "Isle", "overlap")]
+# the parts of the shore species: both parts of the coastal cells, the open sea next to them, cell 5's sea and the land of cell 4 next to it
+SHORE_PARTS = ["2:land", "2:sea", "6:land", "6:sea", "3:sea", "8:sea", "7:land", "5:sea", "4:land"]
 COUNTRIES = ["AA", "BB", "CC", None]
 
 
@@ -765,6 +835,27 @@ def random_case(seed: int):
                 name_only.append((species, country, subdivision))
         if extra.random() < 0.05:
             name_only_no_cells.append((species, "BB", "Nowhere"))
+    # shore species, which layer 4 folds across the coast and into a neighbour, into parts and cells that layer 3 judges: from a stream of their own again
+    shore = np.random.default_rng(seed + 2000)
+    for i in range(12):
+        species = f"c{i}"
+        plant = bool(shore.random() < 0.5)
+        environment = "terrestrial" if plant or shore.random() < 0.5 else "marine"
+        taxa.append(taxon(species, "Plantae" if plant else "Animalia", "Magnoliopsida" if plant else "Insecta", environment, False))
+        if plant:
+            wcvp.append((species, "R3", True))  # native only in cell 6's land, so 2:land and 4:land are outside
+            if shore.random() < 0.5:
+                wcvp.append((species, "R1", False))
+        if shore.random() < 0.4:
+            wrims.append((species, "a", "an area", COUNTRIES[shore.integers(2)]))
+        for country, subdivision in (("AA", "Sub"), ("AA", None), ("BB", None)):
+            if shore.random() < 0.5:
+                griis.append((species, country, subdivision))
+        home = COUNTRIES[shore.integers(2)]  # most of a species' rows are of one country, so that a fold meets a row of its own country
+        for part in SHORE_PARTS:
+            if shore.random() < 0.6:
+                country = home if shore.random() < 0.7 else COUNTRIES[shore.integers(3)]
+                rows.append(row(species, part, country, n=int(shore.integers(1, 30))))
     return counts(*rows), refs(
         taxa, wcvp=wcvp, griis=griis, wrims=wrims, tdwg3=RANDOM_TDWG3, admin1=RANDOM_ADMIN1, griis_no_cells=griis_no_cells, wrims_no_country=wrims_no_country,
         no_wild_range=no_wild_range, griis_name_only=name_only, griis_name_only_no_cells=name_only_no_cells,
@@ -802,7 +893,62 @@ def test_records_are_conserved_with_every_branch_of_the_griis_rules(seed, wcvp_m
     lost = out.removed.filter(pl.col("layer") >= 2, pl.col("to_part").is_null())["records"].sum()
     assert int(out.presence["records"].sum()) + int(lost) == int((c["n"] - c["n_human_text"]).sum())
     assert not out.presence.select("species_id", "part").is_duplicated().any()
-    assert out.removed.filter(pl.col("layer") == 3).select("species_id", "part", "countrycode").is_duplicated().sum() == 0  # layer 3 takes no row twice
+    # layer 3 takes a row twice only where a fold of layer 4 brought records back to a row it had emptied, and then by the same rule: once in each pass
+    taken = out.removed.filter(pl.col("layer") == 3).group_by("species_id", "part", "countrycode").agg(pl.len().alias("times"), pl.col("rule").n_unique().alias("rules"))
+    twice = taken.filter(pl.col("times") > 1)
+    assert taken["times"].max() is None or taken["times"].max() <= 2
+    assert (twice["rules"] == 1).all()
+    folded_to = out.removed.filter(pl.col("layer") == 4, pl.col("to_part").is_not_null()).select("species_id", pl.col("to_part").alias("part"), "countrycode")
+    assert twice.join(folded_to, on=["species_id", "part", "countrycode"], how="anti", nulls_equal=True).is_empty()
+
+
+def end_rows(c: pl.DataFrame, out, layer_1: bool = True) -> pl.DataFrame:
+    """The country rows that `clean` leaves (`KEY` and `records`), made from its input and its log alone: what each (species, country, part) came in with,
+    less the records the log took or moved from it, plus those it moved there. Layer 1's rows are left out, as they log `n_raw` and take no records."""
+    records = (pl.col("n") - pl.col("n_human_text")) if layer_1 else pl.col("n_raw")
+    came = c.group_by(KEY).agg(records.sum().alias("records"))
+    log = out.removed.filter(pl.col("layer") != 1)
+    took = log.select(*KEY, (-pl.col("records")).alias("records"))
+    brought = log.drop_nulls("to_part").select("species_id", "countrycode", pl.col("to_part").alias("part"), "records").select(*KEY, "records")
+    every = pl.concat([came, took, brought]).group_by(KEY).agg(pl.col("records").sum())
+    assert every["records"].min() >= 0, "the log takes more from a row than it holds"
+    return every.filter(pl.col("records") > 0)
+
+
+@pytest.mark.parametrize("layers", [ALL, frozenset({1, 2, 3, 4})], ids=["layers1-5", "layers1-4"])
+@pytest.mark.parametrize("griis_without_status", ["skip", "apply"])
+@pytest.mark.parametrize("wcvp_mode", ["native_only", "introduced", "off"])
+@pytest.mark.parametrize("seed", range(6))
+def test_layer_3_would_take_nothing_of_what_clean_leaves(seed, wcvp_mode, griis_without_status, layers):
+    """Layer 3 judges a row by where it is, so no fold of layer 4 may leave a row there that its rules take. The rows `clean` leaves are made from the input
+    and the log (`end_rows`), which also checks that the log accounts for every (species, country, part), and layer 3 run on them again takes nothing."""
+    c, r = random_case(seed)
+    settings = Settings(wcvp_mode=wcvp_mode, griis_without_status=griis_without_status, **LOOSE_5)
+    out = clean(c, r, RANDOM_GRID, layers, settings)
+    end = end_rows(c, out)
+    by_part = end.group_by("species_id", "part").agg(pl.col("records").sum()).sort("species_id", "part")
+    assert by_part.equals(out.presence.select("species_id", "part", "records"))
+    run = _Run(end)
+    seen = c.select("countrycode", cell_of(pl.col("part")).alias("cell")).drop_nulls("countrycode").unique()
+    _layer_3(run, r, _part_table(RANDOM_GRID), settings, seen)
+    assert not run.removed and run.rows.equals(end)
+
+
+def test_the_random_world_reaches_layer_3_after_the_folds():
+    """The rows that layer 4 moved and layer 3 took where they went, over the seeds: for each rule that the random world reaches that way, and the
+    rows it took twice, once before the fold and once after. `griis_subnational` is reached by the hand-made test of the neighbour above."""
+    after, twice = set(), set()
+    for seed in range(6):
+        for mode in ("native_only", "introduced", "off"):
+            for status in ("skip", "apply"):
+                c, r = random_case(seed)
+                removed = clean(c, r, RANDOM_GRID, ALL, Settings(wcvp_mode=mode, griis_without_status=status, **LOOSE_5)).removed
+                folded_to = removed.filter(pl.col("layer") == 4, pl.col("to_part").is_not_null()).select("species_id", pl.col("to_part").alias("part"), "countrycode")
+                taken = removed.filter(pl.col("layer") == 3)
+                after |= set(taken.join(folded_to, on=["species_id", "part", "countrycode"], how="semi", nulls_equal=True)["rule"])
+                twice |= set(taken.filter(pl.struct("species_id", "part", "countrycode").is_duplicated())["rule"])
+    assert after >= {"griis", "wrims", "wcvp_outside_native", "wcvp_introduced"}
+    assert twice >= {"wrims", "wcvp_outside_native", "wcvp_introduced"}
 
 
 def test_the_random_world_reaches_the_cells_alone_branch_and_the_switch():
