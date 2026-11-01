@@ -12,6 +12,7 @@ the whole chain, and `p2` is native in `ISL` too. The cells off the chain are `F
 So, at the design's thresholds, layer 5 takes all four, and at other settings it takes some of them (see `test_the_settings_decide_what_is_taken`).
 """
 
+import ast
 import importlib.util
 import itertools
 import json
@@ -30,6 +31,7 @@ from realms.calibrate import (
     GRID as THRESHOLDS,
     EARLY_RULES,
     NATIVE_LOSS_LIMIT,
+    REGION_SCHEMA,
     SCORE,
     Baseline,
     Case,
@@ -56,6 +58,7 @@ from realms.calibrate import (
     within_limit,
 )
 from realms.clean import RULES, SWITCHABLE, Settings, clean, outlier_rows
+from realms.grid import Grid
 from realms.occurrences import COLUMNS, COUNTS as COUNT_COLUMNS, SealedHalf, ingest, load_country_counts, mark_complete
 
 ROOT = Path(__file__).parent.parent
@@ -522,16 +525,67 @@ def test_kingdom_counts_say_how_many_species_are_not_plants_from_the_taxonomy_al
     assert kingdom_counts([], taxa) == {"species": 0, "plantae": 0, "not_plantae": 0}
 
 
+SEALED_LOADERS = {"load_presence", "load_country_counts", "_select"}
+
+
+def _called(func: ast.expr) -> str | None:
+    return func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+
+
+def unsealing_calls(source: str, where: str) -> list[tuple[str, int, str, str]]:
+    """The places in `source` (a module at `where`, relative to the repository) that can open half B: a call passing `unsealed=` with anything but the
+    constant `False`, `**kwargs` into a sealed loader, a call of `_select` outside `occurrences.py` (it takes `unsealed` by position), a call of `_select`
+    there that does not hand on its caller's `unsealed`, and the string `"unsealed"` (a dict of keywords, a `getattr`). (where, line, function, how)."""
+    found = []
+    inside = where == "src/realms/occurrences.py"
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Constant) and node.value == "unsealed":
+            found.append((where, node.lineno, "", "the string"))
+        if not isinstance(node, ast.Call):
+            continue
+        name = _called(node.func)
+        for keyword in node.keywords:
+            if keyword.arg == "unsealed" and not (isinstance(keyword.value, ast.Constant) and keyword.value.value is False):
+                found.append((where, node.lineno, name, "unsealed="))
+            if keyword.arg is None and name in SEALED_LOADERS:
+                found.append((where, node.lineno, name, "**"))
+        if name == "_select":
+            if not inside:
+                found.append((where, node.lineno, name, "_select"))
+            elif not (len(node.args) > 3 and isinstance(node.args[3], ast.Name) and node.args[3].id == "unsealed"):
+                found.append((where, node.lineno, name, "_select"))
+    return found
+
+
+def test_the_scan_finds_every_way_to_unseal():
+    """The scan itself, on code that unseals in each way it looks for, and on code that does not."""
+    caught = [
+        'load_presence(d, s, "B", unsealed=True)',
+        'load_country_counts(d, s, "B", unsealed=flag)',
+        "load_country_counts(**keywords)",
+        'occurrences.load_presence(d, s, half, *rest, **{"unsealed": True})',
+        'partial(load_presence, unsealed=1)(d, s, "B")',
+        '_select(d, s, "B", True, ("species_id",))',
+        'getattr(module, "load_presence")(d, s, "B", **dict(unsealed=True))',
+    ]
+    for code in caught:
+        assert unsealing_calls(code, "scripts/x.py"), code
+    for code in ('load_presence(d, s, "A")', 'load_country_counts(d, s, "A", unsealed=False)', "print(unsealed)"):
+        assert not unsealing_calls(code, "scripts/x.py"), code
+    assert unsealing_calls('_select(d, s, "B", True, ())', "src/realms/occurrences.py")
+    assert not unsealing_calls('_select(d, s, half, unsealed, ())', "src/realms/occurrences.py")
+
+
 def test_the_one_unsealed_call_is_in_the_calibration_script_and_nowhere_else():
-    """`DECISIONS.md` lists the unsealed call sites. A new one has to be listed, and this fails until it is."""
-    found = {}
-    for path in [*(ROOT / "src").rglob("*.py"), *(ROOT / "scripts").glob("*.py")]:
-        if path.name == "occurrences.py":
-            continue  # where the seal is
-        n = len(re.findall(r"unsealed\s*=\s*True", path.read_text()))
-        if n:
-            found[str(path.relative_to(ROOT))] = n
-    assert found == {"scripts/calibrate.py": 1}
+    """`DECISIONS.md` lists the unsealed call sites. A new one has to be listed, and this fails until it is. Scanned by the syntax tree of every module
+    under `src/` and `scripts/`, `occurrences.py` included, so neither a comment nor a line break gets past it."""
+    found = []
+    for path in [*(ROOT / "src").rglob("*.py"), *(ROOT / "scripts").rglob("*.py")]:
+        found += unsealing_calls(path.read_text(), path.relative_to(ROOT).as_posix())
+    assert [(where, name, how) for where, _, name, how in found] == [("scripts/calibrate.py", "load_country_counts", "unsealed=")]
+    line = found[0][1]
+    held_out = [n for n in ast.walk(ast.parse((ROOT / "scripts" / "calibrate.py").read_text())) if isinstance(n, ast.FunctionDef) and n.name == "score_held_out"][0]
+    assert held_out.lineno < line <= held_out.end_lineno  # and it is the one of score_held_out
 
 
 # ---- regions
@@ -781,77 +835,264 @@ def made_up_ingest(where: Path, frame: pl.DataFrame, resolution: int, extra: lis
     return out
 
 
-def run_script(script, tmp_path, monkeypatch, *args, resolution=7):
-    """The script's `main` on a made-up ingest at `resolution`, outside the results directory `tmp_path`, with no reference data and no split, so that
-    a run that gets past its guards stops at the missing files and never loads the real ones."""
-    where = tmp_path.parent / f"{tmp_path.name}-counts-{resolution}"
-    counts_dir = made_up_ingest(where, COUNTS, resolution)
-    absent = ["--reference", str(where / "no-reference"), "--split", str(where / "no-split.parquet")]
-    monkeypatch.setattr("sys.argv", ["calibrate.py", "--counts", str(counts_dir), "--results", str(tmp_path), *absent, *args])
-    script.main()
+# The world twice over: the species of half A, and twins of them in half B with the same records, in the same groups, so that the dry run on A and the
+# scoring of B each have plants with outside and native presences. One made-up download holds both halves.
+TWIN = {s: f"b_{s}" for s in (*PLANTS, "heavy", "bird")}
+BOTH_COUNTS = pl.concat([COUNTS, COUNTS.with_columns(pl.col("species_id").replace(TWIN))])
+BOTH_REFS = refs(
+    [*TAXA, *({**t, "species_id": TWIN[t["species_id"]]} for t in TAXA)],
+    [*GROUPS, *((TWIN[s], g) for s, g in GROUPS)],
+    [*WCVP, *((TWIN[s], r, n) for s, r, n in WCVP)],
+    tdwg3=TDWG,
+)
+BOTH_SPLIT = pl.DataFrame(
+    {"species_id": [*TWIN, *TWIN.values()], "lineage": [f"family:{s}" for s in TWIN] * 2, "half": ["A"] * len(TWIN) + ["B"] * len(TWIN)}
+)
+WORLD_REGIONS = pl.DataFrame([("NAT", "Native land", 10, 1), ("FAR", "Far away", 20, 2), ("ISL", "An island", 30, 3)], schema=REGION_SCHEMA, orient="row")
+REFERENCE_STUBS = ("grids/ISEA3H-7.gpkg", "grids/ISEA3H-6.gpkg", "natural_earth/ne_10m_land.zip", "exports/extended/col.zip", "wgsrpd/level3.geojson")
+
+
+class ScriptWorld:
+    """`scripts/calibrate.py` on the twin world: a made-up ingest at `resolution`, stubs for the reference files, the loaders of the grid, the references,
+    the regions, the split and the names replaced by the world's, the known cases left out, every region listed, and the fixed marker in `tmp_path`. Every call of
+    `load_country_counts` (the real one, on the made-up ingest) is recorded in `loads` as (half, unsealed, species)."""
+
+    def __init__(self, tmp_path: Path, monkeypatch, resolution: int = 7):
+        self.tmp_path, self.monkeypatch = tmp_path, monkeypatch
+        self.script = script = load_script()
+        self.counts_dir = made_up_ingest(tmp_path / "gbif", BOTH_COUNTS, resolution)
+        self.results = tmp_path / "results"
+        self.reference = tmp_path / "reference"
+        for name in REFERENCE_STUBS:
+            (self.reference / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.reference / name).touch()
+        self.split_path = tmp_path / "split" / "halves-315557.parquet"
+        self.split_path.parent.mkdir()
+        self.split_path.touch()
+        self.seal = tmp_path / "split" / "held_out-315557.started"
+        self.loads = []
+
+        def spy(out_dir, split_, half, **kwargs):
+            self.loads.append((half, kwargs.get("unsealed", False), sorted(split_.filter(pl.col("half") == half)["species_id"]) if half != "all" else None))
+            return load_country_counts(out_dir, split_, half, **kwargs)
+
+        grid = Grid(resolution, WORLD.cells, WORLD.adjacency)
+        monkeypatch.setattr(script, "SEAL_MARKER", self.seal)
+        monkeypatch.setattr(script, "load_country_counts", spy)
+        monkeypatch.setattr(script, "load_grid", lambda gpkg, land: grid)
+        monkeypatch.setattr(script, "load_references", lambda grid_, reference: BOTH_REFS)
+        monkeypatch.setattr(script, "load_split", lambda path: BOTH_SPLIT)
+        monkeypatch.setattr(script, "tdwg_regions", lambda path: WORLD_REGIONS)
+        monkeypatch.setattr(script, "name_index", lambda path: pl.DataFrame())
+        monkeypatch.setattr(script, "CASES", ())
+        monkeypatch.setattr(script, "MIN_NATIVE", 1)  # the world's regions have a few native presences, not the 100 a region needs to be listed
+
+    def run(self, *args):
+        argv = ["--counts", str(self.counts_dir), "--results", str(self.results), "--reference", str(self.reference), "--split", str(self.split_path), *args]
+        self.monkeypatch.setattr("sys.argv", ["calibrate.py", *argv])
+        self.script.main()
+
+    def report(self) -> dict:
+        return json.loads((self.results / "res7" / "report.json").read_text())
+
+
+@pytest.fixture
+def world7(tmp_path, monkeypatch):
+    return ScriptWorld(tmp_path, monkeypatch)
+
+
+def test_the_dry_run_loads_half_a_only_and_writes_its_report_with_the_choice_and_the_ingest(world7):
+    world7.run()
+    assert world7.loads == [("A", False, sorted(TWIN))]  # half A, sealed, and half B never
+    report = world7.report()
+    assert (report["half"], report["resolution"]) == ("A", 7) and isinstance(report["chosen"]["setting"], int)
+    assert report["ingest"] == json.loads((world7.counts_dir / "_COMPLETE").read_text())
+    assert not world7.seal.exists() and not list(world7.results.glob("res*/held_out.*"))
+
+
+def test_a_dry_run_that_fails_leaves_no_report_of_an_earlier_one(world7, monkeypatch):
+    world7.run()
+
+    def fails(*args, **kwargs):
+        raise MemoryError("the dry run failed")
+
+    monkeypatch.setattr(world7.script, "calibrate", fails)
+    with pytest.raises(MemoryError):
+        world7.run()
+    assert not (world7.results / "res7" / "report.json").exists()  # so the scoring of half B is refused until a dry run finishes
+
+
+def test_scoring_half_b_loads_the_references_and_half_bs_calibration_species_and_nothing_else(world7):
+    world7.run()
+    chosen = world7.report()["chosen"]["setting"]
+    setting = (chosen + 1) % 81
+    before = {p.name: p.stat().st_mtime_ns for p in (world7.results / "res7").iterdir()}
+    world7.loads.clear()
+
+    def not_in_this_run(*args, **kwargs):
+        raise AssertionError("the scoring of half B runs no known case, no grid of settings, no region and no cross-check")
+
+    for name in ("known_cases", "name_index", "clean", "baseline", "calibrate", "griis_cross_check", "region_loss", "tdwg_regions"):
+        world7.monkeypatch.setattr(world7.script, name, not_in_this_run)
+    world7.run("--score-half-b", "--setting", str(setting))
+    # one load, of half B's calibration species (the bird of half B is in no plant group), unsealed; nothing of half A
+    assert world7.loads == [("B", True, sorted(TWIN[s] for s in (*PLANTS, "heavy")))]
+    after = {p.name: p.stat().st_mtime_ns for p in (world7.results / "res7").iterdir()}
+    assert {k: v for k, v in after.items() if k in before} == before  # the dry run's files are as they were
+    assert set(after) - set(before) <= {"held_out.json", "held_out.started", "held_out.log"} and {"held_out.json", "held_out.started"} <= set(after)
+    held = json.loads((world7.results / "res7" / "held_out.json").read_text())
+    assert set(held) == world7.script.HELD_OUT_KEYS
+    assert (held["setting"], held["dry_run_chosen"], held["setting_is_dry_run_choice"]) == (setting, chosen, False)
+    expected = settings_grid()[setting]
+    b_counts = BOTH_COUNTS.filter(pl.col("species_id").is_in(list(TWIN.values())))
+    assert {k: held[k] for k in SCORE} == score(b_counts, expected, BOTH_REFS, Grid(7, WORLD.cells, WORLD.adjacency))
+    assert {k: held[k] for k in THRESHOLDS} == {k: getattr(expected, k) for k in THRESHOLDS}
+    assert held["species_loaded"] == {"species": 5, "plantae": 5, "not_plantae": 0}
+    # both markers, with the setting and whether it is the dry run's choice
+    for marker in (world7.seal, world7.results / "res7" / "held_out.started"):
+        lines = dict(line.split(" ", 1) for line in marker.read_text().splitlines())
+        assert list(lines) == ["started", "commit", "setting", "dry_run_chosen", "setting_is_dry_run_choice", "counts", "zip_sha256"]
+        assert (lines["setting"], lines["dry_run_chosen"], lines["setting_is_dry_run_choice"]) == (str(setting), str(chosen), "False")
+        assert re.fullmatch(r"[0-9a-f]{40}|unknown", lines["commit"]) and datetime.fromisoformat(lines["started"])
+    # and it is done once
+    world7.loads.clear()
+    with pytest.raises(SystemExit, match="was started"):
+        world7.run("--score-half-b", "--setting", str(chosen))
+    assert world7.loads == []
+
+
+def test_scoring_half_b_records_when_the_setting_is_the_dry_runs_choice(world7):
+    world7.run()
+    chosen = world7.report()["chosen"]["setting"]
+    world7.run("--score-half-b", "--setting", str(chosen))
+    held = json.loads((world7.results / "res7" / "held_out.json").read_text())
+    assert (held["setting"], held["dry_run_chosen"], held["setting_is_dry_run_choice"]) == (chosen, chosen, True)
+
+
+def test_scoring_half_b_needs_a_setting_and_a_setting_needs_the_scoring(world7):
+    with pytest.raises(SystemExit, match="needs --setting"):
+        world7.run("--score-half-b")
+    with pytest.raises(SystemExit, match="for --score-half-b only"):
+        world7.run("--setting", "3")
+    assert world7.loads == [] and not world7.results.exists()
+
+
+def fake_dry_run(world: ScriptWorld, **changes) -> Path:
+    """A `report.json` of a finished dry run at resolution 7 on the world's ingest, with `changes`, and nothing else."""
+    report = {"half": "A", "resolution": 7, "chosen": {"setting": 75}, "ingest": json.loads((world.counts_dir / "_COMPLETE").read_text()), **changes}
+    path = world.results / "res7" / "report.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({k: v for k, v in report.items() if v is not None}))
+    return path
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        (None, "no dry run"),
+        ({"chosen": None}, "not a complete dry run"),
+        ({"chosen": {"setting": "75"}}, "not a complete dry run"),
+        ({"resolution": 6}, "not a complete dry run"),
+        ({"half": "B"}, "not a complete dry run"),
+        ({"ingest": {"zip_sha256": "0" * 64}}, "another ingest"),
+    ],
+)
+def test_scoring_half_b_refuses_without_a_finished_dry_run_at_7_on_the_same_ingest(world7, changes, message):
+    if changes is not None:
+        fake_dry_run(world7, **changes)
+    with pytest.raises(SystemExit, match=message):
+        world7.run("--score-half-b", "--setting", "75")
+    assert world7.loads == [] and not world7.seal.exists() and not list(world7.results.glob("res*/held_out.*"))
+
+
+@pytest.mark.parametrize("setting", ["-1", "81"])
+def test_scoring_half_b_refuses_a_setting_that_is_not_one_of_the_81(world7, setting):
+    fake_dry_run(world7)
+    with pytest.raises(SystemExit, match="81 settings"):
+        world7.run("--score-half-b", "--setting", setting)
+    assert world7.loads == [] and not world7.seal.exists()
 
 
 @pytest.mark.parametrize("marker, message", [("held_out.json", "already scored"), ("held_out.started", "was started")])
-def test_score_half_b_refuses_if_any_resolution_has_a_scoring_started_or_done(tmp_path, monkeypatch, marker, message):
+def test_score_half_b_refuses_if_any_resolution_has_a_scoring_started_or_done(world7, marker, message):
     """The marker is written before half B is loaded and the result after, so a run that failed in between is stopped by the marker alone."""
-    script = load_script()
+    fake_dry_run(world7)
     for resolution in (6, 7):  # the file of any resolution stops it, and so does the one of its own
-        done = tmp_path / f"res{resolution}"
-        done.mkdir()
+        done = world7.results / f"res{resolution}"
+        done.mkdir(exist_ok=True)
         (done / marker).write_text("")
         with pytest.raises(SystemExit, match=message) as stopped:
-            run_script(script, tmp_path, monkeypatch, "--resolution", "7", "--score-half-b")
+            world7.run("--score-half-b", "--setting", "75")
         assert "Markus" in str(stopped.value) and "no flag" in str(stopped.value)  # and it says how to go on
         assert f"res{resolution}" in str(stopped.value)
         (done / marker).unlink()
-        done.rmdir()
+    assert world7.loads == []
+
+
+def test_score_half_b_refuses_on_the_fixed_marker_alone(world7, tmp_path):
+    """The fixed marker next to the split holds whatever --results says: a run with results elsewhere, or after results/ was cleared, is still refused."""
+    fake_dry_run(world7)
+    world7.seal.write_text("started 2026-11-01T00:00:00+00:00\n")
+    assert not list(world7.results.glob("res*/held_out.*"))
+    with pytest.raises(SystemExit, match="was started") as stopped:
+        world7.run("--score-half-b", "--setting", "75")
+    assert str(world7.seal) in str(stopped.value) and "Markus" in str(stopped.value)
+    assert world7.loads == []
+
+
+def test_the_fixed_marker_is_next_to_the_frozen_split():
+    script = load_script()
+    assert script.SEAL_MARKER == ROOT / "data" / "split" / "held_out-315557.started"
+    assert script.SEAL_MARKER.parent == (ROOT / "data" / "split" / "halves-315557.parquet").parent
 
 
 def test_score_half_b_refuses_any_resolution_but_7_before_it_loads_anything(tmp_path, monkeypatch):
     """The resolution is the ingest's, from its marker, so stating 7 for an ingest of another does not get past it."""
-    script = load_script()
     for resolution in (5, 6, 8):
+        world = ScriptWorld(tmp_path / str(resolution), monkeypatch, resolution)
         with pytest.raises(SystemExit, match="resolution 7"):
-            run_script(script, tmp_path, monkeypatch, "--score-half-b", resolution=resolution)
+            world.run("--score-half-b", "--setting", "75")
         with pytest.raises(SystemExit, match=f"resolution {resolution}, not 7"):
-            run_script(script, tmp_path, monkeypatch, "--resolution", "7", "--score-half-b", resolution=resolution)
-    assert not list(tmp_path.iterdir())  # nothing was made
+            world.run("--resolution", "7", "--score-half-b", "--setting", "75")
+        assert world.loads == [] and not world.results.exists()  # nothing was made
 
 
-def failing_load(tmp_path, script, monkeypatch):
-    """`score_held_out` with a loader that fails after half B is asked for, as an out-of-memory error would, and the marker it leaves."""
-    marker = tmp_path / "res7" / "held_out.started"
-    marker.parent.mkdir()
+def failing_load(world: ScriptWorld):
+    """`score_held_out` with a loader that fails after half B is asked for, as an out-of-memory error would, and the markers it leaves."""
+    markers = [world.seal, world.results / "res7" / "held_out.started"]
     attempts = []
 
     def fails(out_dir, split_, half, **kwargs):
         attempts.append(half)
         raise MemoryError("the load of half B failed")
 
-    monkeypatch.setattr(script, "load_country_counts", fails)
-    split = pl.DataFrame({"species_id": [*PLANTS, "heavy"], "lineage": ["f"] * 5, "half": ["B"] * 5})
+    world.monkeypatch.setattr(world.script, "load_country_counts", fails)
     with pytest.raises(MemoryError):
-        script.score_held_out(tmp_path / "none", split, REFS, WORLD, Settings(), marker)
-    return marker, attempts
+        world.script.score_held_out(world.counts_dir, BOTH_SPLIT, BOTH_REFS, WORLD, Settings(), markers, {"setting": 75})
+    return markers, attempts
 
 
-def test_a_run_that_fails_after_loading_half_b_leaves_a_marker_and_a_retry_is_refused(tmp_path, monkeypatch):
-    script = load_script()
-    marker, attempts = failing_load(tmp_path, script, monkeypatch)
-    assert attempts == ["B"] and marker.exists() and not (marker.parent / "held_out.json").exists()  # no result, but the marker
+def test_a_run_that_fails_after_loading_half_b_leaves_both_markers_and_a_retry_is_refused(world7):
+    fake_dry_run(world7)
+    markers, attempts = failing_load(world7)
+    assert attempts == ["B"] and all(m.exists() for m in markers) and not (markers[1].parent / "held_out.json").exists()  # no result, but the markers
     with pytest.raises(SystemExit, match="was started"):
-        run_script(script, tmp_path, monkeypatch, "--resolution", "7", "--score-half-b")
-    with pytest.raises(FileExistsError):  # and the function itself will not write over it
-        script.mark_started(marker)
+        world7.run("--score-half-b", "--setting", "75")
+    markers[1].unlink()  # with the results' marker gone, the fixed one still stops it
+    with pytest.raises(SystemExit, match="was started"):
+        world7.run("--score-half-b", "--setting", "75")
+    with pytest.raises(FileExistsError):  # and the function itself will not write over a marker
+        world7.script.mark_started([world7.seal], {})
 
 
 def test_the_guards_are_for_scoring_half_b_only(tmp_path, monkeypatch):
-    """A dry run at resolution 6 is not stopped by a held_out.json, and gets as far as the missing counts."""
-    script = load_script()
-    (tmp_path / "res7").mkdir()
-    (tmp_path / "res7" / "held_out.json").write_text("{}")
-    with pytest.raises(SystemExit, match="missing"):
-        run_script(script, tmp_path, monkeypatch, "--resolution", "6", resolution=6)
+    """A dry run at resolution 6 is not stopped by a held_out.json or by the fixed marker, and runs."""
+    world = ScriptWorld(tmp_path, monkeypatch, resolution=6)
+    (world.results / "res7").mkdir(parents=True)
+    (world.results / "res7" / "held_out.json").write_text("{}")
+    world.seal.write_text("")
+    world.run()
+    assert (world.results / "res6" / "report.json").exists() and world.loads == [("A", False, sorted(TWIN))]
 
 
 def test_score_held_out_loads_the_calibration_species_of_half_b_group_mates_included_and_no_other_species(tmp_path, monkeypatch):
@@ -865,18 +1106,19 @@ def test_score_held_out_loads_the_calibration_species_of_half_b_group_mates_incl
     out = made_up_ingest(tmp_path, everything, 7, ["\t".join(str(v) for v in ("elsewhere", "AA", "1", "land", *([5] * len(COUNT_COLUMNS))))])
     split = pl.DataFrame({"species_id": [*PLANTS, "heavy", "alga", "bird", "elsewhere"], "lineage": ["f"] * 8, "half": ["B"] * 7 + ["A"]})
     calls = []
-    marker = tmp_path / "held_out.started"
+    markers = [tmp_path / "split" / "held_out-315557.started", tmp_path / "res7" / "held_out.started"]
 
     def spy(out_dir, split_, half, **kwargs):
-        assert marker.exists()  # written before half B is loaded
+        assert all(m.exists() for m in markers)  # written before half B is loaded
         calls.append((sorted(split_["species_id"]), half, kwargs))
         return load_country_counts(out_dir, split_, half, **kwargs)
 
     monkeypatch.setattr(script, "load_country_counts", spy)
-    got = script.score_held_out(out, split, r, WORLD, Settings(), marker)
-    lines = marker.read_text().splitlines()
-    assert [line.split()[0] for line in lines] == ["started", "commit"]  # the time, and the commit that ran it
-    assert re.fullmatch(r"[0-9a-f]{40}|unknown", lines[1].split()[1]) and datetime.fromisoformat(lines[0].split()[1])
+    got = script.score_held_out(out, split, r, WORLD, Settings(), markers, {"setting": 40, "dry_run_chosen": 75})
+    for marker in markers:
+        lines = marker.read_text().splitlines()
+        assert [line.split()[0] for line in lines] == ["started", "commit", "setting", "dry_run_chosen"]  # the time, the commit that ran it, and what it scores
+        assert re.fullmatch(r"[0-9a-f]{40}|unknown", lines[1].split()[1]) and datetime.fromisoformat(lines[0].split()[1])
     assert calls == [(["alga", "heavy", "p1", "p2", "p3", "p4"], "B", {"unsealed": True})]  # the alga is loaded, the bird of half B never is
     assert got == {**score(everything, Settings(), r, WORLD), "species_loaded": {"species": 6, "plantae": 5, "not_plantae": 1}}
     assert set(got) == {*SCORE, "species_loaded"}
@@ -888,5 +1130,5 @@ def test_score_held_out_loads_the_calibration_species_of_half_b_group_mates_incl
 
 def test_the_script_has_the_flag_and_the_resolution_and_the_counts():
     text = (ROOT / "scripts" / "calibrate.py").read_text()
-    for flag in ("--counts", "--resolution", "--score-half-b"):
+    for flag in ("--counts", "--resolution", "--score-half-b", "--setting"):
         assert flag in text

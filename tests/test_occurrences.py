@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import json
 import re
@@ -338,6 +339,66 @@ ROOT = Path(__file__).parent.parent
 # `scan_counts` reads every species, half B included, without the seal. These are its only readers: `qa`, called by the script, which gives
 # global numbers only, and `_select`, which checks the seal first. DECISIONS.md lists them in its seal paragraph, so a new reader needs a ruling.
 SCAN_COUNTS_READERS = {"src/realms/occurrences.py", "scripts/ingest.py"}
+
+
+PARQUET_READERS = {"scan_parquet", "read_parquet", "read_parquet_schema", "read_parquet_metadata", "scan_pyarrow_dataset", "read_table", "ParquetFile", "dataset"}
+
+
+def _mentions_parts(node: ast.AST, tainted: set[str]) -> bool:
+    """Whether `node` names the parts of an ingest: a string with `part-` in it, a name made from one, or the counts' directory (a name or attribute with
+    `counts` in it, as `--counts` is the directory of the parts)."""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and "part-" in sub.value:
+            return True
+        if isinstance(sub, ast.Name) and (sub.id in tainted or "counts" in sub.id):
+            return True
+        if isinstance(sub, ast.Attribute) and "counts" in sub.attr:
+            return True
+    return False
+
+
+def direct_part_reads(source: str) -> list[int]:
+    """The lines of `source` that read the parts of an ingest with a Parquet reader of their own, past `scan_counts` and the seal."""
+    tree = ast.parse(source)
+    tainted: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign | ast.AnnAssign | ast.AugAssign) and node.value is not None and _mentions_parts(node.value, set()):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            tainted |= {t.id for target in targets for t in ast.walk(target) if isinstance(t, ast.Name)}
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+            if name in PARQUET_READERS and any(_mentions_parts(arg, tainted) for arg in [*node.args, *(k.value for k in node.keywords)]):
+                found.append(node.lineno)
+    return found
+
+
+def test_the_scan_finds_a_direct_read_of_the_parts():
+    caught = [
+        'pl.scan_parquet(sorted(d.glob("part-*.parquet")))',
+        'parts = list(d.glob("part-*.parquet"))\npl.read_parquet(parts[0])',
+        'pl.read_parquet(d / "part-00000.parquet")',
+        'pl.scan_parquet(f"{d}/part-{i:05d}.parquet")',
+        "pl.scan_parquet(args.counts)",
+        "pl.read_parquet(counts_dir)",
+        'pyarrow.parquet.read_table(source=str(d / "part-00001.parquet"))',
+    ]
+    for code in caught:
+        assert direct_part_reads(code), code
+    for code in ("pl.read_parquet(args.removed)", 'pl.read_parquet(out / "presence.parquet")', 'sum(p.stat().st_size for p in d.glob("part-*.parquet"))'):
+        assert not direct_part_reads(code), code
+
+
+def test_no_module_but_occurrences_reads_the_parts_directly():
+    """The parts hold every species, half B included, and only `occurrences.py` reads them, behind the seal (`_select`) or for global numbers (`qa`)."""
+    found = {
+        path.relative_to(ROOT).as_posix(): lines
+        for folder in ("src", "scripts")
+        for path in (ROOT / folder).rglob("*.py")
+        if path.name != "occurrences.py" and (lines := direct_part_reads(path.read_text()))
+    }
+    assert found == {}, "a direct read of the parts bypasses the seal on half B: read them through occurrences.py"
 
 
 def test_only_the_qa_script_and_the_sealed_loaders_read_scan_counts():

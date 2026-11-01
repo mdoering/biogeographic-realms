@@ -1,6 +1,7 @@
-"""Calibrate the layer 5 thresholds on half A's WCVP plants, and check the known cases on half A's fully cleaned data.
+"""Calibrate the layer 5 thresholds on half A's WCVP plants, and check the known cases on half A's fully cleaned data; or, in a run of its own, score one setting on half B.
 
-Reads the ingested download (`data/gbif/<key>`), the frozen split and the references, and does, for half A only:
+**The dry run** (without `--score-half-b`) reads the ingested download (`data/gbif/<key>`), the frozen split and the references, and does, for half A only (it never
+loads half B):
 
 1. the known cases of the design (`realms.calibrate.CASES`) on all five layers at the design's thresholds with `wcvp_mode` `native_only`:
    those whose family is in half A are run and pass or fail, and the others are listed as waiting for step 9, with their family and half;
@@ -15,20 +16,30 @@ Reads the ingested download (`data/gbif/<key>`), the frozen split and the refere
    off, at the chosen setting and at the design's, reporting the share of the animal presences that GRIIS lists as introduced (by its own establishment means,
    from the lists with distributions) that layer 5 takes, against the share of all the other animal presences. Reports only;
 4. the native loss of the chosen setting per TDWG level 3 region (`regions.csv`, layer 5's reading), whose top 20 regions of at least 100 native presences
-   show whether islands lose more;
-5. with `--score-half-b`, the one setting chosen on A scored on half B's calibration species: the plants and the other species of their groups, which
-   are not all plants (some are of other kingdoms or of none, as in the group `eukaryotes`). That is the only call before the freeze that opens half B. It is
-   listed in `DECISIONS.md`, prints and saves rates and counts only, and nothing per taxon. It runs at resolution 7 only. It writes
-   `held_out.started` (the time and the commit) before it loads half B, and refuses if any `res*/held_out.started` or `res*/held_out.json` is already
-   there: a run that fails after the load has to be decided on by Markus, and there is no flag to override it.
+   show whether islands lose more.
+
+It writes `results/calibrate/res<r>/`: `settings.csv` (the 81 settings), `regions.csv`, `known_cases.json`, `griis_cross_check.json`, `calibrate.log`, and `report.json` last,
+with the `chosen` setting and the ingest's marker. References are loaded once and need about 16 GB at the peak.
+
+**The scoring of half B** (`--score-half-b --setting N`) is the only call before the freeze that opens half B, listed in `DECISIONS.md`, and a run of its own, so that the
+setting is Markus's choice after he has seen the dry run, and half A's data is not in memory when half B is loaded. It scores setting `N` of the 81 on half B's calibration
+species: the plants and the other species of their groups, which are not all plants (some are of other kingdoms or of none, as in the group `eukaryotes`). It loads the
+references and those species of half B, and nothing else: no known cases, no grid of settings, no regions, no cross-check, and nothing of half A. It prints and saves rates
+and counts only, and nothing per taxon. Before anything is loaded it refuses:
+
+- any resolution but 7, the ingest's, from its marker;
+- unless the dry run at resolution 7 is complete: `res7/report.json` there, at resolution 7, with its `chosen` setting, made from the same ingest (the zip's sha256);
+- if a scoring was started or done: any `res*/held_out.started` or `res*/held_out.json` under `--results`, or the fixed marker `data/split/held_out-315557.started` next to the
+  frozen split, which holds whatever `--results` says. A run that fails after the load has to be decided on by Markus, and there is no flag to override it.
+
+It writes both markers (exclusive creation, with the time, the commit, `N`, and whether `N` is the dry run's choice) before half B is loaded, and `res7/held_out.json`
+(`N`, the dry run's choice, whether they are the same, the thresholds, the score and how many species were loaded) and `res7/held_out.log` after. The content of the fixed
+marker is to be copied into `DECISIONS.md`, which is tracked, as soon as it is written.
 
 `--griis-without-status skip|apply` is what layer 3 does with the GRIIS lists that have no distribution table in the known cases (see `scripts/clean_counts.py`),
-`skip` by default. It changes nothing in the calibration, where layer 3 is off.
-
-Everything goes to `results/calibrate/res<r>/`: `settings.csv` (the 81 settings), `regions.csv`, `known_cases.json`, `griis_cross_check.json`, `report.json`, `calibrate.log`,
-`held_out.started` before a scoring of half B, and `held_out.json` after it. The binding calibration is at the analysis resolution (7), where the counts of that download are the
-input: `uv run python -I scripts/calibrate.py --counts data/gbif/<key> --resolution 7 --score-half-b`. At resolution 6 it is a dry run.
-References are loaded once and need about 16 GB at the peak.
+`skip` by default. It changes nothing in the calibration, where layer 3 is off. The binding calibration is at the analysis resolution (7), where the counts of that download are
+the input: `uv run python -I scripts/calibrate.py --counts data/gbif/<key> --resolution 7` (the dry run), and then, once, after Markus has read it,
+`uv run python -I scripts/calibrate.py --counts data/gbif/<key> --resolution 7 --score-half-b --setting N`. At resolution 6 the dry run is a rehearsal.
 """
 
 import argparse
@@ -68,10 +79,13 @@ from realms.calibrate import (
 from realms.clean import GRIIS_WITHOUT_STATUS, LAYERS, Settings, clean, outlier_rows
 from realms.grid import load_grid
 from realms.natives import load_references, name_index
-from realms.occurrences import IncompleteIngest, load_country_counts, resolution_of
+from realms.occurrences import IncompleteIngest, load_country_counts, read_complete, resolution_of
 from realms.split import load_split
 
 SCORE_RESOLUTION = 7  # the resolution at which half B is scored, once
+# the marker of a scoring of half B that does not depend on --results, next to the frozen split of release 315557, which it is about
+SEAL_MARKER = Path(__file__).resolve().parent.parent / "data" / "split" / "held_out-315557.started"
+HELD_OUT_KEYS = {"setting", "dry_run_chosen", "setting_is_dry_run_choice", *GRID, *SCORE, "species_loaded"}
 MIN_NATIVE = 100  # presences a region needs to be listed in the top of the native loss
 SMALL_PARTS = 5  # a region touching this many land parts or fewer is small: islands and island groups, but not only
 TOP = 20
@@ -84,33 +98,39 @@ def peak_gb() -> float:
     return peak / (1e9 if sys.platform == "darwin" else 1e6)
 
 
-def mark_started(marker: Path) -> None:
-    """Write `marker`, with the time and the commit, to say that half B is about to be loaded. It stays whether the run goes on or fails.
-
-    `--score-half-b` refuses if it, or `held_out.json`, exists at any resolution, so a run that fails after the load cannot be retried by running
-    the script again. Made with exclusive creation: it raises if the marker is already there.
-    """
+def commit() -> str:
     try:
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent, capture_output=True, text=True, check=True).stdout.strip()
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent, capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
-        commit = "unknown"
-    with marker.open("x") as f:
-        f.write(f"started {datetime.now(UTC).isoformat(timespec='seconds')}\ncommit {commit}\n")
+        return "unknown"
 
 
-def score_held_out(counts_dir: Path, split: pl.DataFrame, refs, grid, setting: Settings, started: Path) -> dict:
+def mark_started(markers: list[Path], lines: dict[str, object]) -> None:
+    """Write each of `markers`, with the time, the commit and `lines`, to say that half B is about to be loaded. They stay whether the run goes on or fails.
+
+    `--score-half-b` refuses if any of them, or a `held_out.json`, exists, so a run that fails after the load cannot be retried by running the script again.
+    Made with exclusive creation: it raises if a marker is already there, before half B is loaded.
+    """
+    text = "".join(f"{k} {v}\n" for k, v in {"started": datetime.now(UTC).isoformat(timespec="seconds"), "commit": commit(), **lines}.items())
+    for marker in markers:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        with marker.open("x") as f:
+            f.write(text)
+
+
+def score_held_out(counts_dir: Path, split: pl.DataFrame, refs, grid, setting: Settings, markers: list[Path], lines: dict[str, object]) -> dict:
     """Score `setting` on half B's calibration species. The only call before the freeze that opens half B, listed in DECISIONS.md.
 
     The calibration species are the plants WCVP gives a native region **and every other species of their taxonomic groups**, which are not all plants:
     `under_reported` needs the group's records per cell, so the score is like for like with half A's. The split is cut to those species before it goes
     to `load_country_counts`, so no other species of half B is loaded. `species_loaded` says how many of them there are and how many are not Plantae,
     counted from the split and the taxonomy alone. What comes back is that and the counts and rates of `score`: nothing per taxon, and nothing is
-    printed or saved by this function but the marker: `started` is written (`mark_started`) before half B is loaded, so that a run that fails after the load
-    leaves a trace that `refuse_a_second_scoring` stops a retry on.
+    printed or saved by this function but the markers: they are written (`mark_started`, with `lines`) before half B is loaded, so that a run that fails after
+    the load leaves a trace that `refuse_a_second_scoring` stops a retry on.
     """
     species = split.filter(pl.col("half") == "B", pl.col("species_id").is_in(calibration_species(refs).implode()))
     loaded = kingdom_counts(species["species_id"], refs.taxa)
-    mark_started(started)
+    mark_started(markers, lines)
     counts_b = load_country_counts(counts_dir, species, "B", unsealed=True)
     return {**score(counts_b, setting, refs, grid), "species_loaded": loaded}
 
@@ -122,18 +142,78 @@ def described(index: int, setting: Settings, start, refs, grid, met: bool | None
 
 
 def refuse_a_second_scoring(args: argparse.Namespace, resolution: int) -> None:
-    """`--score-half-b` is made once, at resolution 7: stop before anything is loaded if it is asked otherwise, or if any resolution has a scoring started or done.
+    """`--score-half-b` is made once, at resolution 7: stop before anything is loaded if it is asked otherwise, or if a scoring was started or done.
 
-    The marker `held_out.started` is written before half B is loaded and `held_out.json` after, so a run that fails in between is stopped too. There is no
+    A scoring was started or done if any resolution under `--results` has `held_out.started` or `held_out.json`, or the fixed `SEAL_MARKER` exists, whatever
+    `--results` says. The markers are written before half B is loaded and `held_out.json` after, so a run that fails in between is stopped too. There is no
     flag to override: a retry after a failed run is for Markus to decide.
     """
     if resolution != SCORE_RESOLUTION:
         raise SystemExit(f"FAILED --score-half-b runs at resolution {SCORE_RESOLUTION}, the analysis resolution, and not at {resolution}: the call that opens half B is made once")
     how = "The call that opens half B is made once before the freeze and there is no flag to run it again: a retry after a failed run needs Markus's explicit decision."
+    if SEAL_MARKER.exists():
+        raise SystemExit(f"FAILED a scoring of half B was started, see {SEAL_MARKER}: it may have loaded half B, and a second run would be a second load. {how}")
     if started := sorted(args.results.glob("res*/held_out.started")):
         raise SystemExit(f"FAILED a scoring of half B was started, see {started[0]}: it may have loaded half B and then failed, and a retry would be a second load. {how}")
     if done := sorted(args.results.glob("res*/held_out.json")):
         raise SystemExit(f"FAILED half B was already scored, see {done[0]}. {how}")
+
+
+def dry_run_choice(args: argparse.Namespace, marker: dict) -> int:
+    """The setting the dry run at resolution 7 chose, from its `report.json`, which it writes last. Refuses unless that run is complete and was made from the ingest of `marker`."""
+    report_path = args.results / f"res{SCORE_RESOLUTION}" / "report.json"
+    first = f"Run the dry run first, `scripts/calibrate.py --counts {args.counts}` without --score-half-b, and choose the setting from it"
+    if not report_path.exists():
+        raise SystemExit(f"FAILED there is no dry run at resolution {SCORE_RESOLUTION}: {report_path} is missing. {first}")
+    report = json.loads(report_path.read_text())
+    chosen = report.get("chosen", {}).get("setting")
+    if report.get("resolution") != SCORE_RESOLUTION or report.get("half") != "A" or not isinstance(chosen, int):
+        raise SystemExit(f"FAILED {report_path} is not a complete dry run on half A at resolution {SCORE_RESOLUTION} with a `chosen` setting. {first}")
+    if report.get("ingest", {}).get("zip_sha256") != marker["zip_sha256"]:
+        raise SystemExit(f"FAILED {report_path} was made from another ingest than {args.counts} (the zip's sha256 differs). {first}")
+    return chosen
+
+
+def score_half_b(args: argparse.Namespace, resolution: int, marker: dict) -> None:
+    """The run of `--score-half-b --setting N`: the guards, then the references and half B's calibration species, and nothing else."""
+    refuse_a_second_scoring(args, resolution)
+    chosen = dry_run_choice(args, marker)
+    grid_of_settings = settings_grid()
+    if not 0 <= args.setting < len(grid_of_settings):
+        raise SystemExit(f"FAILED --setting is one of the {len(grid_of_settings)} settings of the grid, 0 to {len(grid_of_settings) - 1}, not {args.setting}")
+    reference = args.reference
+    gpkg = reference / "grids" / f"ISEA3H-{resolution}.gpkg"
+    land = reference / "natural_earth" / "ne_10m_land.zip"
+    missing = [str(p) for p in (args.split, gpkg, land) if not p.exists()]
+    if missing:
+        raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
+    directory = args.results / f"res{resolution}"
+    logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[logging.StreamHandler(), logging.FileHandler(directory / "held_out.log", mode="a")])
+    say = logging.getLogger("calibrate_script").info
+    setting = grid_of_settings[args.setting]
+    lines = {"setting": args.setting, "dry_run_chosen": chosen, "setting_is_dry_run_choice": args.setting == chosen, "counts": args.counts, "zip_sha256": marker["zip_sha256"]}
+    say(f"scoring setting {args.setting} ({', '.join(f'{k} {getattr(setting, k)}' for k in GRID)}) on half B's calibration species; the dry run chose {chosen}")
+
+    begun = time.perf_counter()
+    grid = load_grid(gpkg, land)
+    if grid.resolution != resolution:
+        raise SystemExit(f"FAILED {gpkg.name} holds resolution {grid.resolution}, not {resolution}")
+    refs = load_references(grid, reference)
+    gc.collect()
+    split = load_split(args.split)
+    say(f"references {refs.taxa.height} species, missing {list(refs.missing)} (peak {peak_gb():.1f} GB); the one unsealed call before the freeze follows")
+    score_ = score_held_out(args.counts, split, refs, grid, setting, [SEAL_MARKER, directory / "held_out.started"], lines)
+    held = {
+        "setting": args.setting,
+        "dry_run_chosen": chosen,
+        "setting_is_dry_run_choice": args.setting == chosen,
+        **{k: getattr(setting, k) for k in GRID},
+        **score_,
+    }
+    assert set(held) == HELD_OUT_KEYS  # numbers only: nothing per taxon is printed or saved
+    (directory / "held_out.json").write_text(json.dumps(held, indent=2) + "\n")
+    say(f"half B's calibration species, rates and counts: {held}")
+    say(f"wrote {directory / 'held_out.json'}, {time.perf_counter() - begun:.0f} s, peak {peak_gb():.1f} GB. Copy {SEAL_MARKER} into DECISIONS.md now")
 
 
 def main() -> None:
@@ -151,17 +231,29 @@ def main() -> None:
     parser.add_argument(
         "--score-half-b",
         action="store_true",
-        help="also score the chosen setting on half B's calibration species (WCVP plants and the other species of their groups): the one call before the freeze that opens half B. Resolution 7 only, run once",
+        help="instead of the dry run, score setting --setting on half B's calibration species (WCVP plants and the other species of their groups): the one call before the freeze that opens half B. Resolution 7 only, after the dry run at 7, run once",
     )
+    parser.add_argument("--setting", type=int, help="with --score-half-b, and only with it: the setting of the 81 to score, by its number in the dry run's settings.csv")
     args = parser.parse_args()
+    if args.score_half_b and args.setting is None:
+        raise SystemExit("FAILED --score-half-b needs --setting N, the setting of the dry run at resolution 7 that Markus chose")
+    if args.setting is not None and not args.score_half_b:
+        raise SystemExit("FAILED --setting is for --score-half-b only: the dry run chooses its setting itself")
 
     try:
+        marker = read_complete(args.counts)
         resolution = resolution_of(args.counts, args.resolution)  # before the references, which take a minute and 16 GB
     except (IncompleteIngest, ValueError) as error:
         raise SystemExit(f"FAILED {error}") from error
-    directory = args.results / f"res{resolution}"
     if args.score_half_b:
-        refuse_a_second_scoring(args, resolution)
+        score_half_b(args, resolution, marker)
+        return
+    dry_run(args, resolution, marker)
+
+
+def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
+    """The known cases, the 81 settings, the regions and the cross-check, on half A. Never loads half B, and writes `report.json` last."""
+    directory = args.results / f"res{resolution}"
     reference = args.reference
     gpkg = reference / "grids" / f"ISEA3H-{resolution}.gpkg"
     land = reference / "natural_earth" / "ne_10m_land.zip"
@@ -171,6 +263,7 @@ def main() -> None:
     if missing:
         raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
     directory.mkdir(parents=True, exist_ok=True)
+    (directory / "report.json").unlink(missing_ok=True)  # written last, so that it is there only for a run that finished: the scoring of half B reads it
     logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[logging.StreamHandler(), logging.FileHandler(directory / "calibrate.log", mode="w")])
     say = logging.getLogger("calibrate_script").info
 
@@ -183,6 +276,7 @@ def main() -> None:
         "calibration_layers": [1, 2, 4, 5],
         "native_loss_limit": NATIVE_LOSS_LIMIT,
         "known_cases_griis_without_status": args.griis_without_status,
+        "ingest": marker,
     }
 
     def lap(name: str, since: float) -> None:
@@ -197,7 +291,7 @@ def main() -> None:
     gc.collect()
     regions = tdwg_regions(level3)
     split = load_split(args.split)
-    counts = load_country_counts(args.counts, split, "A")  # half A, not unsealed: half B is opened only by score_held_out
+    counts = load_country_counts(args.counts, split, "A")  # half A, not unsealed: half B is opened only by score_held_out, in a run of its own
     say(f"grid {grid.cells.height} cells at resolution {grid.resolution}; references {refs.taxa.height} species, missing {list(refs.missing)}; half A {counts.height} rows")
     lap("load", begun)
 
@@ -290,17 +384,6 @@ def main() -> None:
     (directory / "griis_cross_check.json").write_text(json.dumps(cross, indent=2) + "\n")
     report["griis_cross_check"] = cross
     lap("griis_cross_check", begun)
-
-    # ---- half B, once
-    if args.score_half_b:
-        begun = time.perf_counter()
-        say("scoring the chosen setting on half B's calibration species: the one unsealed call before the freeze")
-        held = {"setting": index_chosen, **{k: getattr(chosen, k) for k in GRID}, **score_held_out(args.counts, split, refs, grid, chosen, directory / "held_out.started")}
-        assert set(held) == {"setting", *GRID, *SCORE, "species_loaded"}  # numbers only: nothing per taxon is printed or saved
-        (directory / "held_out.json").write_text(json.dumps(held, indent=2) + "\n")
-        report["held_out"] = held
-        say(f"half B's calibration species, rates and counts: {held}")
-        lap("held_out", begun)
 
     report["seconds"] = {**seconds, "total": round(time.perf_counter() - started, 1)}
     report["peak_gb"] = round(peak_gb(), 1)

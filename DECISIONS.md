@@ -394,18 +394,27 @@ unless the three pass marks hold. Run it as `uv run python -I`, since it reads a
   is read, and a species that is not in the split is left out of every half. `qa` and the script print and write global numbers only: no species,
   lineage or per-taxon figure. The unaccepted-species check gives how many species and rows and names none, where `check_columns.py` lists
   examples, so no figure can be traced to a taxon. Unknown cells are listed (up to 10 codes), since a cell is not a taxon.
-  - **`unsealed=True` call sites so far:** one, implemented and not yet run. `score_held_out` in `scripts/calibrate.py` (behind `--score-half-b`) scores the setting chosen on half A on half B's
-    **calibration species**: the plants WCVP gives a native region **and every other species of their taxonomic groups**, which are not all plants (`under_reported` needs the group's records per cell, so
-    the score is like for like with A's). Of the 197,567 species of half B that it asks for, 2,586 are not Plantae in COL (see the calibration section for the breakdown, counted from the split and the taxonomy alone).
-    It is the only call planned before the freeze and **runs once, at resolution 7**: the flag refuses any other resolution, and refuses if any `results/calibrate/res*/held_out.started` or `res*/held_out.json` exists. **The marker `held_out.started` (the time and the commit) is written before half B is loaded**, and the result after, so a run that fails after the load
-    (out of memory at resolution 7, or `calibrate` raising) is not retried by running the script again, as that would be a second unsealed load. A failed run needs Markus's explicit decision, and there is no override flag.
-    The split is cut to those species before it loads, so no other species of half B is read. **Only counts and rates are printed or saved** (the score, and how many species were loaded and how many are not Plantae):
-    nothing per taxon. `tests/test_calibrate.py` fails if any other file under `src/` or `scripts/` (but `occurrences.py`) has an `unsealed=True` call, or this one is not there once.
+  - **`unsealed=True` call sites so far:** one, implemented and not yet run. `score_held_out` in `scripts/calibrate.py`, **in a run of its own**: `--score-half-b --setting N` (a required `N`, the
+    setting Markus chooses after reading the dry run at resolution 7) scores setting `N` of the 81 on half B's **calibration species**: the plants WCVP gives a native region **and every other species of their
+    taxonomic groups**, which are not all plants (`under_reported` needs the group's records per cell, so the score is like for like with A's). Of the 197,567 species of half B that it asks for, 2,586 are not
+    Plantae in COL (see the calibration section for the breakdown, counted from the split and the taxonomy alone). **That run loads the references and those species of half B, and nothing else**: no known cases, no
+    grid of settings, no regions, no cross-check, and nothing of half A, so A's data is not in memory and the setting is not spent with the choice. **The dry run, without the flag, never loads half B.**
+    It is the only call planned before the freeze and **runs once, at resolution 7**. Before anything is loaded it refuses: any resolution but 7 (the ingest's, from its `_COMPLETE`); **unless the dry run at
+    resolution 7 is complete** (`results/calibrate/res7/report.json`, which the dry run removes when it starts and writes last, at resolution 7 on half A with its `chosen` setting, from the same ingest by the zip's
+    sha256); and **if a scoring was started or done**: any `results/calibrate/res*/held_out.started` or `res*/held_out.json` under `--results`, **or the fixed marker `data/split/held_out-315557.started`** next to
+    the frozen split, which holds whatever `--results` says and is not in `results/`. **Both markers are written by exclusive creation before half B is loaded** (the time, the commit, `N`, the dry run's choice,
+    whether `N` is that choice, the counts and the zip's sha256), and `held_out.json` after it (`N`, the dry run's choice, whether they are the same, the thresholds, the score and how many species were loaded), so a
+    run that fails after the load (out of memory at resolution 7, or `calibrate` raising) is not retried by running the script again, as that would be a second unsealed load. A failed run needs Markus's explicit
+    decision, and there is no override flag. **The content of `data/split/held_out-315557.started` is copied into this file, which is tracked, as soon as it is written**, so that the record of the one load does not
+    rest on a file git ignores. The split is cut to those species before it loads, so no other species of half B is read. **Only counts and rates are printed or saved** (the score, and how many species were loaded and
+    how many are not Plantae): nothing per taxon. `tests/test_calibrate.py` scans the syntax tree of every module under `src/` and `scripts/` and fails unless this is the only call that passes `unsealed=` with anything
+    but the constant `False`, or `**` keywords to a loader, or calls `_select` (which takes `unsealed` by position) from outside `occurrences.py`, or holds the string `"unsealed"`.
   - **`scan_counts` reads, which are not sealed:** `scan_counts` is public and returns every species, half B included, so the seal doesn't cover it.
-    It has two readers, and both touch all species: `qa`, called from `scripts/ingest.py`, which produces global numbers only, and
-    `_select` in `realms/occurrences.py`, which checks the seal before it reads and returns half A, or half B only when `unsealed=True`.
+    It has two readers, and both touch all species: `scripts/ingest.py`, for `qa` and for the cell check of `--mark-complete`, which produce global numbers only, and
+    `_select` in `realms/occurrences.py`, which checks the seal before it reads and returns half A, or half B or `"all"` only when `unsealed=True`.
     `tests/test_occurrences.py` fails if any other module under `src/` or `scripts/` mentions `scan_counts`, so a new reader needs a ruling
-    listed here.
+    listed here, and (since the final review) **if any module but `occurrences.py` reads the parts with a Parquet reader of its own** (`scan_parquet`, `read_parquet` and the like, on a path with `part-` in it,
+    a name made from one, or the counts' directory), found by the syntax tree.
 - **Not done here:** how many sea-part records are terrestrial species on the coast (open since the column check) needs the species'
   environment, and wasn't part of this check.
 
@@ -1024,7 +1033,8 @@ changed:** the `Settings` defaults are the design's, and the setting chosen belo
   These are species that the split and the taxonomy give, whether they have records or not. In the dry run, 161,145 species of half A have records. **Checked:** at the design's setting, `clean` on all of half A (all species, layers 1, 2, 4 and 5) gives the same 525,201 / 107,326 / 1,808,902 / 56,953 as the calibration set alone.
 - **The grid of 81 settings** is as the brief has it: satellite record share 0.5, 1 and 2%, satellite cell share 2, 5 and 10%, under-reported rate factor 0.5, 1 and 2%, group minimum 300, 1,000 and 3,000, in that order (the first varies slowest), with the design's setting in the middle (index 40).
 - **The choice** is the setting that removes the most outside presences while losing at most 5% of the native ones (`choose`, a tolerance of 1e-9 on the share against the count), by the reading above. With no setting within 5%, the lowest native loss is taken and the run says so.
-- **Half B is scored behind `--score-half-b`, and was not scored.** `score_held_out` is implemented and tested on a made-up download and hand-made tables only. It is listed in the call-site list of the seal above. It scores half B's **calibration species, which are the plants and the other species of their groups**
+- **Half B is scored behind `--score-half-b`, and was not scored.** (Since the final review a run of its own, `--score-half-b --setting N`, after the dry run at resolution 7: see the call-site list above and
+  "The scoring of half B, a run of its own" below.) `score_held_out` is implemented and tested on a made-up download and hand-made tables only. It is listed in the call-site list of the seal above. It scores half B's **calibration species, which are the plants and the other species of their groups**
   (the species that are not Plantae are kept because the reporting rate needs the group totals, so that the score is like for like with A's; the numbers are above). The flag refuses to run at any resolution but 7, and refuses if any `results/calibrate/res*/held_out.started` or `res*/held_out.json` exists (tested, before anything is loaded). The marker is written before the load and the result after it, so a run that fails in between leaves the marker and a retry is refused (tested with a loader that fails); it says that a retry needs Markus's decision, and there is no override flag.
   It **prints and saves counts and rates only, and how many species were loaded and how many are not Plantae: nothing per taxon** (the function returns exactly that, and a test and an assertion in the script check the keys). **No unsealed call was run in this task, and nothing of half B was loaded, counted or looked at:** the script loads
   `load_country_counts(..., "A")` only, and the halves of the known cases and the counts of calibration species come from the split file and the taxonomy, which have no occurrences.
@@ -1379,3 +1389,25 @@ all of layer 5 497,580 / 864,893 / 101,444 and 485,165 / 843,619 / 100,495, and 
 the top settings in `report.json`. The known cases come from a full clean with layer 3 on, and none of their figures moved (the starling and the Hawaiian bird are birds, which layer 4 never folds; for the potato and the
 lemurs the second pass changed no presence and no count of `removed_by_rule`, which counts a presence once). `scripts/griis_review.py` (both settings, with and without `--min-neighbour-records 100`): `griis_change.csv` and both
 neighbour tables are identical, and `griis_totals.json` has the one `griis_subnational` row of 2 records more.
+
+### The scoring of half B, a run of its own (2026-11-01)
+
+From the final review of the branch, which found no breach of the seal. The plan allows exactly one `unsealed=True` load of half B before the freeze, the scoring of the calibration at resolution 7, and it has not run.
+
+- **A run of its own** (I2). `scripts/calibrate.py` chose the setting and scored half B in one process: half A's data (about 15 GB at resolution 6, more at 7) was still in memory when half B was loaded, and half B
+  was spent on the dry run's choice before Markus had seen the dry run. Now the dry run (no flag) never loads half B and ends with `report.json`, and **`--score-half-b --setting N`**, with a required `N`, loads the
+  references and half B's calibration species and nothing else, and refuses unless the dry run at resolution 7 is complete (`res7/report.json` there, with its `chosen`, from the same ingest). The dry run
+  removes its `report.json` when it starts, so a dry run that fails leaves none. `held_out.json` records `N`, the dry run's choice and whether they are the same. The guards that were there stay: resolution 7
+  only (now the ingest's, from its marker), the markers, exclusive creation before the load, no override flag. The binding sequence is the dry run at 7, Markus's choice, then the scoring.
+- **A marker that does not depend on `--results`** (I3). The once guard looked for `held_out.started` and `held_out.json` under `--results`, which is git-ignored and can be pointed elsewhere or cleared. **A second,
+  fixed marker, `data/split/held_out-315557.started`**, next to the frozen split (its path is fixed in the script, relative to the repository), is now created with the other by exclusive creation before the load,
+  and either one refuses a run. `data/` is git-ignored as well, so **the marker's content is copied into this file, which is tracked, as soon as it is written**: that is the record that cannot be cleared by accident.
+- **The seal's tests read the syntax tree** (M2). The test of the one call site was a regular expression on `unsealed\s*=\s*True`, which a line break, `unsealed=flag`, `**kwargs` or a positional call of
+  `_select` would pass. It now scans the syntax tree of every module under `src/` and `scripts/` (with `occurrences.py`): a call that passes `unsealed=` with anything but the constant `False`, `**` keywords to
+  `load_presence`, `load_country_counts` or `_select`, a call of `_select` outside `occurrences.py` (or one inside that does not hand on its caller's `unsealed`), and the string `"unsealed"`. Exactly one call
+  is found, in `score_held_out`. A second scan fails if any module but `occurrences.py` reads the parts with a Parquet reader of its own. Both scans are tested on code that unseals or reads the parts in each way
+  they look for.
+- **Tests,** on the hand-made world twice over (the species of half A and twins of them in half B, in one made-up download at resolution 7, with the loaders of the grid, references, split and regions stubbed):
+  the dry run loads half A only; the scoring loads half B's calibration species once, unsealed, and nothing of half A, runs no known case, grid, region or cross-check, leaves the dry run's files as they were,
+  and writes both markers and `held_out.json` with `N` and whether it is the dry run's choice; it refuses without a finished dry run at 7 on the same ingest (missing, no `chosen`, another resolution or half,
+  another zip), a setting outside the 81, a missing `--setting`, `--setting` without the flag, any resolution but 7, a marker of either kind (the fixed one alone too), and a retry after a load that failed.
