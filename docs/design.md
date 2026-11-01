@@ -200,7 +200,8 @@ The thresholds are checked against independent knowledge rather than guessed.
 1. On a random half of WCVP plant species, with layer 3 off, measure two rates per threshold setting: the share of
    out-of-native presences removed, and the share of native presences lost.
 2. Choose settings that lose at most 5% of native presences and remove as many out-of-native presences as possible.
-3. Evaluate on the other half of plants, and on GRIIS animal entries as a cross-check outside plants.
+3. Evaluate on the other half of plants (B's calibration species, loaded once: see "Exploring and confirming"), and on GRIIS
+   animal entries as a cross-check outside plants.
 4. Report the remaining error as an estimate.
 
 Limits to state plainly: WCVP is coarse (TDWG level 3) and incomplete, plants may not generalise to other groups, and layer
@@ -264,8 +265,10 @@ exploration and still ends in a real test, so registration moves to the freeze i
    seed. Splitting individual species would put relatives of one endemic family in both halves and inflate the test. Species
    without a family are assigned by their next rank up. The split alone goes by family name rather than id, so a family COL holds
    twice can't straddle the halves, while a homonym going along does no harm. Nothing is clustered on B's taxa, and they aren't inspected, until
-   step 4. The only use before that is scoring the cleaning calibration on B's plants, against WCVP ranges, with no realms
-   involved.
+   step 4. The only use before that is one load of B's calibration species, to score the cleaning calibration against WCVP ranges
+   with no realms involved: the plants WCVP gives a native region plus the other species of their taxonomic groups, as the
+   reporting rate needs the group totals. That is 197,567 species of B, 2,586 of them not Plantae, read only through
+   `scripts/calibrate.py --score-half-b` at resolution 7, which saves rates and counts only.
 2. **Explore on A.** Methods and thresholds may change and maps may be viewed until we are happy. Every change is logged in
    `DECISIONS.md` with its reason. Changes are justified by endemism excess, stability and calibration, never by resemblance to
    an existing scheme.
@@ -334,7 +337,9 @@ alone therefore isn't the test.
    public DOI. SQL downloads may need enabling per account. If Markus's account isn't enabled, stop and ask rather than
    falling back to a service account. Measure rows, memory and Infomap runtime on this 48 GB, 14-core Mac.
 5. Run the resolution 7 download if the pilot shows it fits. Otherwise stay at resolution 6 and log it.
-6. Build the cleaning layers. Calibrate on half A's plants and score on half B's.
+6. Build the cleaning layers. Calibrate on half A's plants and score once on half B's calibration species: B's WCVP plants
+   plus the other species of their taxonomic groups (197,567 species, 2,586 of them not Plantae), through `--score-half-b` at
+   resolution 7.
 7. Explore on half A: cluster, build the hierarchy, select a level, iterate. Review maps with Markus.
 8. **Needs Markus:** agree the freeze. Write `PREREGISTRATION.md`, register on OSF.
 9. Confirm once on half B, then run the headline on all species.
