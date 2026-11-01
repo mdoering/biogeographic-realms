@@ -6,9 +6,10 @@ vagrant, a misidentification, a wrong coordinate.
 (species, cell) takes all the species' rows in that cell. Distances are great-circle arcs between cell centres, in kilometres, and the scale
 of the grid is measured from the grid (`neighbour_spacing`), never taken from a resolution.
 
-**Core.** A species' core cells are its top cells holding `core_share` of its records, and all its cells under `heuristic_min_records` records.
-Cells that tie with the smallest core cell are core too, so that which of two equal cells is core is not decided by their order. A core cell is
-never removed by `detached_satellites` or `under_reported`. `thin_long_range` is the exception: it takes a whole species out.
+**Core.** A species' core cells are its top cells by records, up to and including the cell that takes the running total to `core_share` of its
+records, and all its cells under `heuristic_min_records` records. Cells with equal records are ordered by cell id (as text), so among tied cells at
+the line which are core is reproducible but arbitrary. A core cell is never removed by `detached_satellites` or `under_reported`.
+`thin_long_range` is the exception: it takes a whole species out.
 
 **The rules** (the thresholds are the `Settings` of `realms.clean`):
 
@@ -115,9 +116,8 @@ def _marked(cells: pl.DataFrame, settings: "Settings") -> pl.DataFrame:
     total = pl.col("records").sum().over("species_id")
     before = pl.col("records").cum_sum().over("species_id") - pl.col("records")  # what the larger cells hold
     ordered = ordered.with_columns(total.alias("species_records"), pl.len().over("species_id").alias("species_cells"), before.alias("before"))
-    first = (pl.col("species_records") < settings.heuristic_min_records) | (pl.col("before") + EPS < settings.core_share * pl.col("species_records"))
-    smallest = pl.when(first).then(pl.col("records")).min().over("species_id")
-    return ordered.with_columns((first | (pl.col("records") >= smallest)).alias("core")).drop("before")
+    core = (pl.col("species_records") < settings.heuristic_min_records) | (pl.col("before") + EPS < settings.core_share * pl.col("species_records"))
+    return ordered.with_columns(core.alias("core")).drop("before")
 
 
 def core_parts(presence: pl.DataFrame, settings: "Settings") -> pl.DataFrame:
@@ -139,7 +139,7 @@ def _satellites(cells: pl.DataFrame, grid: Grid, settings: "Settings") -> pl.Dat
     big = big.join(index, on="cell", how="left")
     if big["cell_idx"].null_count():
         raise ValueError(f"cells that are not in the grid: {big.filter(pl.col('cell_idx').is_null())['cell'].unique().head(5).to_list()}")
-    big = big.with_columns(pl.col("species_id").rle_id().cast(pl.Int64).alias("species_idx")).sort("species_idx", "cell_idx")
+    big = big.with_columns(pl.col("species_id").rank("dense").cast(pl.Int64).alias("species_idx")).sort("species_idx", "cell_idx")
     graph = cell_graph(grid, settings.satellite_gap_km + neighbour_spacing(grid))
     labels = _patches(big["species_idx"].to_numpy(), big["cell_idx"].to_numpy(), graph)
     patches = (

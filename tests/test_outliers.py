@@ -75,10 +75,19 @@ def test_a_species_with_under_20_records_is_all_core_and_with_20_it_is_not():
     assert set(core_parts(presence(*rows("b", {"1": 17, "2": 2, "3": 1})), Settings())["part"]) == {"1:land", "2:land"}  # 20: 18 are 90%
 
 
-def test_cells_that_tie_with_the_last_core_cell_are_core_too():
-    # half of the 100 records is reached by two of the three cells of 30, and which two would be arbitrary
-    core = core_parts(presence(*rows("a", {"1": 30, "2": 30, "3": 30, "4": 10})), Settings(core_share=0.5))
-    assert set(core["cell"]) == {"1", "2", "3"}
+def test_among_tied_cells_the_core_is_the_lowest_cell_ids_up_to_the_line():
+    # half of the 100 records is reached by two of the three cells of 30: the first two by cell id, which is arbitrary but always the same
+    core = core_parts(presence(*rows("a", {"3": 30, "1": 30, "2": 30, "4": 10})), Settings(core_share=0.5))
+    assert set(core["cell"]) == {"1", "2"}
+
+
+def test_a_long_tail_of_equal_cells_that_crosses_the_line_is_core_only_up_to_the_line():
+    # 1,000 records: 17 cells of 50 hold 850, and the line is at 900, so 50 of the 150 singletons are core as well: 67 cells, not all 167
+    cells = {f"big{i:02d}": 50 for i in range(17)} | {f"one{i:03d}": 1 for i in range(150)}
+    core = core_parts(presence(*rows("a", cells)), Settings())
+    assert core["cell"].n_unique() == 67
+    assert {c for c in core["cell"] if c.startswith("big")} == {f"big{i:02d}" for i in range(17)}
+    assert {c for c in core["cell"] if c.startswith("one")} == {f"one{i:03d}" for i in range(50)}
 
 
 def test_a_cell_is_core_with_all_its_parts_and_countries():
