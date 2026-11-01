@@ -5,7 +5,7 @@ import zipfile
 import geopandas as gpd
 import polars as pl
 import pytest
-from shapely import MultiPolygon, Polygon, box
+from shapely import MultiPolygon, box
 
 from realms.gbif import Match
 from realms.grid import Grid
@@ -20,10 +20,14 @@ from realms.natives import (
     marine_country,
     match_names,
     match_stats,
+    griis_without_cells,
     name_index,
+    read_fallback,
     read_tsv,
     tdwg3_parts,
+    unknown_tdwg3,
     wcvp_regions,
+    write_fallback,
     wrims_pairs,
 )
 
@@ -507,6 +511,7 @@ def test_a_subdivision_with_no_polygon_has_no_cells(tmp_path):
 
 def test_the_list_and_what_was_left_out_do_not_overlap():
     assert not set(NO_WILD_RANGE) & set(NO_WILD_RANGE_DROPPED)
+    assert "Capra hircus" in NO_WILD_RANGE_DROPPED  # COL files the Chiltan markhor under it
     assert all(kingdom in ("Animalia", "Plantae") and reason for kingdom, reason in NO_WILD_RANGE.values())
     assert all(NO_WILD_RANGE_DROPPED.values())
 
@@ -597,13 +602,15 @@ def reference_dir(tmp_path):
     wcvp = write_zip(root / "wcvp.zip", {"NameUsage.tsv": (WCVP_NAMES, [["w1", "accepted", "species", "Plantus eus"]]), "Distribution.tsv": (WCVP_DIST, [["w1", "BZE", "tdwg", ""]])})
     griis = griis_zip(root, "GRIIS-ZW", plain_rows("Aus bus"))
     sub = griis_zip(root, "GRIIS-US-Hawaii", plain_rows("Aus bus"))
+    island = griis_zip(root, "GRIIS-IC-Tenerife", plain_rows("Aus bus"))  # Natural Earth has no polygon for it
     manifest = {
-        "col": {"path": str(col)},
+        "col": {"path": str(col), "release": 315557},
         "col_groups": {"path": str(groups)},
         "wcvp": {"path": str(wcvp)},
         "wrims": {"dataset": 26853, "status": "missing"},
         "griis/GRIIS-ZW": {"path": str(griis)},
         "griis/GRIIS-US-Hawaii": {"path": str(sub)},
+        "griis/GRIIS-IC-Tenerife": {"path": str(island)},
         "griis/GRIIS-GQ": {"dataset": 1, "status": "missing"},
         "natural_earth_admin1": {"path": str(write_admin1(root / "admin1.geojson", [("Hawaii", "US", None, box(4.5, 4.5, 5.5, 5.5))]))},
         "wgsrpd_level3": {"path": str(write_level3(root / "level3.geojson", [("BZE", box(0, 0, 7, 10))]))},
@@ -620,35 +627,117 @@ def test_load_references_joins_everything_and_reports_what_is_missing(reference_
     assert refs.taxa["species_id"].sort().to_list() == ["A1", "H1", "P1"]
     assert refs.groups.to_dicts() == [{"species_id": "A1", "tax_group": "arthropods"}]
     assert refs.wcvp.rows() == [("P1", "BZE", True)]
-    assert refs.griis.rows() == [("A1", "US", "Hawaii"), ("A1", "ZW", None)]
+    assert refs.griis.rows() == [("A1", "IC", "Tenerife"), ("A1", "US", "Hawaii"), ("A1", "ZW", None)]
+    assert refs.griis_no_cells.rows() == [("A1", "IC", "Tenerife")]  # Hawaii has cells, ZW is no sub-national list
     assert refs.wrims.height == 0 and refs.wrims.columns == ["species_id", "area_id", "area", "country"]
+    assert refs.wrims_no_country.height == 0 and refs.wrims_no_country.columns == refs.wrims.columns
     assert refs.tdwg3_parts.rows() == [("c1:land", "BZE"), ("c2:land", None)]
     assert refs.admin1_cells.rows() == [("c1", "US", "Hawaii", "centre")]
     assert refs.no_wild_range == frozenset({"H1"})
     assert refs.missing == ("griis/GRIIS-GQ", "wrims")
     assert "griis/GRIIS-GQ has no export" in caplog.text
+    assert "1 GRIIS pairs of 1 sub-national lists have no admin-1 cells" in caplog.text
 
 
-def test_load_references_uses_wrims_when_there_is_an_export(reference_dir):
+def test_load_references_uses_wrims_when_there_is_an_export(reference_dir, caplog):
     root, grid = reference_dir
     manifest = json.loads((root / "manifest.json").read_text())
     usages = [["m1", "accepted", "species", "Aus bus", "Animalia"]]
-    dist = [["m1", "25607", "Spanish part of the Balearic (Iberian Sea)", "mrgid", "introduced"]]
+    dist = [["m1", "25607", "Spanish part of the Balearic (Iberian Sea)", "mrgid", "introduced"], ["m1", "3257", "Firth of Forth", "mrgid", "introduced"]]
     manifest["wrims"] = {"path": str(write_zip(root / "wrims.zip", {"NameUsage.tsv": (WRIMS_USAGES, usages), "Distribution.tsv": (WRIMS_DIST, dist)}))}
     (root / "manifest.json").write_text(json.dumps(manifest))
-    refs = load_references(grid, root)
-    assert refs.wrims.rows() == [("A1", "25607", "Spanish part of the Balearic (Iberian Sea)", "ES")]
+    with caplog.at_level(logging.WARNING):
+        refs = load_references(grid, root)
+    assert refs.wrims.rows() == [("A1", "25607", "Spanish part of the Balearic (Iberian Sea)", "ES"), ("A1", "3257", "Firth of Forth", None)]
+    assert refs.wrims_no_country.rows() == [("A1", "3257", "Firth of Forth", None)]
+    assert "1 of 2 WRiMS pairs are in areas that name no country" in caplog.text
     assert refs.missing == ("griis/GRIIS-GQ",)
+
+
+def with_plantus_eus_authored(root):
+    """The reference directory with a WCVP whose one name carries an author, which only the GBIF fallback can place."""
+    manifest = json.loads((root / "manifest.json").read_text())
+    names = [["w1", "accepted", "species", "Plantus eus (L.)"]]
+    manifest["wcvp"] = {"path": str(write_zip(root / "wcvp2.zip", {"NameUsage.tsv": (WCVP_NAMES, names), "Distribution.tsv": (WCVP_DIST, [["w1", "BZE", "tdwg", ""]])}))}
+    (root / "manifest.json").write_text(json.dumps(manifest))
+
+
+def fallback_of(*species):
+    return pl.DataFrame({"name": ["Plantus eus (L.)"] * len(species), "kingdom": ["Plantae"] * len(species), "species_id": list(species)})
 
 
 def test_load_references_applies_the_gbif_fallback_when_one_was_saved(reference_dir):
     root, grid = reference_dir
-    manifest = json.loads((root / "manifest.json").read_text())
-    manifest["wcvp"] = {"path": str(write_zip(root / "wcvp2.zip", {"NameUsage.tsv": (WCVP_NAMES, [["w1", "accepted", "species", "Plantus eus (L.)"]]), "Distribution.tsv": (WCVP_DIST, [["w1", "BZE", "tdwg", ""]])}))}
-    (root / "manifest.json").write_text(json.dumps(manifest))
+    with_plantus_eus_authored(root)
     assert load_references(grid, root).wcvp.height == 0
-    pl.DataFrame({"name": ["Plantus eus (L.)"], "kingdom": ["Plantae"], "species_id": ["P1"]}).write_parquet(root / "gbif_fallback.parquet")
+    write_fallback(fallback_of("P1"), root / "gbif_fallback.parquet", 315557)
     assert load_references(grid, root).wcvp.rows() == [("P1", "BZE", True)]
+
+
+def test_a_fallback_made_for_another_release_is_refused(reference_dir):
+    root, grid = reference_dir
+    with_plantus_eus_authored(root)
+    write_fallback(fallback_of("P1"), root / "gbif_fallback.parquet", 300000)
+    with pytest.raises(ValueError, match="release 300000, not 315557"):
+        load_references(grid, root)
+
+
+def test_a_fallback_with_no_release_is_refused(reference_dir):
+    root, grid = reference_dir
+    fallback_of("P1").write_parquet(root / "gbif_fallback.parquet")
+    with pytest.raises(ValueError, match="release None, not 315557"):
+        load_references(grid, root)
+
+
+def test_a_fallback_cannot_be_checked_when_the_manifest_has_no_release(reference_dir):
+    root, grid = reference_dir
+    manifest = json.loads((root / "manifest.json").read_text())
+    del manifest["col"]["release"]
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    write_fallback(fallback_of("P1"), root / "gbif_fallback.parquet", 315557)
+    with pytest.raises(ValueError, match="not None"):
+        load_references(grid, root)
+
+
+def test_a_fallback_species_the_index_lacks_is_dropped_and_counted(reference_dir, tmp_path, caplog):
+    root, grid = reference_dir
+    with_plantus_eus_authored(root)
+    write_fallback(fallback_of("P1", "GONE1"), root / "gbif_fallback.parquet", 315557)
+    with caplog.at_level(logging.WARNING):
+        refs = load_references(grid, root)
+    assert refs.wcvp.rows() == [("P1", "BZE", True)]
+    assert "1 of the 2 names GBIF placed" in caplog.text and "are dropped" in caplog.text
+    # and the same on the function itself
+    index = name_index(col_zip(tmp_path))
+    kept = read_fallback(root / "gbif_fallback.parquet", "315557", index)  # the release may be text or a number
+    assert kept["species_id"].to_list() == ["P1"]
+
+
+def test_wcvp_codes_the_polygon_file_lacks_are_warned_about_with_examples(reference_dir, caplog):
+    root, grid = reference_dir
+    manifest = json.loads((root / "manifest.json").read_text())
+    distributions = [["w1", "BZE", "tdwg", ""], ["w1", "ZZZ", "tdwg", ""], ["w1", "YYY", "tdwg", "introduced"]]
+    manifest["wcvp"] = {"path": str(write_zip(root / "wcvp3.zip", {"NameUsage.tsv": (WCVP_NAMES, [["w1", "accepted", "species", "Plantus eus"]]), "Distribution.tsv": (WCVP_DIST, distributions)}))}
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    with caplog.at_level(logging.WARNING):
+        refs = load_references(grid, root)
+    assert refs.wcvp.height == 3  # the rows stay: only the warning is new
+    assert "2 WCVP level 3 codes are not in LEVEL3_COD" in caplog.text and "(2 rows)" in caplog.text and "YYY (1 rows), ZZZ (1 rows)" in caplog.text
+
+
+def test_unknown_tdwg3_counts_rows_and_species(tmp_path):
+    level3 = write_level3(tmp_path / "level3.geojson", [("AAA", box(0, 0, 1, 1))])
+    wcvp = pl.DataFrame({"species_id": ["s1", "s1", "s2", "s2", "s3"], "tdwg3": ["AAA", "ZZZ", "ZZZ", "YYY", "AAA"], "native": [True] * 5})
+    found = unknown_tdwg3(wcvp, level3)
+    assert found.rows() == [("ZZZ", 2, 2), ("YYY", 1, 1)]
+    assert unknown_tdwg3(wcvp.filter(pl.col("tdwg3") == "AAA"), level3).height == 0
+
+
+def test_griis_pairs_of_subdivisions_with_no_cells_are_the_unplaced_ones():
+    griis = pl.DataFrame({"species_id": ["a", "b", "c", "d"], "country": ["US", "US", "ZW", "IC"], "subdivision": ["Hawaii", "Alaska", None, "Tenerife"]})
+    cells = pl.DataFrame({"cell": ["c1"], "country": ["US"], "subdivision": ["Hawaii"], "via": ["centre"]})
+    assert griis_without_cells(griis, cells).rows() == [("b", "US", "Alaska"), ("d", "IC", "Tenerife")]
+    assert griis_without_cells(griis.head(0), cells).height == 0
 
 
 @pytest.mark.parametrize("item", ["col", "col_groups", "wcvp", "natural_earth_admin1", "wgsrpd_level3", "isea3h_6"])

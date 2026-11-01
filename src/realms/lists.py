@@ -16,7 +16,6 @@ NO_WILD_RANGE: dict[str, tuple[str, str]] = {
     "Bos taurus": ("Animalia", "domestic cattle; the wild aurochs is Bos primigenius, a species of its own in COL"),
     "Bos indicus": ("Animalia", "zebu, domestic cattle with no wild population"),
     "Bubalus bubalis": ("Animalia", "domestic water buffalo; the wild water buffalo is Bubalus arnee in COL"),
-    "Capra hircus": ("Animalia", "domestic goat; the wild bezoar is Capra aegagrus in COL (one local synonym, the Chiltan markhor, is filed here)"),
     "Equus caballus": ("Animalia", "domestic horse, whose feral herds have no natural range; the wild horse is Equus ferus in COL"),
     "Equus asinus": ("Animalia", "domestic donkey; the wild ass is Equus africanus in COL"),
     "Canis familiaris": ("Animalia", "domestic dog; COL holds it apart from the wolf, Canis lupus. The dingo is filed here, a feral dog with no natural range"),
@@ -36,6 +35,7 @@ NO_WILD_RANGE: dict[str, tuple[str, str]] = {
 NO_WILD_RANGE_DROPPED: dict[str, str] = {
     "Ovis aries": "COL files the wild mouflon under it: Ovis orientalis is a synonym, as are Ovis orientalis ophion (the Cyprus mouflon) and Ovis aries musimon",
     "Gallus gallus domesticus": "COL has no such species: Gallus domesticus is a synonym of Gallus gallus, which holds the wild red junglefowl (subspecies bankiva, spadiceus, jabouillei, murghi)",
+    "Capra hircus": "COL files the Chiltan markhor, a wild population, under it, as the synonyms Capra falconeri chiltanensis and Capra hircus chialtanensis",
     "Zea mays": "COL files the wild teosintes under it as accepted subspecies parviglumis and huehuetenangensis",
     "Hordeum vulgare": "COL files wild barley under it, as accepted subspecies spontaneum and the synonym Hordeum spontaneum",
     "Glycine max": "COL files wild soybean under it, as accepted subspecies soja and the synonym Glycine soja",

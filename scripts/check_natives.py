@@ -27,12 +27,13 @@ from realms.natives import (
     match_names,
     match_stats,
     name_index,
+    read_fallback,
     wcvp_distributions,
     wcvp_names,
+    write_fallback,
     wrims_distributions,
     wrims_names,
 )
-from realms.reference import GRIIS_ALIAS
 
 ROOT = Path("data/reference")
 OUT = Path("results/natives.json")
@@ -95,7 +96,7 @@ def main() -> None:
     if names.height:
         print(f"\nAsking GBIF's match API about {names.height:,} names of the sources above ({names.height / 5 / 60:.1f} min at 5 a second)")
         found = gbif_fallback(names, index)
-        found.write_parquet(ROOT / FALLBACK_FILE)
+        write_fallback(found, ROOT / FALLBACK_FILE, manifest["col"]["release"])
         report["gbif_fallback"] = {"asked": names.height, "placed": found.height}
         print(f"  GBIF placed {found.height:,} of them on a COL species, saved to {ROOT / FALLBACK_FILE}")
         for name in [*sources, "GRIIS"]:
@@ -108,7 +109,7 @@ def main() -> None:
         (ROOT / FALLBACK_FILE).unlink(missing_ok=True)
 
     # what the joins hold, counting rows as well as names: a name that fails may carry many rows
-    fallback = pl.read_parquet(ROOT / FALLBACK_FILE) if (ROOT / FALLBACK_FILE).exists() else None
+    fallback = read_fallback(ROOT / FALLBACK_FILE, manifest["col"]["release"], index) if (ROOT / FALLBACK_FILE).exists() else None
     wcvp = wcvp_distributions(Path(manifest["wcvp"]["path"]))
     by_row = {"WCVP": wcvp.join(match_names(sources["WCVP"], index, fallback).select("wcvp_id", "status"), on="wcvp_id", how="left")}
     print(f"\nWCVP: {wcvp.height:,} native or introduced level 3 rows of {wcvp['wcvp_id'].n_unique():,} taxa; native {wcvp['native'].sum():,}")
@@ -142,13 +143,10 @@ def main() -> None:
             "no_wild_range": len(refs.no_wild_range),
             "missing": list(refs.missing),
         }
-        placed = set(refs.admin1_cells.select("country", "subdivision").unique().rows())
-        subdivisions = {(m.group(1), m.group(2)) for a in griis_paths if (m := GRIIS_ALIAS.match(a)) and m.group(2)}
-        report["references"]["admin1"]["subdivisions_without_cells"] = sorted(f"{c}-{s}" for c, s in subdivisions - placed)
-        entries = refs.griis.filter(pl.col("subdivision").is_not_null()).join(
-            pl.DataFrame(sorted(placed), schema=["country", "subdivision"], orient="row"), on=["country", "subdivision"], how="anti"
-        )
-        report["references"]["admin1"]["pairs_without_cells"] = entries.height
+        unplaced = refs.griis_no_cells.select("country", "subdivision").unique().sort("country", "subdivision")
+        report["references"]["admin1"]["subdivisions_without_cells"] = [f"{c}-{s}" for c, s in unplaced.iter_rows()]
+        report["references"]["admin1"]["pairs_without_cells"] = refs.griis_no_cells.height
+        report["references"]["wrims"]["pairs_without_country"] = refs.wrims_no_country.height
         print("\nReferences:")
         for key, value in report["references"].items():
             print(f"  {key}: {value}")

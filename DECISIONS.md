@@ -640,7 +640,9 @@ each entry.
   about their 132 unmatched names and took 97, as `EXACT` or `VARIANT` matches whose accepted usage is a species of 315557 and whose
   kingdom doesn't clash; a synonym of a subspecies, a higher rank or a species not in this release is refused. They are saved to
   `data/reference/gbif_fallback.parquet`, which `load_references` applies to any name still unmatched, so a rerun doesn't depend on
-  GBIF. GRIIS rose to 91.3% of names (2,607 unmatched) and WRiMS to 98.7%.
+  GBIF. **The file is tied to the COL release:** its Parquet metadata holds the release key (`write_fallback`), and `load_references`
+  raises if the file has none or another than the manifest's `col` release, since a species id means nothing in another one. It drops
+  with a warning that counts them any placed species the current index lacks. GRIIS rose to 91.3% of names (2,607 unmatched) and WRiMS to 98.7%.
 
 **WCVP.** Species rank only; WCVP's genus and infraspecific distributions aren't added (of 371,856 species, 3 have a subspecies' or
 variety's distribution and none of their own). An empty `establishmentMeans` is native (the "Reference data" section above), `introduced`
@@ -650,7 +652,9 @@ region (two WCVP names that COL holds as one species) it is native. Result: 1,34
 introduced.
 
 **GRIIS.** Only accepted species-rank entries are alien taxa: the 66,316 higher ranks (families 32,434, orders 15,608, `other` 5,761, classes
-4,453, genera 2,230, phyla 2,111, kingdoms 878) and 1,924 subspecies are dropped, and so are synonyms. The country and subdivision come from
+4,453, genera 2,230, phyla 2,111, kingdoms 878) and 1,924 subspecies are dropped, and so are synonyms. **Subspecies are dropped, not rolled up to
+their species,** because an alien subspecies doesn't make its species alien: rolling up would mark the whole species as alien in the country
+where only one infraspecific form is, and clean away the native records of the rest. A GRIIS list names a subspecies as a taxon in its own right, and the species-level join has nothing to put it on. The country and subdivision come from
 the file name. Result: 112,116 pairs of 27,389 species. **A finding the plain lists can't show:** 3,457 of the 52,462 species of the 55
 extended lists carry `native` distribution rows (`GRIIS-EC` and `GRIIS-SR` flag every species so, though *Cajanus cajan* is no native of
 Ecuador, and the US list's own remarks say "Native to: Eurasia" for species flagged native). The flag looks like an import artefact, and as
@@ -684,25 +688,33 @@ Protected, St Helena, Tristan, Juan Fernández, Rapa Nui, Galápagos, Pitcairn, 
 southern lists. The country of a sub-national list is the alias's, which is the sovereign's for overseas places (`FR-Reunion`) and `IC` for
 the Canaries, so Task 11 should match those on the cells and not on GBIF's `countrycode`.
 
-**`NO_WILD_RANGE`: 17 names, 18 COL ids** (*Capra hircus* has a provisionally accepted duplicate). Humans, 14 domestic animals and 2 crops.
+**`NO_WILD_RANGE`: 16 names, 16 COL ids.** Humans, 13 domestic animals and 2 crops.
 Each was checked against 315557: the name must be an accepted species there (`resolve_no_wild_range` checks it again at load, taking every
 id of the name within its kingdom, and drops with a warning a name COL has as a synonym, like `Gallus domesticus`), and COL must not file a
 wild form of the taxon under it. Entries, each with its reason in `lists.py`: *Homo sapiens*; *Bos taurus*, *Bos indicus*, *Bubalus bubalis*,
-*Capra hircus*, *Equus caballus*, *Equus asinus*, *Canis familiaris*, *Felis catus*, *Sus domesticus*, *Camelus dromedarius*, *Camelus
-bactrianus*, *Lama glama*, *Vicugna pacos*, *Cavia porcellus*; *Triticum aestivum*, *Brassica napus*.
+*Equus caballus*, *Equus asinus*, *Canis familiaris*, *Felis catus*, *Sus domesticus*, *Camelus dromedarius*, *Camelus bactrianus*, *Lama
+glama*, *Vicugna pacos*, *Cavia porcellus*; *Triticum aestivum*, *Brassica napus*.
 
 - **Dropped for covering wild populations** (`NO_WILD_RANGE_DROPPED`): *Ovis aries* (COL holds *Ovis orientalis*, the mouflon, as
-  its synonym), *Gallus gallus domesticus* (COL has no such species, *Gallus domesticus* being a synonym of *Gallus gallus*, which holds the
+  its synonym), *Capra hircus* (COL files the Chiltan markhor, a wild population, under it, as the synonyms *Capra falconeri chiltanensis*
+  and *Capra hircus chialtanensis*; the first version of the list kept it as a minor case, and the rule has no minor cases),
+  *Gallus gallus domesticus* (COL has no such species, *Gallus domesticus* being a synonym of *Gallus gallus*, which holds the
   red junglefowl), *Zea mays* (accepted subspecies *parviglumis* and *huehuetenangensis*, the wild teosintes), *Hordeum vulgare* (wild barley as
   subspecies *spontaneum*), *Glycine max* (wild soybean as subspecies *soja* and the synonym *Glycine soja*), *Solanum tuberosum* (186
   species-rank synonyms, wild potatoes among them, and WCVP gives it an Andean native range), and from the first look *Oryza sativa*,
   *Sorghum bicolor* and *Capsicum annuum*. **The brief named maize, barley, soybean and potato as examples, and these four are the ones
   dropped.** Markus can put them back in `NO_WILD_RANGE`; the cost is the teosinte, wild barley, wild soybean and wild potato records going
   with them.
-- **Kept with a caveat:** *Canis familiaris* also holds the dingo (a feral dog, with no natural range) and *Capra hircus* one local
-  synonym, the Chiltan markhor. COL holds the dog apart from the wolf (*Canis lupus*, left out like *Sus scrofa*, which holds the wild boar),
+- **Kept with a caveat:** *Canis familiaris* also holds the dingo, a feral dog with no natural range. COL holds the dog apart from the wolf (*Canis lupus*, left out like *Sus scrofa*, which holds the wild boar),
   so the case the brief imagined, a dog as *Canis lupus*, doesn't occur here.
 
-**Cost.** The check of all sources takes 53 s and peaks at 16.2 GB, almost all of it `load_taxa`, which `load_references` calls and which was
+**What `References` says it could not place,** so that Task 11 needn't recompute it: `griis_no_cells` holds the `griis` pairs of a
+sub-national list whose subdivision has no admin-1 cells (7,468 pairs of 61 subdivisions at resolution 6, the figure above), and
+`wrims_no_country` the `wrims` pairs whose area names no country (1,995 of 8,347). `load_references` also warns, with the count and the
+first examples, of WCVP level 3 codes that the polygon file's `LEVEL3_COD` lacks, since no land part would have them. There are none in
+the real files (the rows with a code that isn't three letters are dropped earlier, see WCVP above).
+
+**Cost.** The check of all sources takes 56 s and peaks at 13.1 GB (16.2 GB on the first run, so
+it varies from run to run), almost all of it `load_taxa`, which `load_references` calls and which was
 already known to need about 15 GB. Everything new reads the exports through Polars scans and peaks at 3.2 GB (`name_index`).
 

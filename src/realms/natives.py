@@ -439,6 +439,28 @@ def gbif_fallback(
     return pl.DataFrame(found, schema={"name": pl.String, "kingdom": pl.String, "species_id": pl.String, "match_type": pl.String})
 
 
+def write_fallback(found: pl.DataFrame, path: Path, release: int | str) -> None:
+    """Save what `gbif_fallback` placed, with the COL release it was placed in: a species id means nothing in another release."""
+    found.write_parquet(path, metadata={"release": str(release)})
+
+
+def read_fallback(path: Path, release: int | str | None, index: pl.DataFrame) -> pl.DataFrame:
+    """The saved fallback, if it was made for `release` (the COL release of `index`), without any species the index doesn't hold.
+
+    A file with no release, or another one, raises: its species ids could point at different species. A species id that this index
+    lacks is dropped, with a warning that counts them.
+    """
+    saved = pl.read_parquet_metadata(path).get("release")
+    if saved is None or release is None or str(saved) != str(release):
+        raise ValueError(f"{path} was made for COL release {saved}, not {release}: run scripts/check_natives.py again, or delete it")
+    fallback = pl.read_parquet(path)
+    known = index["species_id"].unique().implode()
+    kept = fallback.filter(pl.col("species_id").is_in(known))
+    if kept.height < fallback.height:
+        log.warning("%d of the %d names GBIF placed in %s are on species that release %s lacks, and are dropped", fallback.height - kept.height, fallback.height, path, release)
+    return kept
+
+
 # GBIF's countries, by the adjective and the name Marine Regions uses for them in "<Italian> part of the <Tyrrhenian Sea>",
 # "<Italian> Exclusive Economic Zone" and "Italy - <Western Mediterranean>". `Dominican` and `Congolese` could be two countries each
 # and are left out, with the overlapping claims.
@@ -527,8 +549,27 @@ class References:
     wrims: pl.DataFrame  # `species_id`, `area_id`, `area`, `country`: the marine areas WRiMS lists a species as introduced in
     tdwg3_parts: pl.DataFrame  # `part`, `tdwg3`: each land part, with the WGSRPD regions its cell overlaps
     admin1_cells: pl.DataFrame  # `cell`, `country`, `subdivision`, `via`: the cells of the sub-national GRIIS lists
+    griis_no_cells: pl.DataFrame  # the `griis` rows of a subdivision with no admin-1 cells, which can't be placed on the grid
+    wrims_no_country: pl.DataFrame  # the `wrims` rows whose area names no country: open seas, bays, harbours
     no_wild_range: frozenset[str]  # COL ids of humans, livestock and crops that have no wild range
     missing: tuple[str, ...] = ()  # manifest items with no export, which the references go without
+
+
+def griis_without_cells(griis: pl.DataFrame, cells: pl.DataFrame) -> pl.DataFrame:
+    """The `griis` pairs of a sub-national list whose subdivision has no row in `admin1_cells`."""
+    placed = cells.select("country", "subdivision").unique()
+    return griis.filter(pl.col("subdivision").is_not_null()).join(placed, on=["country", "subdivision"], how="anti")
+
+
+def unknown_tdwg3(wcvp: pl.DataFrame, level3: Path) -> pl.DataFrame:
+    """The level 3 codes of `wcvp` that no region of the polygon file has: `tdwg3`, `rows` and `species`, the most rows first."""
+    codes = set(gpd.read_file(level3)[TDWG_LEVEL3_CODE])
+    return (
+        wcvp.filter(~pl.col("tdwg3").is_in(sorted(codes)))
+        .group_by("tdwg3")
+        .agg(pl.len().alias("rows"), pl.col("species_id").n_unique().alias("species"))
+        .sort("rows", "tdwg3", descending=[True, False])
+    )
 
 
 def _manifest_path(manifest: dict, item: str) -> Path | None:
@@ -559,22 +600,40 @@ def load_references(grid: Grid, reference_dir: Path = Path("data/reference")) ->
     index = name_index(needed["col"])
     fallback = None
     if (cache := reference_dir / FALLBACK_FILE).exists():
-        fallback = pl.read_parquet(cache)
+        fallback = read_fallback(cache, (manifest.get("col") or {}).get("release"), index)
     subdivisions = sorted({(m.group(1), m.group(2)) for k in griis if (m := GRIIS_ALIAS.match(k.removeprefix("griis/"))) and m.group(2)})
     gpkg = needed[f"isea3h_{grid.resolution}"]
-    references = dict(
-        wcvp=wcvp_regions(needed["wcvp"], index, fallback),
-        griis=griis_pairs(list(griis.values()), index, fallback),
-        wrims=wrims_pairs(wrims, index, fallback) if wrims else pl.DataFrame(schema={"species_id": pl.String, "area_id": pl.String, "area": pl.String, "country": pl.String}),
-        tdwg3_parts=tdwg3_parts(grid, needed["wgsrpd_level3"], gpkg),
-        admin1_cells=admin1_cells(grid, needed["natural_earth_admin1"], subdivisions, gpkg),
-    )
+    wcvp = wcvp_regions(needed["wcvp"], index, fallback)
+    unknown = unknown_tdwg3(wcvp, needed["wgsrpd_level3"])
+    if unknown.height:
+        shown = ", ".join(f"{r['tdwg3']} ({r['rows']} rows)" for r in unknown.head(5).iter_rows(named=True))
+        log.warning(
+            "%d WCVP level 3 codes are not in %s of %s, so no land part has them (%d rows): %s",
+            unknown.height, TDWG_LEVEL3_CODE, needed["wgsrpd_level3"], unknown["rows"].sum(), shown,
+        )
+    griis_joined = griis_pairs(list(griis.values()), index, fallback)
+    wrims_ = wrims_pairs(wrims, index, fallback) if wrims else pl.DataFrame(schema={"species_id": pl.String, "area_id": pl.String, "area": pl.String, "country": pl.String})
+    cells = admin1_cells(grid, needed["natural_earth_admin1"], subdivisions, gpkg)
+    griis_no_cells = griis_without_cells(griis_joined, cells)
+    wrims_no_country = wrims_.filter(pl.col("country").is_null())
+    if griis_no_cells.height:
+        log.warning(
+            "%d GRIIS pairs of %d sub-national lists have no admin-1 cells on the grid", griis_no_cells.height, griis_no_cells.select("country", "subdivision").unique().height
+        )
+    if wrims_no_country.height:
+        log.warning("%d of %d WRiMS pairs are in areas that name no country", wrims_no_country.height, wrims_.height)
     no_wild_range, _ = resolve_no_wild_range(index)
     del index
     return References(
         taxa=load_taxa(needed["col"]),
         groups=load_tax_groups(needed["col_groups"]),
+        wcvp=wcvp,
+        griis=griis_joined,
+        wrims=wrims_,
+        tdwg3_parts=tdwg3_parts(grid, needed["wgsrpd_level3"], gpkg),
+        admin1_cells=cells,
+        griis_no_cells=griis_no_cells,
+        wrims_no_country=wrims_no_country,
         no_wild_range=no_wild_range,
         missing=missing,
-        **references,
     )
