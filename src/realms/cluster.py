@@ -49,9 +49,9 @@ def load_infomap(net: Network, seed: int = 1, trials: int = 10, markov_time: flo
 def run_infomap(net: Network, seed: int = 1, trials: int = 10, markov_time: float = 1.0) -> Partition:
     """Cluster the network. A `markov_time` below 1 gives more and smaller modules, above 1 fewer and larger ones."""
     n_cells = len(net.cells)
-    linked = set(net.cell_idx.tolist())
-    unassigned = sorted(net.cells[i] for i in range(n_cells) if i not in linked)
-    if not linked:
+    linked = np.bincount(net.cell_idx, minlength=n_cells) > 0  # a cell with any link: a pass over the links, with no Python set of them
+    unassigned = sorted(net.cells[i] for i in np.flatnonzero(~linked))
+    if not linked.any():
         return Partition(paths={}, unassigned=unassigned)
 
     modules = load_infomap(net, seed, trials, markov_time).run().multilevel_modules()

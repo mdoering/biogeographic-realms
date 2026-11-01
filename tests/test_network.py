@@ -5,7 +5,7 @@ import polars as pl
 import pytest
 
 import reference_impl as ref
-from realms.cluster import run_infomap
+from realms.cluster import Partition, run_infomap
 from realms.network import build_network, information_weight
 from realms.synth import planted_network
 
@@ -148,6 +148,14 @@ def test_bulk_links_keep_a_cell_without_links_unassigned():
     net = build_network(with_empty)
     assert run_infomap(net) == ref.run_infomap(net)
     assert run_infomap(net).unassigned == ["empty"]
+
+
+def test_a_network_with_no_links_leaves_every_cell_unassigned():
+    presence, _, _ = planted_network(n_realms=2, cells_per_realm=2, endemic_species=1, widespread_species=0)
+    empty = pl.DataFrame({"cell": ["b", "a"], "species_id": [None, None]}, schema=presence.schema)
+    net = build_network(empty)
+    assert len(net.cell_idx) == 0
+    assert run_infomap(net) == ref.run_infomap(net) == Partition(paths={}, unassigned=["a", "b"])
 
 
 def leaf_modules(partition):
