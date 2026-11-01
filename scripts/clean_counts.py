@@ -1,11 +1,13 @@
-"""Clean half A's counts through layers 1 to 4, once per WCVP mode, and report what each layer, rule and mode removed.
+"""Clean half A's counts through layers 1 to 5, once per WCVP mode, and report what each layer, rule and mode removed.
 
 Reads the ingested download (`data/gbif/<key>`), the frozen split and the references, and for each of `--modes` runs `clean` with every
 layer on. Half A only: `load_country_counts` raises for half B and nothing here asks it to. Everything goes to
 `results/clean/res<r>/<mode>/`: `presence.parquet`, `removed.parquet` (every row taken out or moved, with its layer and rule),
-`unplaced.parquet`, `summary.csv` (per layer, rule, group and country), `summary_by_group.csv` and `summary_by_rule.csv`. The report of the
-whole run is `results/clean/res<r>/report.json`, with the removals per layer and rule in records and in presences, the effect of each
-WCVP mode, the fold of zero-area parts, the Caspian check and the provisionally accepted species whose name also has an accepted species.
+`unplaced.parquet`, `summary.csv` (per layer, rule, group and country), `summary_by_group.csv` and `summary_by_rule.csv`, and
+`suspect_cells.csv`, the cells where layer 5 took far more of the species than it did next door (listed for inspection, nothing is removed
+for them). The report of the whole run is `results/clean/res<r>/report.json`, with the removals per layer and rule in records and in
+presences, layer 5 in records, presences, species and cells per rule with its suspect cells, the effect of each WCVP mode, the fold of
+zero-area parts, the Caspian check and the provisionally accepted species whose name also has an accepted species.
 
 References are loaded once and need about 16 GB at the peak (`load_taxa`), so the modes share them. The counts are a download:
 `uv run python -I scripts/clean_counts.py --counts data/gbif/<key> [--modes native_only introduced off]`.
@@ -24,9 +26,10 @@ import polars as pl
 
 from realms.clean import LAYERS, WCVP_MODES, Settings, clean
 from realms.clean_report import provisional_twin_records, provisional_twins, removal_summary
-from realms.grid import KINDS, ZERO_KM2, load_grid, parts
+from realms.grid import KINDS, ZERO_KM2, cell_of, load_grid, parts
 from realms.natives import load_references, name_index
 from realms.occurrences import load_country_counts
+from realms.outliers import suspect_cells
 from realms.split import load_split
 
 # The Caspian Sea is no land in Natural Earth and no country in GADM. The box is on cell centres, wide enough for the cells of 265 km that
@@ -94,6 +97,36 @@ def caspian(grid, counts: pl.DataFrame, cleaned) -> dict:
         "records_out_on_land_parts": int(land["records_out"].sum()),
         "records_folded_by_zero_area_part": int(table["zero_area_records"].sum()),
         "cells": table.to_dicts(),
+    }
+
+
+def layer_5(cleaned, suspects: pl.DataFrame) -> dict:
+    """What layer 5 took per rule, and the suspect cells.
+
+    `rows` are rows of the country counts, `presences` the (species, part) pairs it left with nothing, `records` the clean records it took, `species` the
+    species it took anything from and `cells` the (species, cell) pairs it judged out. `species_lost` are the species left with no presence at all.
+    """
+    taken = cleaned.removed.filter(pl.col("layer") == 5).with_columns(cell_of(pl.col("part")).alias("cell"))
+    by_rule = taken.group_by("rule").agg(
+        pl.len().alias("rows"),
+        pl.struct("species_id", "part").filter(pl.col("presence_lost")).n_unique().alias("presences"),
+        pl.col("records").sum().alias("records"),
+        pl.col("species_id").n_unique().alias("species"),
+        pl.struct("species_id", "cell").n_unique().alias("cells"),
+    ).sort("rule")
+    left = cleaned.presence.select("species_id").unique()
+    lost = taken.select("species_id").unique().join(left, on="species_id", how="anti")
+    thin = taken.filter(pl.col("rule") == "thin_long_range")
+    return {
+        "rows": taken.height,
+        "presences": int(taken.filter(pl.col("presence_lost")).select("species_id", "part").unique().height),
+        "records": int(taken["records"].sum() or 0),
+        "species": taken["species_id"].n_unique(),
+        "species_lost": lost.height,
+        "by_rule": by_rule.to_dicts(),
+        "thin_long_range_species": thin["species_id"].n_unique(),
+        "suspect_cells": suspects.height,
+        "top_suspect_cells": suspects.head(10).to_dicts(),
     }
 
 
@@ -186,6 +219,8 @@ def main() -> None:
         by_group.write_csv(out / "summary_by_group.csv")
         by_rule = removal_summary(cleaned, refs, by=())
         by_rule.write_csv(out / "summary_by_rule.csv")
+        suspects = suspect_cells(cleaned, grid)
+        suspects.write_csv(out / "suspect_cells.csv")
         survivors = cleaned.presence["species_id"].n_unique()
         entry = {
             "seconds": round(seconds, 1),
@@ -197,6 +232,7 @@ def main() -> None:
             "by_rule": by_rule.to_dicts(),
             "by_group": by_group.to_dicts(),
             "layer_4_species": cleaned.sides,
+            "layer_5": layer_5(cleaned, suspects),
             "zero_area": zero_area(grid, cleaned),
             "caspian": caspian(grid, counts, cleaned),
         }
@@ -206,8 +242,9 @@ def main() -> None:
             say(str(by_rule.filter(~pl.col("unplaced")).drop("unplaced")))
             say(str(by_rule.filter(pl.col("unplaced")).drop("unplaced", "presences")))
         say(f"layer 4 species: {entry['layer_4_species']}")
+        say(f"layer 5: {entry['layer_5']['rows']} rows, {entry['layer_5']['records']} records, {entry['layer_5']['species']} species, {entry['layer_5']['suspect_cells']} suspect cells")
         say(f"zero-area fold: {entry['zero_area']}")
-        del cleaned, summary, by_group, by_rule
+        del cleaned, summary, by_group, by_rule, suspects
         gc.collect()
 
     report["seconds"] = round(time.perf_counter() - started, 1)

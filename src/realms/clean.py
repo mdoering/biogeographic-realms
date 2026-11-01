@@ -18,7 +18,9 @@ Order and attribution:
   alone, switch the others off (`Settings.rules_off`, `wcvp_mode`).
 - **Layer 4** folds a clearly land or clearly sea species' records on the wrong side to the right side. COL's environment is the surer
   word of the two ways to be clear, so where it disagrees with the records `Settings.side_conflict` lets it decide, or leaves the species be.
-- **Layer 5**, the rare-outlier heuristics, is accepted in `layers` and does nothing yet.
+- **Layer 5**, the rare-outlier heuristics of `realms.outliers`, judges cells and not parts: what one of its rules flags in a species' cell goes with
+  every row of the species there, under the rule's name. The rules are `detached_satellite`, `under_reported` and `thin_long_range`; each judges
+  the rows layers 1 to 4 left, and a cell that several flag goes with the first of `realms.outliers.RULE_ORDER`.
 
 The records of a row are `records` throughout: the clean records `n - n_human_text` that layer 1 leaves, or `n_raw` without it. The one
 exception is the `records` that layer 1 logs for the rows it empties, which is their `n_raw` (see `Cleaned`). Other counts (datasets,
@@ -34,16 +36,17 @@ from typing import Literal
 
 import polars as pl
 
-from realms.grid import KINDS, ZERO_KM2, Grid, part_id, parts
+from realms.grid import KINDS, ZERO_KM2, Grid, cell_of, part_id, parts
 from realms.natives import WCVP_KINGDOM, References
 from realms.occurrences import COUNTS, DISTINCT, SUMMED
+from realms.outliers import flag_outliers
 
 LAYERS = (1, 2, 3, 4, 5)
 WCVP_MODES = ("native_only", "introduced", "off")
 SIDE_CONFLICTS = ("environment", "leave")
 # the rules that can be switched off one at a time. WCVP has `wcvp_mode`, layer 1 and layer 4 have their layers, and the fold of
 # zero-area parts has no switch.
-SWITCHABLE = ("extinct", "no_wild_range", "griis", "griis_subnational", "wrims")
+SWITCHABLE = ("extinct", "no_wild_range", "griis", "griis_subnational", "wrims", "detached_satellite", "under_reported", "thin_long_range")
 # Authoritative: every logged row's layer is looked up here from its rule, and a rule that is not in it raises.
 RULES = {
     "zero_area_part": 0,
@@ -59,6 +62,9 @@ RULES = {
     "land_sea_fold": 4,
     "land_sea_neighbour": 4,
     "land_sea_dropped": 4,
+    "detached_satellite": 5,
+    "under_reported": 5,
+    "thin_long_range": 5,
 }
 KEY = ["species_id", "countrycode", "part"]
 OTHER = dict(zip(KINDS, reversed(KINDS), strict=True))  # the other part of a cell: land for sea and sea for land
@@ -80,6 +86,10 @@ FRESH_OR_BRACKISH = r"(^|,)(freshwater|brackish)(,|$)"
 @dataclass(frozen=True)
 class Settings:
     """The thresholds of layers 4 and 5, at the design's values, and the choices between sources. All are starting values until the freeze.
+
+    The layer 5 thresholds are those of `realms.outliers`: `satellite_*` for `detached_satellite`, `group_min_records`, `under_*` for
+    `under_reported`, `thin_*` for `thin_long_range`, and `core_share` and `heuristic_min_records` for the core cells every rule spares (but the
+    thin rule). `satellite_gap_km` is added to the grid's median neighbour spacing.
 
     `land_share` is the share of a species' records on one side that makes it a land or a sea species, whichever it is. `wcvp_mode` is how
     layer 3 uses WCVP (see `clean`): `native_only` is the design's rule, and which mode the analysis takes is decided in M1.
@@ -129,7 +139,7 @@ class Cleaned:
     **The unit of `removed.records` differs by layer:** it is `n_raw` for layer 1 (everything the emptied row held, flagged records
     included) and the row's `records` for every other layer, which is the clean records `n - n_human_text`, or `n_raw` where layer 1 is
     off. So do not sum it across layer 1 and the rest. Count is conserved from layer 2 on: `presence.records` plus the `records` of the
-    removals of layers 2 to 4 (those with a null `to_part`) are the input's `n - n_human_text`.
+    removals of layers 2 to 5 (those with a null `to_part`) are the input's `n - n_human_text`.
     `unplaced`: the pairs Task 10 could not place on the grid, for the species that have records: `rule` (the one that would
     have applied them), `species_id`, `country`, `place` (the subdivision or the marine area) and the species' `records`.
     `sides`: how layer 4 sorted the species (`species`, `land`, `sea`, `exempt`, `conflict`, and the two kinds of conflict), empty if
@@ -432,6 +442,13 @@ def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settin
     run.move(pl.concat([same, chosen, dropped]), ["species_id", "part"])
 
 
+def _layer_5(run: _Run, refs: References, grid: Grid, settings: Settings) -> None:
+    """Take out what `realms.outliers` flags: every row of a flagged species in a flagged cell, under the rule that flagged it."""
+    flagged = flag_outliers(run.rows, refs.groups, grid, settings)
+    hit = run.rows.with_columns(cell_of(pl.col("part")).alias("cell")).join(flagged, on=["species_id", "cell"], how="inner").drop("cell")
+    run.drop(hit, pl.col("rule"))
+
+
 def clean(
     counts: pl.DataFrame,
     refs: References,
@@ -456,6 +473,9 @@ def clean(
     area (`land_sea_fold`), or else into the right-side part of the neighbouring cell that holds most of the species' records, the
     lowest cell id first on a tie (`land_sea_neighbour`), or else out (`land_sea_dropped`). A neighbour counts only if the species has
     records on that part. Where COL's environment and the records disagree about a species' side, `settings.side_conflict` decides.
+
+    Layer 5 takes what `realms.outliers.flag_outliers` flags, with the three rules of that module (see there), each of which `settings.rules_off`
+    can leave out. It needs `refs.groups` for the reporting rate, and the grid for distances.
     """
     layers = frozenset(layers)
     unknown = sorted(layers - set(LAYERS))
@@ -482,6 +502,8 @@ def clean(
         _layer_3(run, refs, meta, settings)
     if 4 in layers:
         _layer_4(run, refs, grid, meta, settings)
+    if 5 in layers:
+        _layer_5(run, refs, grid, settings)
 
     presence = _sum_rows(run.rows, ["species_id", "part"]).sort("species_id", "part")
     removed = pl.concat(run.removed) if run.removed else pl.DataFrame(schema=REMOVED_SCHEMA)

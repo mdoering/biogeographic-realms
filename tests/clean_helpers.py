@@ -11,13 +11,16 @@ from realms.grid import Grid
 from realms.natives import References
 from realms.occurrences import COUNTS, DISTINCT
 
-def make_grid(cells: dict[str, tuple[float, float]], edges: list[tuple[str, str]] = ()) -> Grid:
+def make_grid(cells: dict[str, tuple[float, float]], edges: list[tuple[str, str]] = (), centres: dict[str, tuple[float, float]] | None = None) -> Grid:
+    """A grid of `cells` (name: (land_km2, sea_km2)) with `edges` for neighbours. Cells sit a degree of longitude apart on the equator unless
+    `centres` gives a (lat, lon) for a name."""
     names = list(cells)
+    centres = centres or {}
     table = pl.DataFrame(
         {
             "cell": names,
-            "lat": [0.0] * len(names),
-            "lon": [float(i) for i in range(len(names))],
+            "lat": [centres[c][0] if c in centres else 0.0 for c in names],
+            "lon": [centres[c][1] if c in centres else float(i) for i, c in enumerate(names)],
             "area_km2": [land + sea for land, sea in cells.values()],
             "land_km2": [land for land, _ in cells.values()],
             "sea_km2": [sea for _, sea in cells.values()],

@@ -167,6 +167,11 @@ def part_id(cell: str, part: str) -> str:
     return f"{cell}:{part}"
 
 
+def cell_of(part: pl.Expr) -> pl.Expr:
+    """The cell of a column of part ids (`<cell>:land` or `<cell>:sea`, see `part_id`), without checking them against a grid."""
+    return part.str.replace(r":[^:]*$", "")
+
+
 def _split(grid: Grid, present: Iterable[str]) -> list[tuple[str, str, str]]:
     """The distinct part ids as (part, cell, kind), sorted, each checked against the grid."""
     result = []

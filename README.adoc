@@ -47,7 +47,7 @@ uv run python -I scripts/ingest.py data/gbif/<key>.zip --resolution 6 # stream a
 
 [source,bash]
 ----
-uv run python -I scripts/clean_counts.py --counts data/gbif/<key> # layers 1 to 4 on half A, once per WCVP mode (native_only, introduced, off), into results/clean/res<r>/<mode>/: presence, removed (every row taken out or moved, with its layer and rule), unplaced, and the removal summaries; report.json holds the removals per layer and rule, the effect of each WCVP mode, the zero-area fold, the Caspian check, layer 4's species counts and the provisionally accepted twins. About 20 GB at the peak, 1 minute
+uv run python -I scripts/clean_counts.py --counts data/gbif/<key> # layers 1 to 5 on half A, once per WCVP mode (native_only, introduced, off), into results/clean/res<r>/<mode>/: presence, removed (every row taken out or moved, with its layer and rule), unplaced, the removal summaries, and suspect_cells.csv (the cells where layer 5 took far more of the species than it did next door, listed for inspection, nothing is removed for them); report.json holds the removals per layer and rule, layer 5 per rule in records, presences, species and cells with its suspect cells, the effect of each WCVP mode, the zero-area fold, the Caspian check, layer 4's species counts and the provisionally accepted twins. About 20 GB at the peak, 1 minute
 ----
 
 == Measuring scale

@@ -1,4 +1,4 @@
-"""The cleaning of occurrence counts, layers 1 to 4, on hand-made tables.
+"""The cleaning of occurrence counts, layers 1 to 4 and the way layer 5 is called, on hand-made tables. Layer 5's rules are in `test_outliers`.
 
 The grid has cells named by numbers, so that "lowest cell id" can be told from the lowest id as text ("9" before "100"). A cell is
 `(land_km2, sea_km2)`, and a part with less than `ZERO_KM2` of area is none.
@@ -521,12 +521,6 @@ def test_switching_a_layer_off_restores_its_rows_and_only_its_rows():
     assert set(kept(out)) == everything | {("land", "11:land"), ("land", "11:sea")}
 
 
-def test_layer_5_is_accepted_and_does_nothing_yet():
-    r = refs([taxon("s")])
-    c = counts(row("s", "10:land"))
-    assert kept(clean(c, r, GRID, frozenset({1, 2, 3, 4, 5}))) == kept(clean(c, r, GRID, frozenset({1, 2, 3, 4})))
-
-
 def test_presence_sums_the_countries_and_takes_the_larger_distinct_counts():
     c = counts(row("s", "10:land", country="AA", n=3, n_datasets=2, n_years=1), row("s", "10:land", country="BB", n=4, n_datasets=1, n_years=7), row("s", "13:land", country=None, n=1))
     out = clean(c, refs([taxon("s")]), GRID)
@@ -571,7 +565,11 @@ RANDOM_CELLS = {
     "5": (0.0005, 1000.0), "6": (300.0, 700.0), "7": (1000.0, 0.0), "8": (0.0, 1000.0),
 }
 RANDOM_EDGES = [("1", "2"), ("2", "3"), ("3", "4"), ("4", "5"), ("5", "6"), ("6", "7"), ("7", "8"), ("8", "1"), ("2", "6")]
-RANDOM_GRID = make_grid(RANDOM_CELLS, RANDOM_EDGES)
+# 15 degrees of longitude apart, so that cells are over 1,000 km apart and the neighbour spacing, the median of the edges, is 15 degrees
+RANDOM_CENTRES = {cell: (0.0, 15.0 * i) for i, cell in enumerate(RANDOM_CELLS)}
+RANDOM_GRID = make_grid(RANDOM_CELLS, RANDOM_EDGES, RANDOM_CENTRES)
+# thresholds of layer 5 that the random tables of 8 cells and a few hundred records left by layers 1 to 4 can meet: the design's would need 20 cells and 1,000 records of a group
+LOOSE_5 = {"satellite_record_share": 0.3, "satellite_cell_share": 0.6, "group_min_records": 60, "under_max_records": 20, "under_rate_factor": 0.5}
 RANDOM_PARTS = [f"{cell}:{kind}" for cell in RANDOM_CELLS for kind in ("land", "sea")]
 # the land parts with area, and the TDWG regions they touch: 7 is in none, and 5's land has no area
 RANDOM_TDWG3 = [("1:land", "R1"), ("2:land", "R1"), ("2:land", "R2"), ("4:land", "R2"), ("6:land", "R3"), ("7:land", None)]
@@ -580,7 +578,7 @@ COUNTRIES = ["AA", "BB", "CC", None]
 
 
 def random_case(seed: int):
-    """A small random table of country counts, and references that have a hit for every rule of layers 2 to 4."""
+    """A small random table of country counts, and references that have a hit for every rule of layers 2 to 5 (with `LOOSE_5` for layer 5)."""
     rng = np.random.default_rng(seed)
     ids = [f"s{i}" for i in range(40)]
     kingdoms = ["Plantae", "Animalia", "Fungi"]
@@ -613,18 +611,30 @@ def random_case(seed: int):
             human = n if rng.random() < 0.15 else int(rng.integers(0, n + 1))
             rows.append(row(species, RANDOM_PARTS[rng.integers(len(RANDOM_PARTS))], COUNTRIES[rng.integers(len(COUNTRIES))], n=n, n_raw=n + int(rng.integers(0, 6)), n_human_text=human))
     no_wild_range = set(rng.choice(ids, 3, replace=False))
+    for i in range(5):  # thin species: 2 to 4 records in as many parts, which are 15 degrees or more apart if they are in different cells
+        species = f"t{i}"
+        taxa.append(taxon(species, "Animalia", "Insecta", None, False))
+        for _ in range(rng.integers(2, 4)):
+            rows.append(row(species, RANDOM_PARTS[rng.integers(len(RANDOM_PARTS))], COUNTRIES[rng.integers(len(COUNTRIES))], n=1))
+    for i in range(3):  # a core of 80 records in one cell and a stray record in another, where the group of every species is `Insects`
+        species = f"z{i}"
+        taxa.append(taxon(species, "Animalia", "Insecta", None, False))
+        at = int(rng.integers(len(RANDOM_PARTS)))
+        rows.append(row(species, RANDOM_PARTS[at], "AA", n=80))
+        rows.append(row(species, RANDOM_PARTS[(at + 2 * int(rng.integers(1, 4))) % len(RANDOM_PARTS)], "AA", n=1))
     return counts(*rows), refs(taxa, wcvp=wcvp, griis=griis, wrims=wrims, tdwg3=RANDOM_TDWG3, admin1=RANDOM_ADMIN1, griis_no_cells=griis_no_cells, wrims_no_country=wrims_no_country, no_wild_range=no_wild_range)
 
 
+@pytest.mark.parametrize("heuristics", [{}, LOOSE_5], ids=["design-layer5", "loose-layer5"])
 @pytest.mark.parametrize("layer_1", [True, False], ids=["layer1", "no-layer1"])
 @pytest.mark.parametrize("side_conflict", ["environment", "leave"])
 @pytest.mark.parametrize("wcvp_mode", ["native_only", "introduced", "off"])
 @pytest.mark.parametrize("seed", range(4))
-def test_records_are_conserved(seed, wcvp_mode, side_conflict, layer_1):
-    """What is left plus what layers 2 to 4 removed is what came in. Folds move records and the zero-area fold loses none."""
+def test_records_are_conserved(seed, wcvp_mode, side_conflict, layer_1, heuristics):
+    """What is left plus what layers 2 to 5 removed is what came in. Folds move records and the zero-area fold loses none."""
     c, r = random_case(seed)
     layers = ALL if layer_1 else ALL - {1}
-    out = clean(c, r, RANDOM_GRID, layers, Settings(wcvp_mode=wcvp_mode, side_conflict=side_conflict))
+    out = clean(c, r, RANDOM_GRID, layers, Settings(wcvp_mode=wcvp_mode, side_conflict=side_conflict, **heuristics))
     came_in = int((c["n"] - c["n_human_text"]).sum() if layer_1 else c["n_raw"].sum())
     lost = out.removed.filter(pl.col("layer") >= 2, pl.col("to_part").is_null())["records"].sum()
     assert int(out.presence["records"].sum()) + int(lost) == came_in
@@ -640,5 +650,5 @@ def test_the_random_tables_reach_every_rule():
     for seed in range(4):
         for mode in ("native_only", "introduced"):
             c, r = random_case(seed)
-            reached |= set(clean(c, r, RANDOM_GRID, ALL, Settings(wcvp_mode=mode)).removed["rule"])
+            reached |= set(clean(c, r, RANDOM_GRID, ALL, Settings(wcvp_mode=mode, **LOOSE_5)).removed["rule"])
     assert reached == set(RULES)

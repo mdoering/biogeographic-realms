@@ -725,8 +725,8 @@ already known to need about 15 GB. Everything new reads the exports through Pola
 returns `Cleaned`: `presence` (species and part, summed over countries, with a `records` column), `removed` (one row for every row of the counts
 that a layer took out or moved: `layer`, `rule`, species, part, country, `records`, `to_part`, and `presence_lost`), `unplaced` and `sides` (layer 4's counts of
 species). Nothing is removed without a layer and a rule, `RULES` says which layer each rule is of and a rule that is not in it raises, and each can be switched off: a layer with `layers`, one rule with `Settings.rules_off`
-(`extinct`, `no_wild_range`, `griis`, `griis_subnational`, `wrims`), WCVP with `wcvp_mode`. Layer 5 is accepted in `layers` and does nothing until
-Task 12. All thresholds are starting values until the freeze.
+(`extinct`, `no_wild_range`, `griis`, `griis_subnational`, `wrims`), WCVP with `wcvp_mode`. Layer 5 was accepted in `layers` and did nothing until
+Task 12, which added it (see "Layer 5" below). All thresholds are starting values until the freeze.
 
 **Records.** `records` is `n - n_human_text` with layer 1 on and `n_raw` with it off. Layer 1 takes out a row with no such record: rule
 `failed_flags` if `n` is 0 (every record failed the flag checks) and `human_text` otherwise. An emptied row is logged with its `n_raw`, as that is what it
@@ -881,3 +881,105 @@ species from every row of that country. Among the biggest single removals are sp
 species wherever some population is introduced (released Mallards, feral pigeons), which the rule turns into the whole country. It is the rule as the brief gives it, and the
 design's softening is the sub-national lists, which help only where they exist. Nothing in `References` says where in a country a species is native, so `clean` cannot soften this.
 GRIIS's effect on its own is one of the runs of M1, and these are the first rows to look at there.
+
+### Layer 5, the rare-outlier heuristics (2026-11-01)
+
+`src/realms/outliers.py` (`core_parts`, `detached_satellites`, `under_reported`, `thin_long_range`, `flag_outliers`, `suspect_cells`), called by `clean` as layer 5. The rules
+`detached_satellite`, `under_reported` and `thin_long_range` are in `RULES` at layer 5 and in `SWITCHABLE`, so `rules_off` switches each off, and `layers` the whole layer. The thresholds are
+the `Settings` of Task 11, at the design's values, and all starting values until the freeze. Records stay conserved from layer 2 to layer 5 (`test_records_are_conserved` now also
+runs with layer 5 on, at the design's thresholds and at looser ones, as the random tables of 8 cells are too small to meet the design's). Rulings, with the reason for each:
+
+- **Cells, not parts.** A species' records in a cell are summed over its parts and countries, the rules judge that sum, and a flagged (species, cell) takes every row of the species there under the
+  rule's name. The design speaks of cells and records ("a gap of 500 km", "5% of its cells", "a cell with at least 1,000 records of the group"), and a coastal cell's two parts would otherwise be
+  judged apart, with half the records each, which makes every shore species look half as common.
+- **Distances are great-circle arcs between cell centres, in kilometres**, never degrees. **The gap is `satellite_gap_km` plus the grid's median neighbour spacing**, measured from the grid's
+  adjacency (292.5 km at resolution 6, 160.7 km at 7, so a gap of 792.5 and 660.7 km). The design's 500 km is a gap between ranges and cells are joined by their centres, so the cell's own width is
+  added, and nothing is tied to a resolution. Test: the same 667 km between a patch and the range is detached on a grid of 1-degree cells and joined on one of 3-degree cells.
+- **Core cells.** A species' core is its top cells holding `core_share` (90%) of its records, counting the cell that crosses the line, and **every cell under `heuristic_min_records` (20) records.
+  Cells that tie with the smallest core cell are core too**, because which of two equal cells is the crossing one would otherwise be decided by their order. It protects slightly more.
+  `detached_satellite` and `under_reported` never remove a core cell (and never a patch that holds one). **`thin_long_range` is the exception and removes a whole species, core cells and
+  all**: the brief says it takes the species out of the network, and the design says such a species "stays out of the network". A species with under 5 records is all core, so the guardrail
+  would otherwise make the rule do nothing.
+- **Every rule judges the rows layers 1 to 4 left, and not one another's removals.** The core is taken once, from what layer 4 leaves, and a cell that two rules flag goes with the first of
+  `thin_long_range`, `detached_satellite`, `under_reported`. What a rule flags then does not depend on the order, and switching a rule off hands its cells to the next rule that flags them
+  (not back). The thin rule's species have under 5 records, so the others never flag them unless the thresholds are changed.
+- **Strictness follows the design's words.** "Under" is strict: a patch with under 1% of the records and under 5% of the cells, a species with under 5 records, cells over 1,000 km apart. "At most" and
+  "at least" are not: at most 5 records in the cell, at least 1,000 records of the group, at least 20 records, at least 2 datasets and 3 years. A share against a count is compared to 1e-9
+  (0.05 times 60 cells is 3.0000000000000004 in floating point, and 3 cells of 60 are not under 5%).
+- **Satellite patches.** Only species with at least 20 records, on a graph of the grid's cells within the gap of each other (a k-d tree on unit vectors), and a species' patches are the connected
+  components of its occupied cells, by `scipy.sparse.csgraph`, for all species at once. A patch goes when it holds under 1% of the records and under 5% of the cells, unless it has at least 2
+  datasets and 3 years. **A patch's datasets and years are the largest over its cells (and so over its parts and countries), which is a lower bound**, as `load_presence`'s counts are: distinct
+  counts do not add up across rows. It leans towards removing. **`n_datasets` and `n_years` count every record that passes layer 1's flag checks, so they include those that only the text patterns
+  caught (`n_human_text`), and the fold of zero-area parts can bring in a record-less row's counts (maximum of the two). Both can only raise a patch's counts, which leans towards keeping.** The two
+  biases are not corrected, and which is larger is not known.
+- **Reporting rate.** `taxGroup` is the group (`refs.groups`, 37 groups). The group total in a cell is over all the species of the group there, small ones included, in what layers 1 to 4 left; the
+  species' median rate is over its core cells, whatever their group totals. A species with no group is not judged by this rule (1,434 species and 25,827 records of half A). Its cell goes if the
+  group has at least 1,000 records in the cell, the species at most 5 there and at least 20 in all, and a rate under 1% of its median core rate.
+- **`suspect_cells`** lists and removes nothing. A cell's share is the species layer 5 took out of it over those it had before (what `presence` holds plus what layer 5 removed there), and it is
+  suspect when the share is at least 3 times the median of its neighbours' shares (the cells in `grid.adjacency`) and at least 10 percentage points above it. **A neighbour with no species has no share and
+  is left out of the median, and a cell with no neighbour that has one is not judged.** It has no floor on the number of species, as the design has none; see the result below for what that does to the
+  top of the list.
+
+Layer 5 is fast: all the patches of 252,498 species are found in one pass (no loop over species), in 3.6 s at resolution 6, and the layer takes 7 s and 2.2 GB on top of what layers 1 to 4 hold
+(see below). At resolution 7 the grid has 21,872 cells and 59 links per cell within the gap, against 7,292 and 27.9, so with 2.5 times the rows the patch search grows about 5 times (an estimate, not
+a measurement on resolution 7 counts).
+
+### Layer 5 on half A at resolution 6 (2026-11-01)
+
+`scripts/clean_counts.py` on `data/gbif/0019721-261023074918325`, half A, all five layers, 3 modes in one process: 72 s, peak 15.5 GB (the earlier run's peak was 17.1 GB: the references' load decides it,
+and it varies from run to run). `clean` takes 12.9 s for `native_only` where it took 8.9 s, so **layer 5 costs about 4 to 7 s per mode** (measured on its own: 8.3 s without it and 15.3 s with it on the same inputs).
+`flag_outliers` alone on the 7.4M rows of layers 1 to 4 takes 7.2 s and 2.2 GB above what is resident, and with layer 5 on, `clean`'s resident set did not rise above the peak of layers 1 to 4
+(14.4 against 14.5 GB, from a 7 GB start). Far under the 10 minutes and 30 GB set. Outputs as for layers 1 to 4, in `results/clean/res6/<mode>/`, plus `suspect_cells.csv`.
+
+**Layers 1 to 4 did not change.** Against a copy of the outputs of the previous run, in all three modes: the rows of `removed` with a layer below 5 are identical (2,051,400, 1,811,857 and 1,708,998 rows), the
+presence of the old run is the new one plus what layer 5 removed, row for row and record for record, the unplaced tables and the summaries of layers 0 to 4 (per rule, per rule and group and country) are identical,
+and so are layer 4's species counts, the zero-area fold and the input counts in `report.json`.
+
+**What layer 5 took with `native_only`** (of 7,391,207 presences, 611,163 species and 1,768,091,826 records that layers 1 to 4 left):
+
+| Rule | Rows | Presences | Records | Species | (species, cell) pairs |
+|---|---|---|---|---|---|
+| `detached_satellite` | 216,750 | 215,169 | 440,115 | 41,667 | 213,216 |
+| `under_reported` | 190,563 | 185,442 | 311,766 | 52,136 | 182,023 |
+| `thin_long_range` | 55,210 | 55,114 | 67,099 | 22,456 | 54,946 |
+| all of layer 5 | 462,523 | 455,725 (6.2%) | 818,980 (0.046%) | 95,317 (15.6%) | 450,185 |
+
+**The result is 6,935,482 presences of 588,707 species and 1,767,272,846 records.** Records are conserved: 1,767,272,846 left + 818,980 (layer 5) = 1,768,091,826, what layers 1 to 4 left. The records
+of a removed (species, cell) are few: the median of a satellite is 1 record and the mean 2.1 (largest 1,341). So layer 5 removes presences, which are what the network is built from, and hardly any
+records. **`thin_long_range` takes 22,456 species out whole** (3.7% of the species, 10% of the 218,380 that have under 5 records), and they are the only species layer 5 leaves with no presence at all: a species
+with 20 records keeps its core. In the other modes (rows, presences, records, species, species taken out by the thin rule, suspect cells, and what is left):
+
+| `wcvp_mode` | Rows | Presences | Records | Species | Thin species | Suspect cells | Left: presences | species | records |
+|---|---|---|---|---|---|---|---|---|---|
+| `native_only` | 462,523 | 455,725 | 818,980 | 95,317 | 22,456 | 550 | 6,935,482 | 588,707 | 1,767,272,846 |
+| `introduced` | 524,102 | 516,770 | 912,983 | 102,652 | 23,311 | 558 | 7,103,399 | 589,337 | 1,769,084,701 |
+| `off` | 533,689 | 525,970 | 932,467 | 102,827 | 23,300 | 565 | 7,178,591 | 589,387 | 1,774,336,392 |
+
+`introduced` and `off` have 13% and 15% more rows than `native_only`: presumably the plant presences that WCVP's native regions would have cut are caught by layer 5 instead, in part (by rule, `off` has
+255,449 satellite rows against 216,750, 220,963 under-reported rows against 190,563, and 57,277 thin ones against 55,210). The groups are in `summary_by_group.csv`.
+
+**Suspect cells: 550 with `native_only`.** The 10 with the highest share (the order the design asks for) are all near-empty cells of open ocean, where one or two species in all were removed (centre, removed of
+species, the neighbours' median share):
+
+| Cell | Centre (lat, lon) | Removed of species | Neighbours' median |
+|---|---|---|---|
+| 2817244927072977949 | -17.2, 73.0 | 2 of 2 | 0% |
+| 7220778330100356614 | -20.8, -100.4 | 2 of 2 | 18.1% |
+| 2806606672077933218 | -6.6, 77.9 | 1 of 1 | 7.7% |
+| 2811415353082192981 | -11.4, 82.2 | 1 of 1 | 0% |
+| 2817019090077513526 | -17.0, 77.5 | 1 of 1 | 0% |
+| 2820296930084253319 | -20.3, 84.3 | 1 of 1 | 0% |
+| 2824909970101250000 | -24.9, 101.2 | 1 of 1 | 0% |
+| 2825243011067749404 | -25.2, 67.7 | 1 of 1 | 14.2% |
+| 5077265693036849645 | 77.3, -36.8 | 1 of 1 | 17.2% |
+| 604767502177976329 | 4.8, 178.0 | 1 of 1 | 28.6% |
+
+So the list by share is dominated by cells with so few species that a share means little (the median suspect cell has 16 species, and 530 of the 550 have at least 2, 338 at least 10, 140 at least 50). The design sets no
+floor and none was added; a floor on the number of species is the natural fix, and Markus can set it. **Ranked by the species removed, the top 10 are real, well-sampled places** (centre, removed of species, share, neighbours' median):
+42.8, 132.6 (888 of 5,385, 16.5%, 3.9%), 32.0, -64.1 (850 of 3,100, 27.4%, 3.2%), 32.3, -17.4 (827 of 3,249, 25.5%, 4.5%), 52.1, 105.7 (589 of 2,558, 23.0%, 6.2%), 37.6, -24.6 (586 of 2,966, 19.8%, 5.7%),
+79.2, 11.3 (574 of 2,968, 19.3%, 5.8%), 0.0, -90.4 (555 of 2,832, 19.6%, 6.3%), 64.7, -16.5 (506 of 2,353, 21.5%, 5.0%), 59.9, 68.3 (493 of 3,243, 15.2%, 4.0%) and -25.2, 134.8 (440 of 2,916, 15.1%, 3.9%).
+By their centres they are near Bermuda, Madeira, the Azores, the Galapagos, Iceland, Svalbard, Primorsky Krai, Lake Baikal, western Siberia and central Australia. **Layer 5 takes 15 to 27% of the species of these
+cells, and 70 to 91% of what it takes there is the satellite rule** (Bermuda 777 of 850, Madeira 707 of 827, the Azores 525 of 586, the Galapagos 465 of 555). That is what the rule is built for, a species with a single
+record or dataset far from its range, and it is also where real disjunct occurrences on oceanic islands are, which realm boundaries depend on. The design's guard is 2 datasets and 3 years, and a single-source
+island record is removed. **Whether that over-cleans the islands is not known** and it is a calibration question for M1 (the thresholds are starting values), which the cells of this list are the first place to look at.
+Nine of the top 10 by share and eight of the top 10 by species removed are the same as `native_only`'s in both other modes.
