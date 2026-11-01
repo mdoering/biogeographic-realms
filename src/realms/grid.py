@@ -123,6 +123,20 @@ def _land_km2(shapes: np.ndarray, land: Path) -> np.ndarray:
     return result
 
 
+def read_centres(gpkg: Path) -> pl.DataFrame:
+    """`cell` (the `geogrid_id` as text), `lat` and `lon` of the centres of the cells of a GBIF ISEA3H file, read without their geometry.
+
+    That is a few milliseconds where `load_grid` takes a minute or more, and all that the ingest needs to find the cell a stray cell code belongs to.
+    """
+    frame = gpd.read_file(gpkg, ignore_geometry=True)
+    if frame["geogrid_id"].dtype.kind == "f":
+        raise ValueError(f"geogrid_id was read as floating point, which loses digits: {gpkg}")
+    return pl.DataFrame(
+        {"cell": [str(i) for i in frame["geogrid_id"]], "lat": frame["lat_c"].to_numpy(), "lon": frame["lon_c"].to_numpy()},
+        schema={"cell": pl.String, "lat": pl.Float64, "lon": pl.Float64},
+    )
+
+
 def load_grid(gpkg: Path, land_zip: Path) -> Grid:
     """Read a GBIF ISEA3H file and measure each cell against Natural Earth land, from `land_zip` or any file geopandas reads.
 

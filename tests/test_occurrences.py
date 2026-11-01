@@ -658,6 +658,7 @@ def run(tmp_path, monkeypatch):
         (tmp_path / "reference" / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / "reference" / name).touch()
     monkeypatch.setattr(ingest_script, "load_grid", lambda gpkg, land: GRID)
+    monkeypatch.setattr(ingest_script, "read_centres", lambda gpkg: GRID.cells.select("cell", "lat", "lon"))
     monkeypatch.setattr(ingest_script, "load_taxa", lambda path: taxa("S1", "S2"))
 
     def go(rows=CLEAN, *args):
@@ -827,3 +828,366 @@ def test_the_counts_and_columns_are_those_of_the_query():
     assert list(COLUMNS) == ["specieskey", "countrycode", "cell", "part", *COUNTS]
     sql = (Path(__file__).parent.parent / "queries" / "occurrence_res6.sql").read_text()
     assert re.findall(r"\bAS (\w+)", sql) == list(COLUMNS)[2:]
+
+
+# near-miss cell codes: GBIF's code for a point differs from the grid file's id of the same cell by a few hundred metres in a handful of cells
+
+
+def cell_id(code: int, lat: float, lon: float, negative: bool = False) -> str:
+    """A cell code as GBIF writes it: the 2-digit code, |lat| in millionths of a degree in 8 digits and |lon| in 9, as an integer (a code below 10 loses its zero)."""
+    digits = f"{code:02d}{round(abs(lat) * 1e6):08d}{round(abs(lon) * 1e6):09d}"
+    return ("-" if negative else "") + str(int(digits))
+
+
+def centres_of(places) -> pl.DataFrame:
+    """`places`: (cell, lat, lon) of the cells of a made-up grid, as `read_centres` gives them."""
+    return pl.DataFrame(
+        {"cell": [c for c, _, _ in places], "lat": [float(la) for _, la, _ in places], "lon": [float(lo) for _, _, lo in places]},
+        schema={"cell": pl.String, "lat": pl.Float64, "lon": pl.Float64},
+    )
+
+
+def place_grid(places) -> Grid:
+    """The same cells as a `Grid`, all land, for the QA. Its resolution is 6, which is what the script fixture asks for: the codes are made up."""
+    table = centres_of(places).with_columns(area_km2=pl.lit(1000.0), land_km2=pl.lit(1000.0), sea_km2=pl.lit(0.0))
+    return Grid(6, table, {})
+
+
+# Code 07 is north and east, 29 south and east, 51 north and west and 73 south and west, as on the real grids
+CELL_A, FAR_A = cell_id(7, 10.0, 20.0), cell_id(7, 10.5, 20.0)  # FAR_A is 55 km north of A
+CELL_S, CELL_W, CELL_SW = cell_id(29, -35.0, 150.0), cell_id(51, 45.0, -100.0), cell_id(73, -35.0, -70.0)
+PLACES = [
+    (CELL_A, 10.0, 20.0),
+    (FAR_A, 10.5, 20.0),
+    (CELL_S, -35.0, 150.0),
+    (CELL_W, 45.0, -100.0),
+    (CELL_SW, -35.0, -70.0),
+    # A's coordinates, with the signs of the other three quadrants: a decoder that reads the digits and not the code would find them as near as A
+    (cell_id(29, -10.0, 20.0), -10.0, 20.0),
+    (cell_id(51, 10.0, -20.0), 10.0, -20.0),
+    (cell_id(73, -10.0, -20.0), -10.0, -20.0),
+]
+NEAR_A = cell_id(7, 10.003, 20.0)  # 0.33 km north of A
+NEAR_S = cell_id(29, -35.0, 150.004)  # 0.36 km east of S
+NEAR_W = cell_id(51, 45.0, -100.003)  # 0.24 km west of W
+NEAR_SW = cell_id(73, -35.003, -70.0)  # 0.33 km south of SW
+KM = 111.195  # a degree of latitude
+
+
+def parts_of(out) -> pl.DataFrame:
+    return pl.concat([pl.read_parquet(p) for p in sorted(out.glob("part-*.parquet"))])
+
+
+def remap_of(tmp_path, code, places, chunk_lines=5):
+    """The ingest of one row in `code`, with the cells of `places`: what it was remapped to, or None."""
+    out = tmp_path / "out"
+    done = occurrences.ingest_remapped(download(tmp_path, [row("S1", "DK", code, "land")]), out, centres_of(places), chunk_lines)
+    assert done.rows == done.downloaded == 1
+    cell = parts_of(out)["cell"].item()
+    assert cell == code or [r.target for r in done.remaps] == [cell]
+    return None if cell == code else cell
+
+
+def test_a_near_miss_code_is_remapped_to_the_grid_cell_with_its_code_and_nearest_centre(tmp_path):
+    rows = [
+        row("S1", "DK", NEAR_A, "land"),
+        row("S1", "DK", NEAR_S, "land"),
+        row("S1", "DK", NEAR_W, "land"),
+        row("S1", "DK", NEAR_SW, "land"),
+        row("S2", "DK", CELL_A, "land"),  # a code of the grid stays as it is
+    ]
+    out = tmp_path / "out"
+    done = occurrences.ingest_remapped(download(tmp_path, rows), out, centres_of(PLACES), chunk_lines=2)
+    assert (done.rows, done.downloaded) == (5, 5)
+    found = parts_of(out)
+    assert set(zip(found["specieskey"], found["cell"], strict=True)) == {("S1", CELL_A), ("S1", CELL_S), ("S1", CELL_SW), ("S1", CELL_W), ("S2", CELL_A)}
+    assert {r.code: r.target for r in done.remaps} == {NEAR_A: CELL_A, NEAR_S: CELL_S, NEAR_W: CELL_W, NEAR_SW: CELL_SW}
+    assert set(parts_of(out)["cell"]) <= {c for c, _, _ in PLACES}
+
+
+def test_the_target_is_a_cell_with_the_same_code_and_not_the_nearest_cell_of_any_code(tmp_path):
+    # 0.4 km north of the equator in code 07 there is no cell, and 0.4 km south of it a cell of code 29: another cell, and not a rounding of this one
+    places = [(cell_id(7, 0.5, 30.0), 0.5, 30.0), (cell_id(29, -0.001, 30.0), -0.001, 30.0)]
+    assert remap_of(tmp_path, cell_id(7, 0.003, 30.0), places) is None
+
+
+@pytest.mark.parametrize("negative", [False, True])
+def test_the_sign_of_a_code_is_dropped_before_it_is_read(tmp_path, negative):
+    # twelve cells of a grid have a negative id (here, one at 58.28 N, 11.25 E): the sign is not part of what the digits say
+    vertex = cell_id(7, 58.282526, 11.25, negative=True)
+    places = [(vertex, 58.282526, 11.25), (cell_id(7, 58.8, 11.25), 58.8, 11.25)]
+    assert remap_of(tmp_path, cell_id(7, 58.2825, 11.25, negative=negative), places) == vertex
+
+
+@pytest.mark.parametrize(("km", "remapped"), [(4.9, True), (5.1, False), (30.0, False)])
+def test_a_near_miss_is_within_five_kilometres(tmp_path, km, remapped):
+    places = [(CELL_A, 10.0, 20.0)]
+    assert (remap_of(tmp_path, cell_id(7, 10.0 + km / KM, 20.0), places) == CELL_A) is remapped
+
+
+@pytest.mark.parametrize(("second_km", "remapped"), [(2.5, False), (2.9, False), (3.2, True), (4.0, True)])
+def test_the_next_cell_must_be_more_than_three_times_as_far(tmp_path, second_km, remapped):
+    near, second = cell_id(7, 10.009, 20.0), cell_id(7, round(10.0 - second_km / KM, 6), 20.0)  # 1.0 km and `second_km` from (10, 20)
+    places = [(near, 10.009, 20.0), (second, round(10.0 - second_km / KM, 6), 20.0)]
+    assert (remap_of(tmp_path, cell_id(7, 10.0, 20.0), places) == near) is remapped
+
+
+def test_a_code_in_the_grid_is_never_remapped_even_if_another_cell_is_next_to_it(tmp_path):
+    places = [(CELL_A, 10.0, 20.0), (cell_id(7, 10.003, 20.0), 10.003, 20.0)]
+    assert remap_of(tmp_path, CELL_A, places) is None
+    assert remap_of(tmp_path, cell_id(7, 10.003, 20.0), places) is None
+
+
+def test_two_cells_of_one_centre_are_ambiguous(tmp_path):
+    places = [(CELL_A, 10.0, 20.0), (cell_id(7, 10.0, 20.0, negative=True), 10.0, 20.0)]
+    assert remap_of(tmp_path, cell_id(7, 10.001, 20.0), places) is None
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "not-a-cell",
+        "7" * 25,  # more than 19 digits
+        "²⁰" + "0" * 17,  # digits that are not ASCII
+        cell_id(7, 90.003, 0.0),  # beyond the pole, 0.33 km from the cell at it on a sphere that goes on past the pole
+        cell_id(51, 10.0, 180.003),  # beyond the antimeridian, 0.3 km from the cell at -180 on a sphere that goes on past it
+        cell_id(8, 10.003, 20.0),  # a code that no cell of the grid has, so that its hemisphere is not known
+    ],
+)
+def test_a_code_that_does_not_decode_to_a_place_is_not_remapped(tmp_path, code):
+    edges = [(cell_id(7, 90.0, 0.0), 90.0, 0.0), (cell_id(51, 10.0, -180.0), 10.0, -180.0)]
+    assert remap_of(tmp_path, code, [*PLACES, *edges]) is None
+
+
+def test_decoding_reads_the_code_the_latitude_and_the_longitude():
+    assert occurrences.decode("704809617102037511") == ("07", 4.809617, 102.037511)  # 18 digits: the first zero is gone
+    assert occurrences.decode("-758282526011250000") == ("07", 58.282526, 11.25)
+    assert occurrences.decode("5100000000079533471") == ("51", 0.0, 79.533471)
+    assert occurrences.decode("7300815160144987711") == ("73", 0.815160, 144.987711)
+    assert occurrences.decode("") is None and occurrences.decode("-") is None
+
+
+def test_a_code_whose_hemisphere_the_grid_does_not_show_is_not_remapped(tmp_path):
+    # the cells of code 07 straddle the equator, so the hemisphere of the code is not known from the grid: nothing is remapped
+    places = [(cell_id(7, 5.0, 20.0), 5.0, 20.0), (cell_id(7, -5.0, 20.0), -5.0, 20.0)]
+    assert remap_of(tmp_path, cell_id(7, 5.003, 20.0), places) is None
+
+
+def test_rows_without_a_cell_and_codes_that_are_not_near_a_cell_stay_as_they_are(tmp_path):
+    rows = [row("S1", "DK", None, "land"), row("S1", "DK", UNKNOWN, "land"), row("S1", "DK", NEAR_A, "land")]
+    out = tmp_path / "out"
+    done = occurrences.ingest_remapped(download(tmp_path, rows), out, centres_of(PLACES))
+    assert (done.rows, done.downloaded, [r.code for r in done.remaps]) == (3, 3, [NEAR_A])
+    assert sorted(parts_of(out)["cell"].to_list(), key=str) == sorted([None, UNKNOWN, CELL_A], key=str)
+
+
+def test_ingest_without_the_cells_of_a_grid_remaps_nothing(tmp_path):
+    out = tmp_path / "out"
+    assert ingest(download(tmp_path, [row("S1", "DK", NEAR_A, "land")]), out) == 1
+    assert parts_of(out)["cell"].to_list() == [NEAR_A]
+
+
+def test_a_remap_lists_its_code_target_rows_records_and_distance(tmp_path):
+    rows = [
+        row("S1", "DK", NEAR_A, "land", n_raw=12, n=10),
+        row("S2", "SE", NEAR_A, "land", n_raw=8, n=7),
+        row("S1", "DK", NEAR_S, "land", n_raw=4, n=3),
+    ]
+    done = occurrences.ingest_remapped(download(tmp_path, rows), tmp_path / "out", centres_of(PLACES))
+    first, second = sorted(done.remaps, key=lambda r: r.code == NEAR_S)  # they come sorted by code, as text
+    assert (first.code, first.target, first.rows, first.n_raw, first.n) == (NEAR_A, CELL_A, 2, 20, 17)
+    assert (second.code, second.target, second.rows, second.n_raw, second.n) == (NEAR_S, CELL_S, 1, 4, 3)
+    assert first.km == pytest.approx(0.334, abs=1e-3) and second.km == pytest.approx(0.364, abs=1e-3)
+    assert [r.code for r in done.remaps] == sorted([NEAR_A, NEAR_S])
+
+
+def counts(**kw):
+    return {"n_raw": 12, "n": 10, "n_datasets": 2, "n_years": 3, "n_nc": 1, "n_open": 5, "n_datasets_open": 1, "n_years_open": 3, "n_ebird": 2, "n_inat": 3, "n_synonym": 1, "n_human_text": 0, **kw}
+
+
+NEAR_A2 = cell_id(7, 10.0, 20.003)  # a second code for A, 0.33 km east of it
+
+
+def test_rows_that_collide_after_a_remap_are_merged_as_the_loaders_merge_them(tmp_path):
+    rows = [
+        row("S1", "DK", CELL_A, "land", **counts()),  # chunk 0
+        row("S1", "SE", CELL_A, "land", **counts(n=1)),
+        row("S1", "DK", CELL_S, "land"),
+        row("S3", None, CELL_A, "land", **counts(n=2)),  # chunk 1, with row 5 after the remap, a row with no country
+        row("S1", "DK", NEAR_A, "land", **counts(n_raw=6, n=5, n_datasets=1, n_years=7, n_nc=2, n_open=4, n_datasets_open=3, n_years_open=2, n_ebird=1, n_inat=1, n_synonym=2, n_human_text=1)),
+        row("S3", None, NEAR_A, "land", **counts(n=3)),
+        row("S1", "DK", NEAR_A2, "land", **counts(n_raw=1, n=1, n_datasets=9, n_years=1, n_nc=1, n_open=1, n_datasets_open=1, n_years_open=1, n_ebird=1, n_inat=1, n_synonym=0, n_human_text=1)),  # chunk 2, a second code, onto the same row as row 4
+        row("S4", "DK", NEAR_A, "land"),  # collides with nothing
+    ]
+    out = tmp_path / "out"
+    done = occurrences.ingest_remapped(download(tmp_path, rows), out, centres_of(PLACES), chunk_lines=3)
+    assert (done.downloaded, done.rows) == (8, 5)  # three rows went into others
+    merged = parts_of(out)
+    assert merged.height == 5 and merged.select("specieskey", "countrycode", "cell", "part").unique().height == 5
+    assert occurrences.part_rows(out) == 5
+    one = merged.filter((pl.col("specieskey") == "S1") & (pl.col("countrycode") == "DK") & (pl.col("cell") == CELL_A)).row(0, named=True)
+    # the counts add up, and the four distinct counts take the largest of the three rows
+    assert {k: one[k] for k in COUNTS} == {
+        "n_raw": 12 + 6 + 1,
+        "n": 10 + 5 + 1,
+        "n_datasets": 9,
+        "n_years": 7,
+        "n_nc": 1 + 2 + 1,
+        "n_open": 5 + 4 + 1,
+        "n_datasets_open": 3,
+        "n_years_open": 3,
+        "n_ebird": 2 + 1 + 1,
+        "n_inat": 3 + 1 + 1,
+        "n_synonym": 1 + 2 + 0,
+        "n_human_text": 0 + 1 + 1,
+    }
+    assert merged.filter(pl.col("specieskey") == "S3")["n"].to_list() == [5]
+    # and it is what the loaders make of the same download with the codes of the grid in it
+    replaced = [(sp, c, CELL_A if cell in (NEAR_A, NEAR_A2) else cell, *rest) for sp, c, cell, *rest in rows]
+    for name, source in (("remapped", rows), ("replaced", replaced)):
+        (tmp_path / name).mkdir()
+        zip_path = download(tmp_path / name, source)
+        if name == "remapped":
+            count = occurrences.ingest_remapped(zip_path, tmp_path / name / "out", centres_of(PLACES), 3).rows
+        else:
+            count = ingest(zip_path, tmp_path / name / "out", 3)
+        mark_complete(tmp_path / name / "out", zip_path, 7, count)
+    by = split(S1="A", S3="A", S4="A")
+    for loader in (load_country_counts, load_presence):
+        assert_frame_equal(loader(tmp_path / "remapped" / "out", by, "A"), loader(tmp_path / "replaced" / "out", by, "A"))
+
+
+def test_a_remap_ingest_with_no_collision_keeps_every_row(tmp_path):
+    rows = [row("S1", "DK", CELL_A, "land"), row("S2", "DK", NEAR_A, "land"), row("S2", "DK", NEAR_A, "sea")]
+    done = occurrences.ingest_remapped(download(tmp_path, rows), tmp_path / "out", centres_of(PLACES), chunk_lines=2)
+    assert (done.downloaded, done.rows) == (3, 3)
+
+
+def test_a_part_that_was_being_rewritten_when_an_earlier_run_was_killed_is_removed(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "part-00000.parquet.tmp").write_bytes(b"half a part")
+    occurrences.ingest_remapped(download(tmp_path, [row("S1", "DK", CELL_A, "land")]), out, centres_of(PLACES))
+    assert sorted(p.name for p in out.iterdir()) == ["part-00000.parquet"]
+
+
+def test_more_near_misses_than_the_cap_stop_the_ingest_and_leave_no_parts(tmp_path, monkeypatch):
+    monkeypatch.setattr(occurrences, "MAX_REMAPS", 2)
+    out = tmp_path / "out"
+    rows = [row("S1", "DK", code, "land") for code in (NEAR_A, NEAR_S, NEAR_W)]
+    with pytest.raises(ValueError, match="3 cell codes"):
+        occurrences.ingest_remapped(download(tmp_path, rows), out, centres_of(PLACES), chunk_lines=2)
+    assert not list(out.glob("part-*.parquet"))
+    done = occurrences.ingest_remapped(download(tmp_path, rows[:2]), out, centres_of(PLACES))  # two are within the cap
+    assert len(done.remaps) == 2
+
+
+def test_a_failed_remap_leaves_no_parts_behind(tmp_path):
+    out = tmp_path / "out"
+    rows = [row("S1", "DK", NEAR_A, "land"), row("S1", "DK", CELL_A, "water")]  # `water` is neither land nor sea
+    with pytest.raises(ValueError, match="part is one of"):
+        occurrences.ingest_remapped(download(tmp_path, rows), out, centres_of(PLACES), chunk_lines=1)
+    assert not list(out.glob("part-*.parquet"))
+
+
+REAL_GRIDS = Path(__file__).parent.parent / "data" / "reference" / "grids"
+
+
+@pytest.mark.parametrize("resolution", [5, 6, 7])
+def test_decoding_every_cell_of_a_real_grid_gives_its_centre(resolution):
+    gpkg = REAL_GRIDS / f"ISEA3H-{resolution}.gpkg"
+    if not gpkg.exists():
+        pytest.skip(f"{gpkg} is not there")
+    cells = grid_module.read_centres(gpkg)
+    centres = occurrences.Centres(cells)
+    wrong = [
+        cell
+        for cell, lat, lon in cells.iter_rows()
+        if (placed := centres.place(cell)) is None or abs(placed[0] - lat) > 1e-6 or abs(placed[1] - lon) > 1e-6
+    ]
+    assert cells.height > 2000 and wrong == []
+
+
+def test_the_seven_near_misses_of_the_resolution_7_download_find_their_cells():
+    gpkg = REAL_GRIDS / "ISEA3H-7.gpkg"
+    if not gpkg.exists():
+        pytest.skip(f"{gpkg} is not there")
+    centres = occurrences.Centres(grid_module.read_centres(gpkg))
+    expected = {
+        "2902405731102034479": ("2902411730102033531", 0.67),
+        "5100000000079533471": ("5100000000079532484", 0.11),
+        "5121434201079619262": ("5121436312079621336", 0.32),
+        "704809617102037511": ("704821168102036680", 1.29),
+        "714370309102070552": ("714390873102070952", 2.28),
+        "7300815160144987711": ("7300817749144998464", 1.23),
+        "7302405731079534479": ("7302411730079533531", 0.67),
+    }
+    for code, (target, km) in expected.items():
+        found = centres.nearest(code)
+        assert found is not None and found[0] == target and found[1] == pytest.approx(km, abs=0.011), code
+
+
+# the script with near misses
+
+
+@pytest.fixture
+def near_run(run, monkeypatch):
+    """`run` with the grid of `places` for both the centres the ingest reads and the grid the QA loads."""
+
+    def go(rows, places=PLACES):
+        monkeypatch.setattr(ingest_script, "load_grid", lambda gpkg, land: place_grid(places))
+        monkeypatch.setattr(ingest_script, "read_centres", lambda gpkg: centres_of(places))
+        return run(rows)
+
+    return go
+
+
+BASE = row("S1", "DK", CELL_S, "land", n_raw=1000, n=950, n_synonym=30)
+
+
+def test_remaps_are_counted_in_qa_json(near_run, tmp_path, capsys):
+    near_run([BASE, row("S1", "DK", NEAR_A, "land", n_raw=12, n=10, n_synonym=0), row("S2", "SE", NEAR_A, "land", n_raw=8, n=7, n_synonym=0), row("S2", "DK", NEAR_W, "land", n_raw=1, n=1, n_synonym=0)])
+    report = report_of(tmp_path)
+    remaps = report["remaps"]
+    assert (remaps["codes"], remaps["rows"], remaps["n_raw"], remaps["n"], remaps["merged_rows"]) == (2, 3, 21, 18, 0)
+    listed = {r["code"]: r for r in remaps["list"]}  # sorted by code, as text
+    assert list(listed) == sorted([NEAR_A, NEAR_W])
+    assert [(r["target"], r["rows"], r["n_raw"], r["n"]) for r in (listed[NEAR_A], listed[NEAR_W])] == [(CELL_A, 2, 20, 17), (CELL_W, 1, 1, 1)]
+    assert listed[NEAR_A]["km"] == pytest.approx(0.334, abs=1e-3) and listed[NEAR_W]["km"] == pytest.approx(0.236, abs=1e-3)
+    # the QA runs on the parts, which hold no unknown code, and the ingest passes
+    assert report["unknown_cells"]["rows"] == 0 and report["rows"] == report["ingest"]["rows"] == 4
+    assert read_complete(tmp_path / KEY)["rows"] == 4
+    assert set(parts_of(tmp_path / KEY)["cell"]) == {CELL_S, CELL_A, CELL_W}
+    printed = capsys.readouterr().out
+    assert NEAR_A in printed and CELL_A in printed and "S1" not in printed and "S2" not in printed
+
+
+def test_qa_json_counts_the_rows_the_remaps_merged(near_run, tmp_path):
+    near_run([BASE, row("S1", "DK", CELL_A, "land", n_synonym=0), row("S1", "DK", NEAR_A, "land", n_synonym=0)])
+    report = report_of(tmp_path)
+    assert report["remaps"]["merged_rows"] == 1 and report["rows"] == report["ingest"]["rows"] == 2 and report["ingest"]["downloaded_rows"] == 3
+    assert read_complete(tmp_path / KEY)["rows"] == 2
+
+
+def test_a_download_without_near_misses_lists_no_remap(run, tmp_path):
+    run()
+    assert report_of(tmp_path)["remaps"] == {"codes": 0, "rows": 0, "n_raw": 0, "n": 0, "merged_rows": 0, "list": []}
+
+
+def test_a_code_with_no_grid_cell_within_tolerance_still_fails_qa(near_run, tmp_path):
+    far = cell_id(7, 10.0 + 6.0 / KM, 20.0)  # 6 km from A
+    message = failure(near_run, [BASE, row("S1", "DK", far, "land", n_synonym=0)])
+    assert "unknown cells: 1 codes in 1 rows" in message
+    report = report_of(tmp_path)
+    assert report["unknown_cells"]["examples"] == [far] and report["remaps"]["codes"] == 0
+    assert not (tmp_path / KEY / COMPLETE).exists()
+
+
+def test_an_ambiguous_near_miss_still_fails_qa(near_run, tmp_path):
+    two = [(cell_id(7, 10.009, 20.0), 10.009, 20.0), (cell_id(7, round(10.0 - 2.5 / KM, 6), 20.0), round(10.0 - 2.5 / KM, 6), 20.0)]  # 1.0 and 2.5 km away
+    unknown = cell_id(7, 10.0, 20.0)
+    with pytest.raises(SystemExit) as failed:
+        near_run([BASE, row("S1", "DK", unknown, "land", n_synonym=0)], [*two, (CELL_S, -35.0, 150.0)])
+    assert "unknown cells: 1 codes in 1 rows" in failed.value.code
+    assert report_of(tmp_path)["unknown_cells"]["examples"] == [unknown] and report_of(tmp_path)["remaps"]["codes"] == 0
+    assert not (tmp_path / KEY / COMPLETE).exists()

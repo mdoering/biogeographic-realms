@@ -106,6 +106,24 @@ def test_floating_ids_are_refused(tmp_path, no_land):
         load_grid(path, no_land)
 
 
+def test_the_centres_are_read_without_the_geometry_as_the_grid_has_them(tmp_path, no_land, grid):
+    path = write_grid(tmp_path / "grid.gpkg", antimeridian_cells())
+    centres = realms.grid.read_centres(path)
+    assert centres.schema == {"cell": pl.String, "lat": pl.Float64, "lon": pl.Float64}
+    assert centres.equals(grid.cells.select("cell", "lat", "lon"))
+    for as_integers in (False, True):  # ids that no float can tell apart stay text
+        assert realms.grid.read_centres(write_grid(tmp_path / f"{as_integers}.gpkg", antimeridian_cells(), as_integers))["cell"].to_list() == [A, B, C, S]
+
+
+def test_floating_ids_are_refused_by_the_centres_too(tmp_path):
+    path = write_grid(tmp_path / "grid.gpkg", antimeridian_cells())
+    frame = gpd.read_file(path)
+    frame["geogrid_id"] = frame["geogrid_id"].astype(float)
+    frame.to_file(path, driver="GPKG")
+    with pytest.raises(ValueError, match="geogrid_id"):
+        realms.grid.read_centres(path)
+
+
 def test_cells(grid):
     assert grid.resolution == 6
     assert grid.cells.columns == ["cell", "lat", "lon", "area_km2", "land_km2", "sea_km2"]

@@ -4,8 +4,13 @@ Writes the Parquet parts to `data/gbif/<key>/` and the QA numbers to `results/pi
 pass marks hold:
 
 1. no row has a species outside the accepted species of the COL release
-2. no row has a cell code that is not in the grid
+2. no row has a cell code that is not in the grid (a code that is a near miss of one cell of it is mapped to that cell while ingesting, and listed in `qa.json`)
 3. synonyms are between 2% and 5% of the clean records (the API's COL facets put them at 3.6% of all records on 2026-10-31)
+
+GBIF's code for a point can differ by a few hundred metres from the grid file's id of the same cell (7 codes in 35 rows at resolution 7). A code that the grid
+doesn't have is remapped when a cell with the same 2-digit code is within 5 km of its centre and the next is more than 3 times as far; rows that then have the
+same species, country, cell and part are merged (the counts add up, the distinct counts take the larger). `qa.json` lists every remap under `remaps`, and the
+script prints them. Any other code the grid doesn't have is kept and fails mark 2, with its count.
 
 When they hold, it writes `data/gbif/<key>/_COMPLETE` (the rows, the resolution and the zip's sha256), without which `load_presence` and
 `load_country_counts` refuse the parts: a run that is killed or fails its QA leaves none.
@@ -28,8 +33,8 @@ from pathlib import Path
 
 import polars as pl
 
-from realms.grid import load_grid
-from realms.occurrences import COMPLETE, IncompleteIngest, ingest, mark_complete, part_rows, qa, scan_counts
+from realms.grid import load_grid, read_centres
+from realms.occurrences import COMPLETE, IncompleteIngest, ingest_remapped, mark_complete, part_rows, qa, remaps_report, scan_counts
 from realms.reference import load_taxa
 
 SYNONYM_SHARE = (0.02, 0.05)
@@ -124,22 +129,36 @@ def main(argv: list[str] | None = None) -> None:
     if missing:
         raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
 
+    centres = read_centres(gpkg)  # the cells and their centres, without their geometry: the grid itself is loaded after the ingest
     started = time.perf_counter()
     try:
-        rows = ingest(args.download, out_dir)
+        done = ingest_remapped(args.download, out_dir, centres)
     except ValueError as error:
         raise SystemExit(f"FAILED {error}") from error
+    rows = done.rows
     seconds = time.perf_counter() - started
     ingest_rss = peak_rss_mb()  # the high-water mark, read before the grid and the taxa are loaded
     parquet_bytes = sum(p.stat().st_size for p in out_dir.glob("part-*.parquet"))
     print(f"ingest: {rows:,} rows in {seconds:.0f} s, peak {ingest_rss:,.0f} MB, {parquet_bytes / 1e6:,.0f} MB of Parquet in {out_dir}")
+    remaps = remaps_report(done)
+    if remaps["codes"]:
+        print(
+            f"    remapped: {remaps['codes']:,} cell codes of the download are not in the grid and each is near one cell of it: {remaps['rows']:,} rows, "
+            f"{remaps['n']:,} clean records, {remaps['merged_rows']:,} of the download's {done.downloaded:,} rows merged into others"
+        )
+        for r in remaps["list"]:
+            print(f"      {r['code']} -> {r['target']}: {r['km']:.3f} km, {r['rows']:,} rows, {r['n_raw']:,} records, {r['n']:,} clean")
+    else:
+        print("    remapped: no cell code")
 
     grid = load_grid(gpkg, land)
     if grid.resolution != args.resolution:
         raise SystemExit(f"FAILED {gpkg.name} holds resolution {grid.resolution}, not {args.resolution}")
     report = qa(scan_counts(out_dir), load_taxa(release), grid)
+    report["remaps"] = remaps
     report["ingest"] = {
         "rows": rows,
+        "downloaded_rows": done.downloaded,
         "seconds": round(seconds, 1),
         "peak_rss_mb": round(ingest_rss),
         "parquet_bytes": parquet_bytes,

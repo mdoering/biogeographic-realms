@@ -1448,3 +1448,81 @@ From the final review, recorded and not changed in code.
   alone where it does not, and that is read from whatever counts `clean` is given (half A now; all species in the headline; half B's calibration species in the scoring). A list can change sides between
   runs (a code that occurs in a cell only through a species of the other half), and so can what it takes. Before M2 the decision should be made once, from all of the download's rows (global numbers, which
   QA already reads) or from A, written down per list, and passed to `clean` rather than read from its input.
+
+### GBIF's near-miss cell codes at resolution 7 (2026-11-01)
+
+The resolution 7 download `0020744-261023074918325` (DOI 10.15468/dl.baekdm, 28,052,905 rows) failed the QA's second pass mark on **7 cell codes in 35 rows (40 records, all of them clean)** that are not in
+`ISEA3H-7.gpkg`. The res 6 download had none. This changes the method of the ingest, and the reason is that the QA's rule, any code the grid doesn't have fails the run, is right for a wrong grid and wrong
+for a few cells whose centre GBIF and the grid file give a few hundred metres apart.
+
+- **What the codes are.** A `geogrid_id` without its sign, zero-padded to 19 digits, is a 2-digit code, then |lat| in millionths of a degree in 8 digits and |lon| in 9. **Decoded against `lat_c` and `lon_c`, every
+  id of the three grids agrees to 1e-6 degrees** (2,432, 7,292 and 21,872 cells at resolutions 5, 6 and 7; `tests/test_occurrences.py` runs it on the real files and skips if they are not there). The 2-digit code
+  is the resolution plus 22 times the hemisphere (05, 27, 49, 71 at 5; 06, 28, 50, 72 at 6; 07, 29, 51, 73 at 7: north and east, south and east, north and west, south and west), and is the only thing
+  that says the hemisphere. A negative id (12 cells to a grid, at |latitude| 0, 31.72 or 58.28) reads like the others: the sign adds nothing to the digits.
+- **The seven codes** each have a grid id with the same 2-digit code whose centre is 0.11 to 2.29 km away, at a resolution where a cell is about 150 km across: GBIF's `GBIF_ISEA3HCode` and the file disagree on the
+  centres of a few cells. Nothing else is off: the same grid at resolution 6 is exact.
+- **The rule** (the plan's, written down before the run): an unknown code is **remapped** when all of these hold, and otherwise stays and fails the QA with its count as before: (1) it decodes to a place (|lat| at most 90,
+  |lon| at most 180, an ASCII digit string of at most 19 digits), (2) a grid id with the same 2-digit code has its centre within `REMAP_KM = 5` km, (3) the next such id is more than `REMAP_RATIO = 3` times as far.
+  **The code decides, not the nearest centre of any code**: a cell of another code, even 0.4 km away across the equator, is another cell and not a rounding of this one (tested). The hemisphere of a code is read from
+  the grid itself (a code whose cells lie on both sides of the equator or the prime meridian gives no place, so it is never remapped) rather than a table, so it holds for any resolution. Distances are great-circle on a
+  sphere of 6,371.0088 km, within 0.5% of the geodesic, which is all that a limit of 5 km and a ratio of 3 need.
+- **Bounded, and listed.** At most `MAX_REMAPS = 100` distinct codes may be remapped in a download; one more stops the ingest with the count and removes its parts (more than that is another grid, not a
+  rounding difference, and nothing is remapped). Every remap is printed and written to `qa.json` under `remaps` (code, target, rows, `n_raw`, `n`, km, and the totals and the rows merged into others), and nothing
+  else is changed or dropped: a row with no cell, and a code that is no near miss, stay as they are and fail the QA.
+- **Where.** At the ingest (`ingest_remapped`), so the parts never hold such a code and the loaders never see one; `ingest` as it was stays, and remaps nothing. `scripts/ingest.py` reads the cells and their centres
+  (`realms.grid.read_centres`, a few milliseconds, no geometry) before it ingests and passes them in: it still loads the grid (a minute or more at resolution 7) after, so the ingest's peak memory is not the grid's.
+  The rows of the remapped codes are held back while the parts are written (35 rows here), given their target cell, and written merged as the last part.
+- **Rows that collide are merged as `load_presence` merges them.** A row of the download is one (species, country, cell, part), so a remapped row can have the key of a row already written, or of another remapped
+  row: the counts add up (`n_raw`, `n`, `n_nc`, `n_open`, `n_ebird`, `n_inat`, `n_synonym`, `n_human_text`) and the four distinct counts (`n_datasets`, `n_years` and their `_open` forms) take the larger, which is a lower
+  bound, as there. The row of an earlier part that is merged is taken out of that part (the part is streamed to a file of its own and renamed), so **no key is in two rows**. Tested against the loaders: a download with
+  the near-miss codes replaced by their targets gives the same `load_presence` and `load_country_counts`, and the merged row is checked by hand, for a collision across parts, within a part, with a null country, and of
+  two codes onto one cell. `merged_rows` is the rows of the download less the rows of the parts.
+- **Not to be loosened:** the pass marks are as they were. The remap is the one exception to "a code the grid doesn't have stops the run", and it is bounded as above.
+
+**The run** (`uv run python -I scripts/ingest.py data/gbif/0020744-261023074918325.zip --resolution 7`, exit 0, QA passes, `_COMPLETE` written; 7f0bbb6e4d0d012387a26436d2962043a38f41c54bdcaede620438a420ab7003 is the
+zip's sha256, the same as `shasum -a 256`):
+
+- **Rows:** 28,052,905 in the download, **28,052,882 in the Parquet**: 23 rows merged into others. The last part (`part-00006.parquet`) holds the 35 rows of the seven cells, 12 of which met no row and 23 of which
+  merged with a row of the target. Every key is in one row (checked over all parts, 0 more than once).
+- **Sizes:** the zip is 1,027,468,365 bytes (1.03 GB); the Parquet 391,561,410 bytes (392 MB) in 7 parts (the first run, before the change, wrote 391,387,694 bytes).
+- **Time and memory:** the ingest took 6 s (5.2 s before the change) and the script 23 s; **peak 4,558 MB for the ingest** (read before the grid and the taxa are loaded; 3,879 MB before the change, and 4,353 MB
+  in an earlier run of the merge as it is now: the figure moves by a few hundred MB between runs), 14,951 MB with the QA (`/usr/bin/time -l`: 15.7 GB maximum resident, 10.2 GB peak footprint).
+  A first version of the merge read a whole part back to rewrite it and peaked at 5,423 MB; it now streams the part through the anti-join to a file and renames it.
+- **QA:** unaccepted species 0, **unknown cells 0**, synonyms 100,324,056 of 3,381,828,966 clean records, 2.97%. `rows` fell by the 23, and **`n_raw` (3,405,278,365), `n` (3,381,828,966) and `n_synonym` are the same as in
+  the failed run to the record**: nothing was lost. Zero-area parts as before (land 98 cells, 7,065 rows, 170,707 clean records; sea 2,534 cells, 633,274 rows, 2,902,211). 21,129 of the 21,872 cells hold records.
+- **The seven remaps** (code in the download, the cell of the grid it went to, km between the code's own centre and that cell's, and the rows and the records of the code, all and clean):
+
+| Code in the download | Remapped to | km | Rows | Records | Clean |
+|---|---|---|---|---|---|
+| `2902405731102034479` | `2902411730102033531` | 0.675 | 1 | 1 | 1 |
+| `5100000000079533471` | `5100000000079532484` | 0.110 | 15 | 16 | 16 |
+| `5121434201079619262` | `5121436312079621336` | 0.318 | 4 | 5 | 5 |
+| `704809617102037511` | `704821168102036680` | 1.288 | 1 | 1 | 1 |
+| `714370309102070552` | `714390873102070952` | 2.287 | 2 | 2 | 2 |
+| `7300815160144987711` | `7300817749144998464` | 1.230 | 11 | 13 | 13 |
+| `7302405731079534479` | `7302411730079533531` | 0.675 | 1 | 2 | 2 |
+| | | | 35 | 40 | 40 |
+
+  These are the targets and distances that were found by hand, to within 0.01 km, here by the rule: for each code the nearest cell of its code is the target and **the next is 155 km or more away**, 68 to 1,455 times
+  as far (the rule asks for 3), so the 3-times test is not close for any of the seven.
+- **The `_COMPLETE` of the res 6 ingest still verifies** (`read_complete` and `resolution_of(..., 6)`: 19,531,246 rows, zip sha256 `9fbba9b1...54bc03`, `how` `mark-complete`); res 6 was not ingested again.
+
+**Growth from resolution 6 to 7, from global counts only** (distinct (species, cell) pairs, which is what the pilot's growth was counted in, and rows; the parts of both downloads, no species named):
+
+| | Res 6 (`0019721-261023074918325`) | Res 7 (`0020744-261023074918325`) | Ratio |
+|---|---|---|---|
+| Rows | 19,531,246 | 28,052,882 (download: 28,052,905) | 1.436 |
+| Distinct (species, cell) pairs | 15,340,244 | 23,504,905 | **1.532** |
+| Distinct (species, cell, part) pairs | 17,572,638 | 26,369,126 | 1.501 |
+| Species with a row | 1,290,444 | 1,290,499 | 1.000 |
+| Cells with a row | 7,234 | 21,129 | 2.921 |
+
+The pairs grow 1.53 times for 3 times the cells. The pilot's two figures for the growth were Denmark's 1.38 (a lower bound, as Denmark spans 8 cells at resolution 6) and 2.5, which decided the go to
+resolution 7: the measure is between them and nearer the lower, so the decision stands on the more demanding number. Nothing is changed here; the pair growth is a global count and says nothing of the links, which
+the pilot scaled from half A.
+
+**Tests** (`tests/test_occurrences.py`, `tests/test_grid.py`): the plan's four (a near miss goes to the cell with its code and nearest centre; no cell within tolerance, an ambiguous near miss, still fail the QA; the remaps are
+counted in `qa.json`), the limits at 5 km (4.9 and 5.1) and at 3 times (2.5, 2.9, 3.2 and 4.0), a decoy cell of another code with the same absolute coordinates and one across the equator, a negative id, a code that
+is not a place (not digits, too long, past the pole or the antimeridian, a code the grid doesn't have), a code in the grid, two cells of one centre, a row with no cell, the cap, a failed run leaving no parts, the
+merges above, the printed remaps and `read_centres`. Mutations were caught: a ratio of 2, a limit of 6 km, ignoring the hemisphere, adding the distinct counts, not removing the merged rows from their part, and
+joining with nulls unequal.

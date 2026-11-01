@@ -7,6 +7,10 @@ records (`queries/occurrence_res<r>.sql`). Its rows hold no free text, so it can
 Half B of the species stays sealed until the pipeline is frozen (`docs/design.md`). `load_presence` and `load_country_counts` refuse it
 unless the caller says `unsealed=True`, and each such call site is listed in `DECISIONS.md`. `qa` reports global numbers only.
 
+GBIF's code for a point and the grid file's id of the same cell can differ by a few hundred metres in a handful of cells (seven codes in 35 rows of the
+resolution 7 download). `ingest_remapped` maps such a code to the cell of the grid that it is a near miss of, while it ingests (`Centres`), so that the parts
+never hold a code that is not in the grid, unless it is no near miss of any cell: those stay, and the QA fails on them.
+
 An ingest is complete when its directory holds `_COMPLETE` (`mark_complete`), which `scripts/ingest.py` writes once the ingest and its QA have passed,
 with the rows, the resolution and the zip's sha256. `ingest` removes it before it writes anything, so a run that is killed half way leaves parts and no
 marker, and `load_presence` and `load_country_counts` refuse a directory without one (`IncompleteIngest`), or whose parts hold other rows than it says.
@@ -18,10 +22,12 @@ import itertools
 import json
 import os
 import zipfile
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import polars as pl
 
 from realms.grid import KINDS, ZERO_KM2, Grid
@@ -50,6 +56,14 @@ BUFFER = 1 << 20
 EXAMPLES = 10
 COMPLETE = "_COMPLETE"  # the marker of a complete ingest, in the directory of its parts
 MARKER_KEYS = ("rows", "resolution", "zip", "zip_sha256")
+KEY = ("specieskey", "countrycode", "cell", "part")  # what makes a row of the download: it has one row of each
+# A cell code that is not in the grid is a near miss of a cell, and is remapped to it, when that cell is the only one with the same 2-digit code within
+# REMAP_KM of the code's own centre and the next is more than REMAP_RATIO times as far. More than MAX_REMAPS such codes in a download is another grid.
+REMAP_KM = 5.0
+REMAP_RATIO = 3.0
+MAX_REMAPS = 100
+EARTH_KM = 6371.0088  # the mean radius of the earth, which gets a distance within 0.5% of the geodesic one: all that a limit of 5 km needs
+HEMISPHERE_TOLERANCE = 1e-6  # degrees, the precision of a cell id: a centre this close to the equator or the meridian is on neither side
 
 
 class SealedHalf(Exception):
@@ -60,10 +74,156 @@ class IncompleteIngest(Exception):
     """A directory of parts has no `_COMPLETE`, or its parts are not what the marker says: an ingest that did not finish, or did not pass its QA."""
 
 
+@dataclass(frozen=True)
+class Remap:
+    """One cell code of the download that is not in the grid and was mapped to the cell `target`, which is `km` from where the code puts it.
+
+    `rows` and the records (`n_raw` all of them, `n` the clean ones) are those of the download's rows with the code.
+    """
+
+    code: str
+    target: str
+    rows: int
+    n_raw: int
+    n: int
+    km: float
+
+
+@dataclass(frozen=True)
+class Ingested:
+    """What `ingest_remapped` made: the `rows` of the parts, the `downloaded` rows of the download, and every cell code it remapped, sorted by code."""
+
+    rows: int
+    downloaded: int
+    remaps: tuple[Remap, ...]
+
+
+def remaps_report(done: Ingested) -> dict:
+    """The remaps of an ingest as the QA reports them: their totals, the rows that were merged into others, and every one of them."""
+    remaps = done.remaps
+    return {
+        "codes": len(remaps),
+        "rows": sum(r.rows for r in remaps),
+        "n_raw": sum(r.n_raw for r in remaps),
+        "n": sum(r.n for r in remaps),
+        "merged_rows": done.downloaded - done.rows,
+        "list": [asdict(r) for r in remaps],
+    }
+
+
+def decode(code: str) -> tuple[str, float, float] | None:
+    """The 2-digit code of a cell code and the latitude and longitude it gives, as absolute values, or None if it is no place.
+
+    A `geogrid_id` without its sign and zero-padded to 19 digits is the code (2 digits, which hold the face and the hemisphere), then |lat| in millionths of a
+    degree in 8 digits and |lon| in 9. The sign says nothing of the hemisphere: `Centres` takes that from the code, as the grid shows it.
+    """
+    digits = code[1:] if code.startswith("-") else code
+    if not (digits.isascii() and digits.isdigit()) or len(digits) > 19:
+        return None
+    padded = digits.zfill(19)
+    lat, lon = int(padded[2:10]) / 1e6, int(padded[10:]) / 1e6
+    if lat > 90 or lon > 180:
+        return None
+    return padded[:2], lat, lon
+
+
+def _km(lat: float, lon: float, lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+    """Great-circle distances in km from a point to arrays of points, in degrees (haversine)."""
+    p, ps = np.radians(lat), np.radians(lats)
+    a = np.sin((ps - p) / 2) ** 2 + np.cos(p) * np.cos(ps) * np.sin(np.radians(lons - lon) / 2) ** 2
+    return 2 * EARTH_KM * np.arcsin(np.sqrt(np.minimum(a, 1.0)))
+
+
+def _side(values: np.ndarray) -> int | None:
+    """1 if no value of a group is below zero, -1 if none is above, None if there are both (the sign of the group is not known)."""
+    if (values >= -HEMISPHERE_TOLERANCE).all():
+        return 1
+    if (values <= HEMISPHERE_TOLERANCE).all():
+        return -1
+    return None
+
+
+@dataclass(frozen=True)
+class _Group:
+    """The cells of a grid with one 2-digit code, with the hemisphere that the code stands for."""
+
+    ids: list[str]
+    lat: np.ndarray
+    lon: np.ndarray
+    north: int | None
+    east: int | None
+
+
+class Centres:
+    """The cells of a grid by the 2-digit code of their ids, to find the cell that a code that is not in the grid is a near miss of.
+
+    A code is a near miss of a cell if the cell has the same 2-digit code, and is the only one within `REMAP_KM` of the code's own centre and the next is more than
+    `REMAP_RATIO` times as far, and the code decodes to a place (`decode`). The code of a cell stands for a hemisphere, which is read from the centres of the
+    cells that have it (a code whose cells lie on both sides of the equator or the prime meridian gives no place), so that the centre of a code is a place and
+    not a pair of absolute values. `cells` is `cell` (text), `lat` and `lon` (the centres, in degrees).
+    """
+
+    def __init__(self, cells: pl.DataFrame):
+        self.cells = cells["cell"]
+        found: dict[str, tuple[list[str], list[float], list[float]]] = {}
+        for cell, lat, lon in cells.select("cell", "lat", "lon").iter_rows():
+            decoded = decode(cell)
+            if decoded is not None:
+                ids, lats, lons = found.setdefault(decoded[0], ([], [], []))
+                ids.append(cell)
+                lats.append(lat)
+                lons.append(lon)
+        self._groups = {}
+        for code, (ids, lats, lons) in found.items():
+            lat, lon = np.array(lats), np.array(lons)
+            self._groups[code] = _Group(ids, lat, lon, _side(lat), _side(lon))
+        self._nearest: dict[str, tuple[str, float] | None] = {}
+
+    def in_grid(self) -> pl.Expr:
+        """Whether the cell of a row is a cell of the grid, and not null: an expression on the column `cell`."""
+        return pl.col("cell").is_in(self.cells.implode()).fill_null(False)
+
+    def _locate(self, code: str) -> tuple[_Group, float, float] | None:
+        decoded = decode(code)
+        group = self._groups.get(decoded[0]) if decoded else None
+        if group is None or group.north is None or group.east is None:
+            return None
+        return group, group.north * decoded[1], group.east * decoded[2]
+
+    def place(self, code: str) -> tuple[float, float] | None:
+        """The latitude and longitude of a cell code, or None if it is no place or the grid doesn't show its hemisphere."""
+        located = self._locate(code)
+        return None if located is None else located[1:]
+
+    def nearest(self, code: str) -> tuple[str, float] | None:
+        """The cell that `code` is a near miss of, and its distance in km (to a metre), or None if it is a near miss of no cell."""
+        if code not in self._nearest:
+            self._nearest[code] = self._find(code)
+        return self._nearest[code]
+
+    def _find(self, code: str) -> tuple[str, float] | None:
+        located = self._locate(code)
+        if located is None:
+            return None
+        group, lat, lon = located
+        km = _km(lat, lon, group.lat, group.lon)
+        order = np.argsort(km, kind="stable")
+        first = float(km[order[0]])
+        if first > REMAP_KM or (len(order) > 1 and not km[order[1]] > REMAP_RATIO * first):
+            return None
+        return group.ids[order[0]], round(first, 3)
+
+    @property
+    def remapped(self) -> int:
+        """How many codes have been found to be near misses so far."""
+        return sum(found is not None for found in self._nearest.values())
+
+
 def _clear(out_dir: Path) -> None:
-    """Remove the marker first and then the parts, so that no marker ever stands beside parts it was not written for."""
+    """Remove the marker first and then the parts (and the half written copy of one that `_fold` was rewriting), so that no marker ever stands beside
+    parts it was not written for."""
     (out_dir / COMPLETE).unlink(missing_ok=True)
-    for path in out_dir.glob("part-*.parquet"):
+    for path in out_dir.glob("part-*.parquet*"):
         path.unlink()
 
 
@@ -79,17 +239,66 @@ def _parse(content: bytes, source: str) -> pl.DataFrame:
     return df
 
 
-def ingest(zip_path: Path, out_dir: Path, chunk_lines: int = 5_000_000) -> int:
-    """Stream the zip's single member into `out_dir/part-00000.parquet` and onwards, `chunk_lines` lines to a part. Returns the rows.
+def _set_aside(df: pl.DataFrame, centres: Centres, asides: list[pl.DataFrame]) -> pl.DataFrame:
+    """`df` without the rows whose cell code is not in the grid but is a near miss of a cell (`Centres`), which are added to `asides` as they are.
 
-    The marker and the parts of an earlier run are removed first, and the parts written by a run that fails are removed too. A run that is killed
-    leaves its parts, but no marker: the loaders refuse them until `mark_complete` is written after the QA.
+    A row with no cell, and one whose code is no near miss, stays: the QA counts them and fails. Stops if the download has more than `MAX_REMAPS` near misses.
     """
+    codes = df.filter(centres.in_grid().not_() & pl.col("cell").is_not_null())["cell"].unique().to_list()
+    near = [code for code in codes if centres.nearest(code) is not None]
+    if centres.remapped > MAX_REMAPS:
+        raise ValueError(
+            f"{centres.remapped} cell codes are not in the grid but near a cell of it, more than the {MAX_REMAPS} that a rounding difference of a few cells "
+            "explains: this is another grid, and nothing is remapped"
+        )
+    if not near:
+        return df
+    moved = pl.col("cell").is_in(near).fill_null(False)
+    asides.append(df.filter(moved))
+    return df.filter(moved.not_())
+
+
+def _fold(out_dir: Path, asides: list[pl.DataFrame], centres: Centres, index: int) -> tuple[tuple[Remap, ...], int]:
+    """Give the rows that were set aside the cell they are a near miss of, and write them, merged, as the last part, `part-<index>.parquet`.
+
+    Returns the remaps and the change in the rows of the parts. A row of the download is one (species, country, cell, part), so a remapped row can have the
+    same key as one of the parts, or as another remapped row. All of them are merged as `load_presence` merges the rows of a country: the counts add up and
+    the distinct counts take the larger. The rows of the earlier parts that it merges are taken out of them, so that no key is in two rows.
+    """
+    moved = pl.concat(asides)
+    remaps = []
+    for code, rows, n_raw, n in moved.group_by("cell").agg(pl.len(), pl.col("n_raw").sum(), pl.col("n").sum()).sort("cell").iter_rows():
+        target, km = centres.nearest(code)
+        remaps.append(Remap(code, target, rows, n_raw, n, km))
+    moved = moved.with_columns(pl.col("cell").replace_strict({r.code: r.target for r in remaps}, return_dtype=pl.String))
+    keys = moved.select(KEY).unique()
+    targets = keys["cell"].unique().implode()
+    pool, taken = [moved], 0
+    for path in sorted(out_dir.glob("part-*.parquet")):
+        hit = pl.scan_parquet(path).filter(pl.col("cell").is_in(targets)).join(keys.lazy(), on=KEY, how="semi", nulls_equal=True).collect()
+        if hit.is_empty():
+            continue
+        # streamed to a file of its own and renamed, as the part holds millions of rows and a part is never half written
+        kept = path.with_name(path.name + ".tmp")
+        pl.scan_parquet(path).join(keys.lazy(), on=KEY, how="anti", nulls_equal=True).sink_parquet(kept)
+        os.replace(kept, path)
+        pool.append(hit)
+        taken += hit.height
+    sums = [pl.col(c).sum() for c in SUMMED]
+    largest = [pl.col(c).max() for c in DISTINCT]
+    merged = pl.concat(pool).group_by(*KEY).agg(*sums, *largest).select(*COLUMNS).sort(*KEY)
+    merged.write_parquet(out_dir / f"part-{index:05d}.parquet")
+    return tuple(remaps), merged.height - taken
+
+
+def _ingest(zip_path: Path, out_dir: Path, chunk_lines: int, centres: Centres | None) -> Ingested:
     if chunk_lines < 1:
         raise ValueError(f"chunk_lines is at least 1, not {chunk_lines}")
     out_dir.mkdir(parents=True, exist_ok=True)
     _clear(out_dir)
-    rows = 0
+    rows = downloaded = 0
+    asides: list[pl.DataFrame] = []
+    remaps: tuple[Remap, ...] = ()
     try:
         with zipfile.ZipFile(zip_path) as archive:
             members = [name for name in archive.namelist() if not name.endswith("/")]
@@ -106,14 +315,40 @@ def ingest(zip_path: Path, out_dir: Path, chunk_lines: int = 5_000_000) -> int:
                     if not chunk:
                         break
                     df = _parse(header + chunk, f"{zip_path.name}, chunk {i}")
+                    downloaded += df.height
+                    if centres is not None:
+                        df = _set_aside(df, centres, asides)
                     df.write_parquet(out_dir / f"part-{i:05d}.parquet")
                     rows += df.height
+        if asides:
+            remaps, change = _fold(out_dir, asides, centres, i)
+            rows += change
         if not rows:
             raise ValueError(f"{zip_path} has no rows")
     except BaseException:
         _clear(out_dir)
         raise
-    return rows
+    return Ingested(rows, downloaded, remaps)
+
+
+def ingest(zip_path: Path, out_dir: Path, chunk_lines: int = 5_000_000) -> int:
+    """Stream the zip's single member into `out_dir/part-00000.parquet` and onwards, `chunk_lines` lines to a part. Returns the rows.
+
+    The marker and the parts of an earlier run are removed first, and the parts written by a run that fails are removed too. A run that is killed
+    leaves its parts, but no marker: the loaders refuse them until `mark_complete` is written after the QA. Cell codes are left as they are: see
+    `ingest_remapped`.
+    """
+    return _ingest(zip_path, out_dir, chunk_lines, None).rows
+
+
+def ingest_remapped(zip_path: Path, out_dir: Path, cells: pl.DataFrame, chunk_lines: int = 5_000_000) -> Ingested:
+    """`ingest`, with the cell codes that are not in the grid but are near misses of a cell of it (`Centres`) mapped to that cell.
+
+    `cells` is `cell`, `lat` and `lon` of the grid (`realms.grid.read_centres`). The rows of a remapped code are held back, merged with any row of the
+    cell they go to (`_fold`), and written as the last part, so that the parts never hold such a code and no key is in two rows. Every remap is in the result.
+    Any other code that the grid doesn't have is left for the QA to count: nothing is dropped.
+    """
+    return _ingest(zip_path, out_dir, chunk_lines, Centres(cells))
 
 
 def _parts(out_dir: Path) -> list[Path]:
@@ -208,7 +443,8 @@ def qa(counts: pl.LazyFrame, taxa: pl.DataFrame, grid: Grid) -> dict:
 
     - `rows`, `n_raw`, `n`, `n_synonym` and `synonym_share`, which is `sum(n_synonym) / sum(n)` (None if no clean record)
     - `unaccepted`: rows and records of species that are not in `taxa`, and how many species that is
-    - `unknown_cells`: rows and records of cell codes the grid doesn't have, how many codes, and a few as examples
+    - `unknown_cells`: rows and records of cell codes the grid doesn't have, how many codes, and a few as examples. The ingest has remapped the near misses of
+      a cell (`ingest_remapped`), and the script reports those apart, under `remaps`: what is left here is a code that is no near miss.
     - `zero_area`: rows and records of land parts in cells with no land, and sea parts in cells with no sea (lakes and the like, or a
       coast the land polygons miss), in how many cells. An area under `ZERO_KM2` is none.
 
