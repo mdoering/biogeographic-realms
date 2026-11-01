@@ -253,11 +253,11 @@ FR_CELLS = [("11", "FR", "Reunion", "centre")]
 
 
 def test_a_sub_national_list_matches_on_cells_not_on_the_country_code():
-    # an overseas place carries the sovereign's code in the list (FR), while GBIF's records say RE
+    # an overseas place carries the sovereign's code in the list (FR), while GBIF's records say RE: no row of Reunion's cell says FR, so the cell decides
     r = refs([taxon("s1")], griis=[("s1", "FR", "Reunion")], admin1=FR_CELLS)
-    c = counts(row("s1", "11:land", country="RE"), row("s1", "11:sea", country="FR"), row("s1", "10:land", country="FR"), row("s1", "10:land", country="RE"))
+    c = counts(row("s1", "11:land", country="RE"), row("s1", "11:sea", country="MU"), row("s1", "10:land", country="FR"), row("s1", "10:land", country="RE"))
     out = clean(c, r, GRID)
-    assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "RE"), ("s1", "11:sea", "FR")}
+    assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "RE"), ("s1", "11:sea", "MU")}
     assert gone(out, 3, "griis") == set()
     assert set(kept(out)) == {("s1", "10:land")}  # outside the cells the list does not apply, whatever the country code says
 
@@ -278,6 +278,76 @@ def test_the_country_list_applies_to_the_rest_of_the_country_and_the_sub_nationa
     assert gone(out, 3, "griis") == {("s1", "10:land", "FR")}
     assert gone(out, 3, "griis_subnational") == {("s2", "11:land", "FR")}
     assert set(kept(out)) == {("s1", "11:land"), ("s2", "10:land")}
+
+
+def test_a_country_list_applies_to_the_rest_of_the_country_and_a_sub_national_list_to_every_cell_it_overlaps():
+    # the cells of Reunion's list are 11 (by centre) and 12 (a cell that overlaps it with its centre at sea): the country list leaves both to Reunion's list
+    # and keeps applying to the rest of France, which is 10 and 13
+    r = refs(
+        [taxon("s1"), taxon("s2")],
+        griis=[("s1", "FR", None), ("s2", "FR", "Reunion")],
+        admin1=[("11", "FR", "Reunion", "centre"), ("12", "FR", "Reunion", "overlap")],
+    )
+    c = counts(
+        row("s1", "10:land", country="FR"),
+        row("s1", "13:land", country="FR"),
+        row("s1", "11:land", country="FR"),  # in Reunion's cells, where its list rules, and it does not name s1
+        row("s1", "12:sea", country="FR"),
+        row("s2", "11:land", country="FR"),
+        row("s2", "12:sea", country="FR"),
+        row("s2", "10:land", country="FR"),  # the country's list does not name s2
+    )
+    out = clean(c, r, GRID)
+    assert gone(out, 3, "griis") == {("s1", "10:land", "FR"), ("s1", "13:land", "FR")}
+    assert gone(out, 3, "griis_subnational") == {("s2", "11:land", "FR"), ("s2", "12:sea", "FR")}
+    assert set(kept(out)) == {("s1", "11:land"), ("s1", "12:sea"), ("s2", "10:land")}
+
+
+US_CELLS = [("11", "US", "United", "overlap"), ("12", "US", "United", "overlap")]
+
+
+def test_subnational_list_spares_the_neighbour_country_in_a_border_cell():
+    # GBIF uses `US`, so only US rows count. A CA row in a cell that overlaps a US state is Canada's, and Canada's lists are not this one
+    r = refs([taxon("s1")], griis=[("s1", "US", "United")], admin1=US_CELLS)
+    c = counts(
+        row("s1", "11:land", country="US"),
+        row("s1", "11:sea", country="US"),
+        row("s1", "11:land", country="CA"),
+        row("s1", "12:sea", country="CA"),
+        row("s1", "10:land", country="US"),  # a US row outside the list's cells
+    )
+    out = clean(c, r, GRID)
+    assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "US"), ("s1", "11:sea", "US")}
+    assert kept(out) == {("s1", "10:land"): 10, ("s1", "11:land"): 10, ("s1", "12:sea"): 10}
+
+
+def test_subnational_list_with_a_code_gbif_does_not_use_matches_on_cells_alone():
+    # the Canary Islands are `IC` in GRIIS and `ES` in GBIF, whose records never carry IC: the cells alone decide, whatever the row's code
+    r = refs([taxon("s1")], griis=[("s1", "IC", "Tenerife")], admin1=[("11", "IC", "Tenerife", "overlap")])
+    c = counts(row("s1", "11:land", country="ES"), row("s1", "11:sea", country=None), row("s1", "10:land", country="ES"))
+    out = clean(c, r, GRID)
+    assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "ES"), ("s1", "11:sea", None)}
+    assert set(kept(out)) == {("s1", "10:land")}
+    # once a row does carry the code, GBIF uses it and the cells no longer decide alone: only IC rows count
+    c = counts(row("s1", "11:land", country="IC"), row("s1", "11:land", country="ES"))
+    assert gone(clean(c, r, GRID), 3, "griis_subnational") == {("s1", "11:land", "IC")}
+
+
+def test_gbif_uses_the_code_of_a_list_where_it_occurs_in_the_cells_of_that_list():
+    # `FR` occurs elsewhere in the counts, and in the cell of Reunion's list too, so there only FR rows count and the cell does not decide alone
+    r = refs([taxon("s1")], griis=[("s1", "FR", "Reunion")], admin1=FR_CELLS)
+    c = counts(row("s1", "11:land", country="RE"), row("s1", "11:sea", country="FR"), row("s1", "10:land", country="FR"))
+    assert gone(clean(c, r, GRID), 3, "griis_subnational") == {("s1", "11:sea", "FR")}
+    # with no FR row in that cell it is the cell that decides, however many FR rows there are elsewhere
+    c = counts(row("s1", "11:land", country="RE"), row("s1", "10:land", country="FR"), row("s1", "13:land", country="FR"))
+    assert gone(clean(c, r, GRID), 3, "griis_subnational") == {("s1", "11:land", "RE")}
+
+
+def test_the_code_gbif_uses_is_read_from_the_counts_and_not_from_what_is_left_of_them():
+    # the only IC row has no clean record: layer 1 takes it out before layer 3, but GBIF did use the code
+    r = refs([taxon("s1")], griis=[("s1", "IC", "Tenerife")], admin1=[("11", "IC", "Tenerife", "overlap")])
+    c = counts(row("s1", "11:land", country="IC", n=3, n_human_text=3), row("s1", "11:land", country="ES"))
+    assert gone(clean(c, r, GRID), 3, "griis_subnational") == set()
 
 
 def test_a_list_with_no_distributions_is_applied_only_where_asked():

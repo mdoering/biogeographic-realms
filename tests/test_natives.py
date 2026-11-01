@@ -572,13 +572,24 @@ def test_united_is_the_conterminous_united_states(tmp_path):
     assert len(places) == 1 and places.geometry.iloc[0].bounds[0] == -105  # Texas alone; Alaska and Hawaii are out
 
 
-def test_cells_belong_to_a_subdivision_by_their_centre(tmp_path):
-    # Texas stands for the conterminous states in this fixture; the second cell overlaps it but has its centre outside
+def test_subnational_list_covers_cells_overlapping_its_subdivision(tmp_path):
+    # Hawaii is the box (-160, 19)-(-155, 22). `inside` has its centre in it, `coast` has its centre at sea but reaches 0.5 degrees into it,
+    # `touching` shares the edge x = -155 and nothing more, and `far` is elsewhere
+    squares = [("inside", -157.5, 20.5, 1.0), ("coast", -153.0, 20.5, 2.5), ("touching", -154.0, 20.5, 1.0), ("far", -100.0, 20.0, 1.0)]
+    grid = make_grid(squares, {c: 1.0 for c, *_ in squares})
+    small = [("Hawaii", "US", None, box(-160, 19, -155, 22))]
+    cells = admin1_cells(grid, write_admin1(tmp_path / "a.geojson", small), [("US", "Hawaii")], write_cells(tmp_path / "g.gpkg", squares))
+    assert cells.columns == ["cell", "country", "subdivision", "via"]
+    # `via` says how the cell came by it: by its centre, or by overlapping only
+    assert cells.rows() == [("coast", "US", "Hawaii", "overlap"), ("inside", "US", "Hawaii", "centre")]
+
+
+def test_united_has_the_cells_that_overlap_the_conterminous_states(tmp_path):
+    # Texas stands for the conterminous states in this fixture; `edge` overlaps it with its centre outside
     squares = [("in", -100.0, 30.0, 1.0), ("edge", -93.0, 30.0, 2.0), ("out", -80.0, 30.0, 1.0)]
     grid = make_grid(squares, {"in": 1.0, "edge": 1.0, "out": 1.0})
     cells = admin1_cells(grid, write_admin1(tmp_path / "a.geojson", ADMIN1), [("US", "United")], write_cells(tmp_path / "g.gpkg", squares))
-    assert cells.columns == ["cell", "country", "subdivision", "via"]
-    assert cells.rows() == [("in", "US", "United", "centre")]
+    assert cells.rows() == [("edge", "US", "United", "overlap"), ("in", "US", "United", "centre")]
 
 
 def test_an_island_no_centre_falls_on_gets_the_cells_that_overlap_it(tmp_path):

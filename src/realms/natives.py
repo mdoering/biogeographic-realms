@@ -486,30 +486,32 @@ def admin1_places(admin1: Path, subdivisions: Iterable[tuple[str, str]]) -> gpd.
 def admin1_cells(grid: Grid, admin1: Path, subdivisions: Iterable[tuple[str, str]], gpkg: Path | None = None) -> pl.DataFrame:
     """`cell`, `country`, `subdivision` and `via`: the cells that belong to a sub-national GRIIS list's admin-1 polygons.
 
-    A cell belongs by its centre (`via` is `centre`). The cells are big (7,292 at resolution 6) and some subdivisions are small
-    islands that no centre falls on, so for those the cells whose polygon overlaps the subdivision stand in (`via` is `overlap`).
+    A cell belongs to a subdivision when its polygon overlaps the subdivision's with some area, so coastal and border cells count, and
+    one whose centre is at sea. The cells are big (7,292 at resolution 6) and the places small, and by centre alone a coastal cell, a
+    border cell or an island fell out (the starling's US presences by the sea were left alone). `via` is `centre` where the cell's centre
+    is in the polygon and `overlap` where the overlap alone puts it there. A cell can belong to several subdivisions, and a country's border
+    cell to a subdivision and to a neighbour's country, which `clean` tells apart by the country code of the rows.
     A subdivision Natural Earth has no polygon for has no rows, and the caller finds those by comparing with `subdivisions`.
     `gpkg` is the grid's file, as for `tdwg3_parts`.
     """
     places = admin1_places(admin1, subdivisions)
+    if places.empty:
+        return pl.DataFrame(schema=ADMIN1_SCHEMA)
     centres = gpd.GeoDataFrame({"cell": grid.cells["cell"].to_list()}, geometry=gpd.points_from_xy(grid.cells["lon"], grid.cells["lat"]), crs=places.crs)
     inside = gpd.sjoin(centres, places, predicate="within")
     by_centre = pl.DataFrame(
         {"cell": inside["cell"].to_list(), "country": inside["country"].to_list(), "subdivision": inside["subdivision"].to_list(), "via": ["centre"] * len(inside)},
         schema=ADMIN1_SCHEMA,
     ).unique()
-    placed = set(zip(by_centre["country"], by_centre["subdivision"], strict=True))
-    empty = places[[(c, s) not in placed for c, s in zip(places["country"], places["subdivision"], strict=True)]]
-    if empty.empty:
-        return by_centre.sort("country", "subdivision", "cell")
     polygons = _cell_shapes(grid, _gpkg(grid, gpkg))
-    i, j = _overlaps(polygons, shapely.make_valid(empty.geometry.to_numpy()))
+    i, j = _overlaps(polygons, shapely.make_valid(places.geometry.to_numpy()))
     cells = grid.cells["cell"].to_numpy()
     by_overlap = pl.DataFrame(
-        {"cell": cells[i], "country": empty["country"].to_numpy()[j], "subdivision": empty["subdivision"].to_numpy()[j], "via": ["overlap"] * len(i)},
+        {"cell": cells[i], "country": places["country"].to_numpy()[j], "subdivision": places["subdivision"].to_numpy()[j], "via": ["overlap"] * len(i)},
         schema=ADMIN1_SCHEMA,
     ).unique()
-    return pl.concat([by_centre, by_overlap]).sort("country", "subdivision", "cell")
+    key = ["cell", "country", "subdivision"]
+    return pl.concat([by_centre, by_overlap]).unique(key, keep="first", maintain_order=True).sort("country", "subdivision", "cell")
 
 
 def gbif_fallback(

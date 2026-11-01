@@ -331,8 +331,9 @@ def _wcvp(rows: pl.DataFrame, refs: References, mode: str) -> pl.DataFrame:
     return rows.join(outside.select("species_id", "part"), on=["species_id", "part"], how="semi")
 
 
-def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings) -> None:
-    """Layer 3, and `run.unplaced`: the pairs it could not place."""
+def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings, seen: pl.DataFrame) -> None:
+    """Layer 3, and `run.unplaced`: the pairs it could not place. `seen` are the `countrycode` and `cell` of every row of the counts, which says
+    where GBIF uses a country code."""
     off = settings.rules_off
     run.unplaced = _unplaced(run.rows, refs, settings)
     places = meta.select("part", "cell", "kind")
@@ -348,14 +349,30 @@ def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings
         hit = located().join(country, on=["species_id", "countrycode"], how="semi").join(covered, on=["cell", "countrycode"], how="anti")
         run.drop(hit, "griis")
     if "griis_subnational" not in off:
-        # by the cell alone: an overseas place carries the sovereign's country code in its list and GBIF's own in its records
+        # a sub-national list is for the rows in the cells that overlap its subdivision, and the cells are bigger than the places, so a border cell holds
+        # a neighbour country's rows too. Where GBIF uses the list's country code in those cells only the rows with that code count, so a CA row in a cell
+        # that overlaps a US state is spared. Where it does not, the cells alone decide: the Canary Islands are `IC` in the list and `ES` in GBIF, and an
+        # overseas place carries the sovereign's code in its list (`FR`) and its own in the records (`RE`, `GP`).
+        cells = refs.admin1_cells.select("cell", "country", "subdivision")
+        uses_code = (
+            cells.join(seen.rename({"countrycode": "country"}), on=["cell", "country"])
+            .select("country", "subdivision")
+            .unique()
+            .with_columns(pl.lit(True).alias("by_code"))
+        )
         listed = (
             griis.filter(pl.col("subdivision").is_not_null())
-            .join(refs.admin1_cells.select("cell", "country", "subdivision"), on=["country", "subdivision"])
-            .select("species_id", "cell")
-            .unique()
+            .join(cells, on=["country", "subdivision"])
+            .join(uses_code, on=["country", "subdivision"], how="left")
+            .with_columns(pl.col("by_code").fill_null(False))
         )
-        run.drop(located().join(listed, on=["species_id", "cell"], how="semi"), "griis_subnational")
+        by_code = listed.filter(pl.col("by_code")).select("species_id", "cell", pl.col("country").alias("countrycode")).unique()
+        by_cell = listed.filter(~pl.col("by_code")).select("species_id", "cell").unique()
+        rows = located()
+        hit = pl.concat(
+            [rows.join(by_code, on=["species_id", "cell", "countrycode"], how="semi"), rows.join(by_cell, on=["species_id", "cell"], how="semi")]
+        ).unique(KEY, maintain_order=True)
+        run.drop(hit, "griis_subnational")
     if "wrims" not in off:
         introduced = refs.wrims.filter(pl.col("country").is_not_null()).select("species_id", pl.col("country").alias("countrycode")).unique()
         run.drop(located().filter(pl.col("kind") == "sea").join(introduced, on=["species_id", "countrycode"], how="semi"), "wrims")
@@ -491,9 +508,11 @@ def clean(
     - `introduced`: a plant loses the parts touching an introduced region and no native one (`wcvp_introduced`).
     - `off`: WCVP removes nothing, and GRIIS and WRiMS still apply.
 
-    A country's GRIIS list applies to rows by `countrycode`, except in the cells of its sub-national lists, which apply by cell whatever
-    the code (`griis_subnational`). Which GRIIS entries apply is `Settings.griis_without_status` and what the lists say (`References.griis`).
-    WRiMS applies to sea parts, by `countrycode` (`wrims`). What `refs` could not place is not applied,
+    A country's GRIIS list applies to rows by `countrycode`, except in the cells of its sub-national lists (`griis`). A sub-national list applies to the
+    rows in the cells that overlap its subdivision (`griis_subnational`), and where GBIF uses the list's country code in those cells, to the rows with that
+    code only, so that a neighbour country's row in a border cell stays. Where the code does not occur among the rows of the cells, as for `IC` (the
+    Canary Islands, `ES` in GBIF) or `FR` for Reunion (`RE`), the cells alone decide. Which GRIIS entries apply is `Settings.griis_without_status`
+    and what the lists say (`References.griis`). WRiMS applies to sea parts, by `countrycode` (`wrims`). What `refs` could not place is not applied,
     and is listed in `Cleaned.unplaced`.
 
     Layer 4 folds a land species' row on a sea part, and a sea species' on a land part, into the other part of its cell if that has
@@ -526,7 +545,9 @@ def clean(
     if 2 in layers:
         _layer_2(run, refs, settings)
     if 3 in layers:
-        _layer_3(run, refs, meta, settings)
+        # which country codes GBIF uses in which cells is read from the counts as they came, before layer 1 takes rows out
+        seen = counts.select("countrycode", cell_of(pl.col("part")).alias("cell")).drop_nulls("countrycode").unique()
+        _layer_3(run, refs, meta, settings, seen)
     if 4 in layers:
         _layer_4(run, refs, grid, meta, settings)
     if 5 in layers:
