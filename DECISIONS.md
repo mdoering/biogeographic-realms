@@ -422,8 +422,8 @@ unless the three pass marks hold. Run it as `uv run python -I`, since it reads a
 
 `scripts/pilot.py --counts data/gbif/0019721-261023074918325 --workers 12` ran the pipeline once on half A at resolution 6, from 20:49 to 21:48
 (59 min), and wrote `results/pilot/res6/measure.json` and `pilot.log` (git-ignored). `--project-only` makes the projection again from a saved
-`measure.json`. Nothing of half B is loaded, printed or written: `load_presence(..., "A")` with no `unsealed`, so the call-site list above is still
-empty, and the module summaries below are of half A's parts.
+`measure.json`. Nothing of half B is loaded, printed or written: `load_presence(..., "A")` with no `unsealed`, so the pilot adds no call site to the list above
+(which was empty then and has one entry since, the scoring of half B, not yet run), and the module summaries below are of half A's parts.
 
 **Data.** 638,157 of half A's 1,264,661 species have a clean record (`n > 0`) in 8,945,552 (species, part) rows, over 9,556 parts (3,066 land and
 6,490 sea) with 28,843 pairs of adjacent parts, two of them with no neighbour. The matrix has 727,680 taxa (638,157 species, 82,306 genera, 7,217
@@ -748,7 +748,8 @@ Task 12, which added it (see "Layer 5" below). All thresholds are starting value
 took with it. A row that loses some records and keeps others is not in `removed`: `n_raw - records` in `presence` is what it lost.
 **The unit of `removed.records` is therefore `n_raw` for layer 1 and the row's `records` for every other layer** (the clean records `n - n_human_text`, or `n_raw` with
 layer 1 off), so it must not be summed across layer 1 and the rest. From layer 2 on records are conserved: `presence.records` plus the `records` of the removals
-of layers 2 to 4 (a null `to_part`) are the input's `n - n_human_text`, which `test_records_are_conserved` states for every WCVP mode and `side_conflict`, with layer 1 on and off. The other counts
+of layers 2 to 4 (a null `to_part`; layers 2 to 5 since layer 5 exists) are the input's `n - n_human_text` with layer 1 on, **and its `n_raw` with layer 1 off** (the first version of this
+sentence gave `n - n_human_text` for both), which `test_records_are_conserved` states for every WCVP mode and `side_conflict`, with layer 1 on and off. The other counts
 (datasets, years, licence and source counts) are kept as the download has them, with the distinct ones taking the maximum over rows, as `load_presence` does.
 
 **Zero-area parts: layer 0, rule `zero_area_part`.** Records in a part with an area below `ZERO_KM2` fold into the other part of the same cell, first of
@@ -789,7 +790,10 @@ Rulings that go with them, which Markus can revert in `_wcvp`:
 country's sub-national lists**, which apply there by cell (`admin1_cells`), whatever the row's country code, rule `griis_subnational`. So the
 country's list applies to the rest of the country, as the brief says, and a species on the conterminous United States' list is not removed from
 Hawaii's cells, where Hawaii's list rules. Overseas lists carry the sovereign's code (`FR-Reunion`) while GBIF's records say `RE`, which is why they match on
-cells and never on `countrycode`. Both rules apply to land and sea parts. The separate name `griis_subnational` is so that the sub-national lists' effect
+cells and never on `countrycode`. Both rules apply to land and sea parts. **Superseded by Task 11a** ("Sub-national GRIIS lists on the cells they overlap", below): a
+sub-national list now applies to the rows in every cell that overlaps its subdivision, and **where GBIF uses the list's country code in those cells, only to the rows with
+that code**; the cells alone decide only where the code does not occur there (the overseas lists of `FR`). "Whatever the row's country code" and "never on `countrycode`"
+describe the first version. The separate name `griis_subnational` is so that the sub-national lists' effect
 can be told from the country lists'.
 
 **What Task 10 could not place is never applied** (`griis_no_cells`, `wrims_no_country`) and is listed in `Cleaned.unplaced` with the records of each
@@ -1052,6 +1056,7 @@ repeated at resolution 7 (`--resolution 7 --score-half-b`), and nothing below is
 layers 1, 2 and 4 on the plants 3 s, and layer 5 at 81 settings 191 s (2.4 s a setting, with both readings), against the 30 minutes allowed. At resolution 7 the patch search grows about 5 times (see layer 5), so the 81 settings may take around 15 minutes (an estimate, not a measurement).
 
 **The plants:** 2,557,367 presences after layers 1, 2 and 4, 2,334,103 with a status: 1,808,902 native and 525,201 outside (22.5%). The raw presences (`n_raw` above 0) with a status are 1,820,925 native and 565,525 outside.
+(Since `native_status` counts kingdom Plantae only, after the final review, 2 native presences fewer in each: 2,334,101, 1,808,900 and 1,820,923. Nothing else of this section moves; see "Smaller fixes after the final review" below.)
 
 **The 81 settings, by the whole run counting drops only.** Outside presences removed run from 21.8% to 31.8% and native presences lost from 3.1% to 6.2%. **54 of 81 settings lose at most 5%** (by layer 5 alone, 79 do). The 27 that do not are exactly those with a rate factor of 2%.
 **The chosen setting is 75:** record share 2%, cell share 10%, rate factor 1%, group minimum 300. The top 10 within the limit (the last column is layer 5's reading of the same setting):
@@ -1411,3 +1416,35 @@ From the final review of the branch, which found no breach of the seal. The plan
   the dry run loads half A only; the scoring loads half B's calibration species once, unsealed, and nothing of half A, runs no known case, grid, region or cross-check, leaves the dry run's files as they were,
   and writes both markers and `held_out.json` with `N` and whether it is the dry run's choice; it refuses without a finished dry run at 7 on the same ingest (missing, no `chosen`, another resolution or half,
   another zip), a setting outside the 81, a missing `--setting`, `--setting` without the flag, any resolution but 7, a marker of either kind (the fixed one alone too), and a retry after a load that failed.
+
+### Smaller fixes after the final review (2026-11-01)
+
+- **`native_status` counts kingdom Plantae only** (M5), as layer 3's WCVP rule does (`clean._wcvp`): a species is a plant of the calibration where COL puts it in Plantae and WCVP gives it a native region.
+  Before, a species WCVP lists and COL puts in no kingdom (3 such WCVP natives in half A, 2 in half B) got a status that layer 3 would never act on. `evaluate_case` takes `taxa` for `native_only`.
+  **At resolution 6 on half A, 2 native presences fewer** (after layers 1, 2 and 4, 1,808,900; raw, 1,820,923; with a status 2,334,101), and nothing else moves: the same counts of outside presences removed
+  and native presences lost for all 81 settings, the same 54 within the limit, the same chosen setting (75), the same top 10, and the shares differ by less than 1e-7. `scripts/calibrate.py --resolution 6`
+  run again (279 s, 16.7 GB). Tested: a WCVP plant with no kingdom or another one gets no status, and the outside presences are exactly what layer 3 takes. `calibration_species`, the set that is loaded, is
+  unchanged (the two of half B are in it as members of a plant group).
+- **`run_infomap` finds the cells with links by `np.bincount`** (T3) instead of a Python set of the link's cell indices (89M links at resolution 7: about 1.3 s and a 3 GB list a worker, against 0.05 s, as Task 3's review measured). Tested against the reference copy, with
+  an unlinked cell and with no link at all. **The Costello gate prints nothing:** `uv run python scripts/costello_selection.py --workers 8 | tee results/costello/selection.log`, then `diff` of `selection.csv`
+  and of `selection.log` without its time and memory stamps against `results/costello/before/`.
+- **Stale text** (M3): the pilot's sentence on the call-site list (it had none then, and has one now); the first ruling on sub-national lists (whatever the row's country code, never on `countrycode`), marked as
+  superseded by Task 11a; the conserved total with layer 1 off, which is `n_raw` (here and in `Cleaned`); the comment on `held` in layer 4, which excludes the same-cell folds; `"all"` among the halves that
+  `_select` returns only unsealed; and the `scan_counts` docstring, which said to look at it only in global numbers while `_select` reads it per species.
+- **`docs/design.md` describes the one load of half B exactly** (T13): not "B's plants" but B's calibration species, the WCVP plants and the other species of their taxonomic groups, 197,567 species of
+  which 2,586 are not Plantae, read only through `--score-half-b` at resolution 7. The spec is edited to say what the code does, which the review of Task 13 ruled (the group mates stay in, so that the score
+  is like for like with A's); no method changes.
+
+### Open points for Markus, before M2 (2026-11-01)
+
+From the final review, recorded and not changed in code.
+
+- **I4: how `group_min_records` scales from half A to the headline.** `under_reported` needs a group to hold at least `group_min_records` records in a cell, and the calibration chooses it (300, 1,000 or 3,000) on
+  half A's group totals, which are about half of what the headline run on all species has in the same cell. A threshold chosen on A means about twice as much on all species: kept as a number, it lets
+  under-sampled cells of the headline count as sampled where A's would not (more cells judged), and doubled, it keeps the meaning it had on A. At resolution 6 the calibration hardly depends on it (300,
+  1,000 and 3,000 take 26.7%, 26.7% and 26.6% of the outside presences), but the headline and half B's confirmation should say which reading they take. To decide: a number of records, or a share of
+  the group's records (which scales by itself).
+- **M1: freeze the per-list "GBIF uses the code" decision.** `griis_subnational` applies a sub-national list by country code where the code occurs among the rows of the list's cells, and by the cells
+  alone where it does not, and that is read from whatever counts `clean` is given (half A now; all species in the headline; half B's calibration species in the scoring). A list can change sides between
+  runs (a code that occurs in a cell only through a species of the other half), and so can what it takes. Before M2 the decision should be made once, from all of the download's rows (global numbers, which
+  QA already reads) or from A, written down per list, and passed to `clean` rather than read from its input.

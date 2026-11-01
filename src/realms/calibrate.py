@@ -49,7 +49,7 @@ import polars as pl
 from realms.clean import RULES, SWITCHABLE, Settings, clean, outlier_rows
 from realms.clean_report import GRIIS_RULES
 from realms.grid import Grid, cell_of
-from realms.natives import References, match_names
+from realms.natives import WCVP_KINGDOM, References, match_names
 
 log = logging.getLogger(__name__)
 
@@ -81,15 +81,17 @@ REGION_SCHEMA = {"tdwg3": pl.String, "name": pl.String, "level2": pl.Int64, "lev
 
 # ---- native and outside presences
 
-def native_status(presence: pl.DataFrame, wcvp: pl.DataFrame, tdwg3_parts: pl.DataFrame) -> pl.DataFrame:
+def native_status(presence: pl.DataFrame, wcvp: pl.DataFrame, tdwg3_parts: pl.DataFrame, taxa: pl.DataFrame) -> pl.DataFrame:
     """`species_id`, `part` and `status` (`native` or `outside`) of the plant presences in `presence`, a table with `species_id` and `part`.
 
-    A plant is a species with at least one native row in `wcvp` (`species_id`, `tdwg3`, `native`). Its presence on a land part is `native` when the
-    part touches a native region of the species, as `tdwg3_parts` (`part`, `tdwg3`) has it, and `outside` when it touches none: a region where WCVP
-    lists the species as introduced, or does not list it, is not native. A part touching a native and an introduced region is native, as layer 3
-    softens it. Presences with no status are left out: other species, sea parts and land parts with no region. Each (species, part) is counted once.
+    A plant is a species of kingdom Plantae in `taxa` (`species_id`, `kingdom`), as layer 3's WCVP rule has it, with at least one native row in `wcvp`
+    (`species_id`, `tdwg3`, `native`). Its presence on a land part is `native` when the part touches a native region of the species, as `tdwg3_parts`
+    (`part`, `tdwg3`) has it, and `outside` when it touches none: a region where WCVP lists the species as introduced, or does not list it, is not native.
+    A part touching a native and an introduced region is native, as layer 3 softens it. Presences with no status are left out: other species (a species
+    WCVP lists that COL puts in no kingdom or another one included), sea parts and land parts with no region. Each (species, part) is counted once.
     """
-    native = wcvp.filter(pl.col("native")).select("species_id", "tdwg3").unique()
+    plants = taxa.filter(pl.col("kingdom") == WCVP_KINGDOM).select("species_id").unique()
+    native = wcvp.filter(pl.col("native")).join(plants, on="species_id", how="semi").select("species_id", "tdwg3").unique()
     region = tdwg3_parts.drop_nulls("tdwg3").select("part", "tdwg3")
     pairs = (
         presence.select("species_id", "part")
@@ -221,8 +223,8 @@ def baseline(counts: pl.DataFrame, refs: References, grid: Grid, settings: Setti
     return Baseline(
         settings,
         cleaned.presence,
-        native_status(cleaned.presence, refs.wcvp, refs.tdwg3_parts),
-        native_status(raw, refs.wcvp, refs.tdwg3_parts),
+        native_status(cleaned.presence, refs.wcvp, refs.tdwg3_parts, refs.taxa),
+        native_status(raw, refs.wcvp, refs.tdwg3_parts, refs.taxa),
         absent,
         moved,
     )
@@ -502,11 +504,12 @@ def evaluate_case(
     wcvp: pl.DataFrame | None = None,
     tdwg3_parts: pl.DataFrame | None = None,
     regions: pl.DataFrame | None = None,
+    taxa: pl.DataFrame | None = None,
 ) -> dict:
     """Check a case against the presences of its `species` before cleaning (`before`) and after it (`after`), tables with `species_id` and `part`.
 
     `removed` is `Cleaned.removed`, for what took the presences in the area (outside it for `only_in`, anywhere for `native_only`). `cells` are the area's
-    cells (`area_cells`), and `wcvp` and `tdwg3_parts` are needed for `native_only`. The result has `case`, `claim`, `kind`, `criterion`, `species`, the
+    cells (`area_cells`), and `wcvp`, `tdwg3_parts` and `taxa` are needed for `native_only` (`native_status`). The result has `case`, `claim`, `kind`, `criterion`, `species`, the
     presences before and after in all and in the area or outside it or native and outside, `removed_by_rule` and `passed`. With `tdwg3_parts` and `regions`
     it also has `leftover_regions`, where the presences that break an `absent`, `only_in` or `native_only` case are (see `_where`), empty if none do.
     """
@@ -533,9 +536,9 @@ def evaluate_case(
     in_area = pl.col("cell").is_in(area)
     in_area_part = cell_of(pl.col("part")).is_in(area)
     if case.kind == "native_only":
-        if wcvp is None or tdwg3_parts is None:
-            raise ValueError("native_only needs wcvp and tdwg3_parts")
-        s_before, s_after = (native_status(frame, wcvp, tdwg3_parts)["status"].value_counts() for frame in (b, a))
+        if wcvp is None or tdwg3_parts is None or taxa is None:
+            raise ValueError("native_only needs wcvp, tdwg3_parts and taxa")
+        s_before, s_after = (native_status(frame, wcvp, tdwg3_parts, taxa)["status"].value_counts() for frame in (b, a))
         n_b, n_a = (dict(v.iter_rows()) for v in (s_before, s_after))
         out |= {
             "native_before": n_b.get("native", 0),
@@ -545,7 +548,7 @@ def evaluate_case(
         }
         out["passed"] = out["outside_after"] == 0 and out["native_after"] > 0
         zone = None
-        offenders = native_status(a, wcvp, tdwg3_parts).filter(pl.col("status") == "outside")
+        offenders = native_status(a, wcvp, tdwg3_parts, taxa).filter(pl.col("status") == "outside")
     else:
         out |= {"area_before": inside(b), "area_after": inside(a)}
         if case.kind == "absent":
@@ -590,6 +593,6 @@ def known_cases(cases: Collection[Case], index: pl.DataFrame, split: pl.DataFram
             continue
         cells = area_cells(refs.tdwg3_parts, regions, case.area) if case.area else set()
         before = counts.filter(pl.col("species_id").is_in(species), pl.col("n_raw") > 0).select("species_id", "part")
-        done = evaluate_case(case, species, before, cleaned.presence, cleaned.removed, cells, refs.wcvp, refs.tdwg3_parts, regions)
+        done = evaluate_case(case, species, before, cleaned.presence, cleaned.removed, cells, refs.wcvp, refs.tdwg3_parts, regions, refs.taxa)
         results.append({**head, "status": "run", **{k: v for k, v in done.items() if k not in head}})
     return results

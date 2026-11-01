@@ -146,11 +146,12 @@ class Cleaned:
     `presence`: `species_id`, `part`, the counts, and `records`, summed over countries.
     `removed`: one row per row of the country counts that a layer took out or moved: `layer` (0 for the zero-area fold, from `RULES`), `rule`,
     `species_id`, `part` (where the row was), `countrycode`, `records`, `to_part` (where a fold put it, null for a removal) and
-    `presence_lost`, whether the species had nothing left at that part afterwards.
+    `presence_lost`, whether the species had nothing left at that part right after the row was taken (a later fold of layer 4 can bring another
+    country's records there, which layer 3 does not take).
     **The unit of `removed.records` differs by layer:** it is `n_raw` for layer 1 (everything the emptied row held, flagged records
     included) and the row's `records` for every other layer, which is the clean records `n - n_human_text`, or `n_raw` where layer 1 is
     off. So do not sum it across layer 1 and the rest. Count is conserved from layer 2 on: `presence.records` plus the `records` of the
-    removals of layers 2 to 5 (those with a null `to_part`) are the input's `n - n_human_text`.
+    removals of layers 2 to 5 (those with a null `to_part`) are the input's `n - n_human_text` with layer 1 on, and its `n_raw` with layer 1 off.
     `unplaced`: the pairs Task 10 could not place on the grid, for the species that have records: `rule` (the one that would
     have applied them), `species_id`, `country`, `place` (the subdivision or the marine area) and the species' `records`.
     `sides`: how layer 4 sorted the species (`species`, `land`, `sea`, `exempt`, `conflict`, and the two kinds of conflict), empty if
@@ -469,7 +470,7 @@ def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settin
     far = wrong.filter(~pl.col("other_has_area")).select("species_id", "part", "cell", pl.col("other_kind").alias("right_kind"))
 
     # no such part in the cell: the right-side part of the neighbouring cell that holds most of the species' records, the lowest id on a tie.
-    # `held` is what the species has there before this pass moves anything, the same-cell folds of `same` included.
+    # `held` is what the species has there before this pass moves anything: the records that the same-cell folds of `same` bring there are not in it.
     adjacent = [(cell, other) for cell, near in grid.adjacency.items() for other in near]
     neighbours = pl.DataFrame(adjacent, schema={"cell": pl.String, "neighbour": pl.String}, orient="row")
     order = sorted(grid.adjacency, key=_cell_key)

@@ -107,6 +107,11 @@ def status_table(*rows_) -> pl.DataFrame:
     return pl.DataFrame(list(rows_), schema={"species_id": pl.String, "part": pl.String, "status": pl.String}, orient="row")
 
 
+def plantae(*species) -> pl.DataFrame:
+    """`species_id` and `kingdom` of `species`, all of them Plantae."""
+    return pl.DataFrame({"species_id": list(species), "kingdom": ["Plantae"] * len(species)})
+
+
 def pairs(*rows_) -> pl.DataFrame:
     return pl.DataFrame(list(rows_), schema={"species_id": pl.String, "part": pl.String}, orient="row")
 
@@ -176,7 +181,7 @@ def test_native_status_calls_a_part_native_when_it_touches_a_native_region_and_o
         orient="row",
     )
     present = pairs(*[(s, p) for s in ("s1", "s2", "s3", "s4") for p in ("1:land", "2:land", "3:land", "4:land", "5:sea", "6:land")])
-    out = native_status(present, wcvp, parts_)
+    out = native_status(present, wcvp, parts_, plantae("s1", "s2", "s3", "s4"))
     assert out.columns == ["species_id", "part", "status"]
     got = {(s, p): v for s, p, v in out.iter_rows()}
     assert got == {
@@ -198,16 +203,28 @@ def test_native_status_counts_a_presence_once_and_takes_a_table_with_counts():
     wcvp = pl.DataFrame([("s1", "R1", True)], schema={"species_id": pl.String, "tdwg3": pl.String, "native": pl.Boolean}, orient="row")
     parts_ = pl.DataFrame([("1:land", "R1")], schema={"part": pl.String, "tdwg3": pl.String}, orient="row")
     present = counts(row("s1", "1:land", "AA"), row("s1", "1:land", "BB"))  # a row per country
-    assert native_status(present, wcvp, parts_).height == 1
-    assert native_status(present.head(0), wcvp, parts_).columns == ["species_id", "part", "status"]
+    assert native_status(present, wcvp, parts_, plantae("s1")).height == 1
+    assert native_status(present.head(0), wcvp, parts_, plantae("s1")).columns == ["species_id", "part", "status"]
 
 
 def test_native_status_agrees_with_layer_3_in_native_only_mode():
     out = clean(COUNTS, REFS, WORLD, frozenset({3}), Settings(wcvp_mode="native_only"))
     taken = {(s, p) for s, p in out.removed.filter(pl.col("rule") == "wcvp_outside_native").select("species_id", "part").iter_rows()}
-    status = native_status(COUNTS, REFS.wcvp, REFS.tdwg3_parts)
+    status = native_status(COUNTS, REFS.wcvp, REFS.tdwg3_parts, REFS.taxa)
     assert taken == {(s, p) for s, p, v in status.iter_rows() if v == "outside"}
     assert taken == {("p1", "100:land"), ("p3", "102:land"), ("p4", "103:land")}
+
+
+def test_native_status_counts_plants_only_as_layer_3_does():
+    """WCVP lists species that COL puts in no kingdom or another one (5 of the WCVP natives of the release have none). Layer 3 leaves them alone, and so
+    `native_status` gives them no status: what the calibration counts as outside is what layer 3 would take."""
+    stray = [taxon(s, kingdom, "Magnoliopsida") for s, kingdom in (("p1", None), ("p3", "Fungi"))]
+    r = replace(REFS, taxa=pl.DataFrame([t for t in TAXA if t["species_id"] not in ("p1", "p3")] + stray, schema=REFS.taxa.schema))
+    out = clean(COUNTS, r, WORLD, frozenset({3}), Settings(wcvp_mode="native_only"))
+    taken = {(s, p) for s, p in out.removed.filter(pl.col("rule") == "wcvp_outside_native").select("species_id", "part").iter_rows()}
+    status = native_status(COUNTS, r.wcvp, r.tdwg3_parts, r.taxa)
+    assert taken == {(s, p) for s, p, v in status.iter_rows() if v == "outside"} == {("p4", "103:land")}
+    assert not {"p1", "p3"} & set(status["species_id"])
 
 
 # ---- rates
@@ -352,13 +369,13 @@ def reference(setting: Settings) -> dict:
     before = clean(plants, REFS, WORLD, BEFORE_5, setting)
     after = clean(plants, REFS, WORLD, LAYERS_WITHOUT_3, setting)
     removed = before.presence.join(after.presence, on=["species_id", "part"], how="anti")
-    status = native_status(before.presence, REFS.wcvp, REFS.tdwg3_parts)
+    status = native_status(before.presence, REFS.wcvp, REFS.tdwg3_parts, REFS.taxa)
     raw = plants.filter(pl.col("n_raw") > 0).select("species_id", "part").unique()
     moved = after.removed.filter(pl.col("to_part").is_not_null()).select("species_id", "part").unique()
     lost = raw.join(after.presence.select("species_id", "part"), on=["species_id", "part"], how="anti").join(moved, on=["species_id", "part"], how="anti")
     return {
         **tally(status, removed),
-        **{f"run_{k}": v for k, v in tally(native_status(raw, REFS.wcvp, REFS.tdwg3_parts), lost).items()},
+        **{f"run_{k}": v for k, v in tally(native_status(raw, REFS.wcvp, REFS.tdwg3_parts, REFS.taxa), lost).items()},
     }
 
 
@@ -699,7 +716,7 @@ def test_a_case_says_where_the_presences_that_break_it_are():
     assert out["leftover_regions"] == [{"region": "Alaska", "presences": 1}]  # only the presences in the area
     assert evaluate_case(absent, ["s"], pres("4", "9"), pres("9"), NONE, {"4"}, None, PARTS, REGIONS)["leftover_regions"] == []
     wcvp = pl.DataFrame([("s", "ICE", True)], schema={"species_id": pl.String, "tdwg3": pl.String, "native": pl.Boolean}, orient="row")
-    out = evaluate_case(case("native_only"), ["s"], pres("1", "3", "4"), pres("1", "3", "4"), NONE, set(), wcvp, PARTS, REGIONS)
+    out = evaluate_case(case("native_only"), ["s"], pres("1", "3", "4"), pres("1", "3", "4"), NONE, set(), wcvp, PARTS, REGIONS, plantae("s"))
     assert out["leftover_regions"] == [{"region": "Alaska", "presences": 1}, {"region": "Madagascar", "presences": 1}]  # the outside ones
     assert "leftover_regions" not in evaluate_case(only, ["s"], pres("3"), pres("3"), NONE, {"3"}, None, PARTS)  # no regions given
     kept = evaluate_case(case("kept", area="tdwg3:HAW"), ["s"], pres("5"), pres("5"), NONE, {"5"}, None, PARTS, REGIONS)
@@ -731,11 +748,14 @@ def test_an_endemic_has_presences_only_in_its_area_and_some_of_them():
 def test_a_species_native_only_has_no_presence_outside_its_native_regions_and_keeps_some_inside():
     wcvp = pl.DataFrame([("s", "ICE", True)], schema={"species_id": pl.String, "tdwg3": pl.String, "native": pl.Boolean}, orient="row")
     c = case("native_only")
-    ok = evaluate_case(c, ["s"], pres("1", "3", "4"), pres("1"), NONE, set(), wcvp, PARTS)
+    s = plantae("s")
+    ok = evaluate_case(c, ["s"], pres("1", "3", "4"), pres("1"), NONE, set(), wcvp, PARTS, taxa=s)
     assert (ok["native_before"], ok["outside_before"], ok["native_after"], ok["outside_after"], ok["passed"]) == (1, 2, 1, 0, True)
-    assert evaluate_case(c, ["s"], pres("1", "3"), pres("1", "3"), NONE, set(), wcvp, PARTS)["passed"] is False
-    assert evaluate_case(c, ["s"], pres("1", "3"), pres("3"), NONE, set(), wcvp, PARTS)["passed"] is False
-    assert evaluate_case(c, ["s"], pres("1", "3"), pres(), NONE, set(), wcvp, PARTS)["passed"] is False
+    assert evaluate_case(c, ["s"], pres("1", "3"), pres("1", "3"), NONE, set(), wcvp, PARTS, taxa=s)["passed"] is False
+    assert evaluate_case(c, ["s"], pres("1", "3"), pres("3"), NONE, set(), wcvp, PARTS, taxa=s)["passed"] is False
+    assert evaluate_case(c, ["s"], pres("1", "3"), pres(), NONE, set(), wcvp, PARTS, taxa=s)["passed"] is False
+    with pytest.raises(ValueError, match="taxa"):
+        evaluate_case(c, ["s"], pres("1"), pres("1"), NONE, set(), wcvp, PARTS)
 
 
 def test_a_case_with_several_species_counts_each_species_presence():
