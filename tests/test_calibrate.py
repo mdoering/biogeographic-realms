@@ -18,6 +18,7 @@ import json
 import re
 import zipfile
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import polars as pl
@@ -719,21 +720,20 @@ def run_script(script, tmp_path, monkeypatch, *args):
     script.main()
 
 
-def test_score_half_b_refuses_if_any_resolution_has_been_scored(tmp_path, monkeypatch):
+@pytest.mark.parametrize("marker, message", [("held_out.json", "already scored"), ("held_out.started", "was started")])
+def test_score_half_b_refuses_if_any_resolution_has_a_scoring_started_or_done(tmp_path, monkeypatch, marker, message):
+    """The marker is written before half B is loaded and the result after, so a run that failed in between is stopped by the marker alone."""
     script = load_script()
     for resolution in (6, 7):  # the file of any resolution stops it, and so does the one of its own
         done = tmp_path / f"res{resolution}"
         done.mkdir()
-        (done / "held_out.json").write_text("{}")
-        with pytest.raises(SystemExit, match="already scored"):
+        (done / marker).write_text("")
+        with pytest.raises(SystemExit, match=message) as stopped:
             run_script(script, tmp_path, monkeypatch, "--resolution", "7", "--score-half-b")
-        (done / "held_out.json").unlink()
+        assert "Markus" in str(stopped.value) and "no flag" in str(stopped.value)  # and it says how to go on
+        assert f"res{resolution}" in str(stopped.value)
+        (done / marker).unlink()
         done.rmdir()
-    elsewhere = tmp_path / "res6"
-    elsewhere.mkdir()
-    (elsewhere / "held_out.json").write_text("{}")
-    with pytest.raises(SystemExit, match=r"res6.held_out\.json"):
-        run_script(script, tmp_path, monkeypatch, "--resolution", "7", "--score-half-b")  # a file of resolution 6 names itself
 
 
 def test_score_half_b_refuses_any_resolution_but_7_before_it_loads_anything(tmp_path, monkeypatch):
@@ -742,6 +742,33 @@ def test_score_half_b_refuses_any_resolution_but_7_before_it_loads_anything(tmp_
         with pytest.raises(SystemExit, match="resolution 7"):
             run_script(script, tmp_path, monkeypatch, "--resolution", resolution, "--score-half-b")
     assert not list(tmp_path.iterdir())  # nothing was made
+
+
+def failing_load(tmp_path, script, monkeypatch):
+    """`score_held_out` with a loader that fails after half B is asked for, as an out-of-memory error would, and the marker it leaves."""
+    marker = tmp_path / "res7" / "held_out.started"
+    marker.parent.mkdir()
+    attempts = []
+
+    def fails(out_dir, split_, half, **kwargs):
+        attempts.append(half)
+        raise MemoryError("the load of half B failed")
+
+    monkeypatch.setattr(script, "load_country_counts", fails)
+    split = pl.DataFrame({"species_id": [*PLANTS, "heavy"], "lineage": ["f"] * 5, "half": ["B"] * 5})
+    with pytest.raises(MemoryError):
+        script.score_held_out(tmp_path / "none", split, REFS, WORLD, Settings(), marker)
+    return marker, attempts
+
+
+def test_a_run_that_fails_after_loading_half_b_leaves_a_marker_and_a_retry_is_refused(tmp_path, monkeypatch):
+    script = load_script()
+    marker, attempts = failing_load(tmp_path, script, monkeypatch)
+    assert attempts == ["B"] and marker.exists() and not (marker.parent / "held_out.json").exists()  # no result, but the marker
+    with pytest.raises(SystemExit, match="was started"):
+        run_script(script, tmp_path, monkeypatch, "--resolution", "7", "--score-half-b")
+    with pytest.raises(FileExistsError):  # and the function itself will not write over it
+        script.mark_started(marker)
 
 
 def test_the_guards_are_for_scoring_half_b_only(tmp_path, monkeypatch):
@@ -772,13 +799,18 @@ def test_score_held_out_loads_the_calibration_species_of_half_b_group_mates_incl
     ingest(tmp_path / "d.zip", out)
     split = pl.DataFrame({"species_id": [*PLANTS, "heavy", "alga", "bird", "elsewhere"], "lineage": ["f"] * 8, "half": ["B"] * 7 + ["A"]})
     calls = []
+    marker = tmp_path / "held_out.started"
 
     def spy(out_dir, split_, half, **kwargs):
+        assert marker.exists()  # written before half B is loaded
         calls.append((sorted(split_["species_id"]), half, kwargs))
         return load_country_counts(out_dir, split_, half, **kwargs)
 
     monkeypatch.setattr(script, "load_country_counts", spy)
-    got = script.score_held_out(out, split, r, WORLD, Settings())
+    got = script.score_held_out(out, split, r, WORLD, Settings(), marker)
+    lines = marker.read_text().splitlines()
+    assert [line.split()[0] for line in lines] == ["started", "commit"]  # the time, and the commit that ran it
+    assert re.fullmatch(r"[0-9a-f]{40}|unknown", lines[1].split()[1]) and datetime.fromisoformat(lines[0].split()[1])
     assert calls == [(["alga", "heavy", "p1", "p2", "p3", "p4"], "B", {"unsealed": True})]  # the alga is loaded, the bird of half B never is
     assert got == {**score(everything, Settings(), r, WORLD), "species_loaded": {"species": 6, "plantae": 5, "not_plantae": 1}}
     assert set(got) == {*SCORE, "species_loaded"}
