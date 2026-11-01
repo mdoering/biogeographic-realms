@@ -1526,3 +1526,36 @@ counted in `qa.json`), the limits at 5 km (4.9 and 5.1) and at 3 times (2.5, 2.9
 is not a place (not digits, too long, past the pole or the antimeridian, a code the grid doesn't have), a code in the grid, two cells of one centre, a row with no cell, the cap, a failed run leaving no parts, the
 merges above, the printed remaps and `read_centres`. Mutations were caught: a ratio of 2, a limit of 6 km, ignoring the hemisphere, adding the distinct counts, not removing the merged rows from their part, and
 joining with nulls unequal.
+
+### Calibration dry run and known cases on half A at resolution 7 (2026-11-01)
+
+`uv run python scripts/calibrate.py --counts data/gbif/0020744-261023074918325`, half A only, with no `--score-half-b`, so nothing of half B was loaded. It ran
+in 666 s (layer 5 at 81 settings 499 s) and peaked at 21.7 GB. The outputs are in `results/calibrate/res7/` (git-ignored). This is the run that `--score-half-b --setting N` checks
+for, and it still waits on Markus's choices below.
+
+- **Within the 5% limit** (whole run of layers 1, 2, 4 and 5, drops only, the provisional reading): 58 of the 81 settings. By layer 5 alone, all 81 are within the limit.
+- **Chosen by the rule** (the most outside presences removed within the limit): setting 7, with record share 0.5%, cell share 2%, rate factor 2% and group minimum 1,000. It removes 24.28% of the
+  outside presences (211,947 of 872,784) and loses 4.99% of the native ones (151,232 of 3,029,872). It sits at an edge of the grid again (the smallest record and cell shares, the largest rate
+  factor), so the grid doesn't bracket the optimum.
+- **The design setting** (40: 1%, 5%, 1%, 1,000): 22.73% and 3.85%. **Resolution 6's choice** (75: 2%, 10%, 1%, 300): 23.75% and 4.00%. Setting 7 buys 0.5 points more outside removal than 75 for
+  1.0 point more native loss. By layer 5's own reading the rule would take 78 (2%, 10%, 2%, 300), which loses 5.33% over the whole run.
+- **What drives it:** the rate factor of `under_reported`. Averaged over the other thresholds, 0.5%, 1% and 2% give 20.1%, 22.3% and 25.3% removed outside, against 3.0%, 3.8% and 5.1% lost
+  native. Record share, cell share and group minimum move both by under 2 points, and the group minimum by under 0.2.
+- **Native loss by region** (TDWG level 3, at least 100 native presences, chosen setting, layer 5's reading): the top is heavily sampled mainland, France 17.1%, California 14.0%, New South Wales 13.5%,
+  Spain 13.1%, Victoria 12.9%, Germany 12.0%, besides a few island groups (Marianas 16.7%, Caroline Is. 13.7%, Cape Verde 12.9%). Regions of at most 5 land parts lose 3.1% in all, larger ones 3.5%,
+  so islands don't lose more as a rule. The sampled-mainland pattern points at `under_reported` taking rare natives in well-sampled cells, which the rate factor controls.
+- **Known cases** (all five layers, `native_only`, `griis_without_status="skip"`):
+
+  | Case | Result |
+  |---|---|
+  | Potato, outside its WCVP native regions | Pass: 1,024 presences outside before, 0 after, 110 of 127 inside kept |
+  | Starling, North America | Fail: 1,045 before, 43 after |
+  | Hawaiian endemic, *Drepanis coccinea* | Pass: 11 of 11 kept (at resolution 6 one of 9 was lost) |
+  | Lemuridae, only on Madagascar | Fail: 56 outside before, 10 after |
+  | Tiger, Europe | Waits for step 9 (Felidae is in half B) |
+
+- **GRIIS cross-check, animals, chosen setting:** layer 5 takes 12.77% of the animal presences GRIIS lists as introduced (9,067 of 70,987), against 6.34% of the others (405,587 of 6,399,166). At
+  the design setting the figures are 11.29% and 5.83%.
+
+**For Markus, before `--score-half-b`:** confirm the 5% reading; choose N (the rule's 7, resolution 6's 75, or the design's 40); and decide whether to widen the grid towards smaller rate factors first.
+The scoring refuses unless this run's `report.json` exists, and it records whether N is the dry run's choice.
