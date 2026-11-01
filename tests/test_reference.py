@@ -83,6 +83,125 @@ def test_griis_excludes_protected_areas_and_others(api):
     assert [d.alias for d in griis_datasets(api.base)] == ["GRIIS-ZW"]
 
 
+REGISTER = "Global Register of Introduced and Invasive Species"
+CAYMAN = [
+    {"key": 28941, "alias": "GRIIS-KY", "title": f"{REGISTER} - Cayman Islands"},
+    {"key": 28940, "alias": "GRIIS-KY", "title": f"{REGISTER} - Cayman Brac, Cayman Islands"},
+    {"key": 28939, "alias": "GRIIS-KY-Grand", "title": f"{REGISTER} - Grand Cayman, Cayman Islands"},
+    {"key": 28938, "alias": "GRIIS-KY-Little", "title": f"{REGISTER} - Little Cayman, Cayman Islands"},
+]
+
+
+def test_griis_two_datasets_with_one_alias_are_told_apart_by_their_titles(api):
+    griis_listing(api, CAYMAN)
+    found = {d.key: d for d in griis_datasets(api.base)}
+    assert [(d.key, d.alias, d.country, d.subdivision) for d in found.values()] == [
+        (28941, "GRIIS-KY", "KY", None),
+        (28940, "GRIIS-KY-CaymanBrac", "KY", "Cayman Brac"),
+        (28939, "GRIIS-KY-Grand", "KY", "Grand"),
+        (28938, "GRIIS-KY-Little", "KY", "Little"),
+    ]
+
+
+def test_griis_the_order_of_the_listing_does_not_decide_the_country_list(api):
+    griis_listing(api, [CAYMAN[1], CAYMAN[0]])
+    assert {d.key: d.alias for d in griis_datasets(api.base)} == {28941: "GRIIS-KY", 28940: "GRIIS-KY-CaymanBrac"}
+
+
+def test_griis_a_clash_with_two_places_and_a_dash_style_that_differs(api):
+    griis_listing(
+        api,
+        [
+            {"key": 1, "alias": "GRIIS-ZZ", "title": "GRIIS Checklist of Introduced and Invasive Species \u2013 Zedland"},
+            {"key": 2, "alias": "GRIIS-ZZ", "title": "Global Register of Introduced and Invasive Species- North  Zed, Zedland"},
+            {"key": 3, "alias": "GRIIS-ZZ", "title": "Global Register of Introduced and Invasive Species -zedland, ZEDLAND"},
+        ],
+    )
+    assert [(d.key, d.alias, d.subdivision) for d in griis_datasets(api.base)] == [(1, "GRIIS-ZZ", None), (2, "GRIIS-ZZ-NorthZed", "North Zed"), (3, "GRIIS-ZZ-zedland", "zedland")]
+
+
+def test_griis_a_country_name_with_a_comma_is_still_the_country_list(api):
+    griis_listing(
+        api,
+        [
+            {"key": 1, "alias": "GRIIS-VG", "title": f"{REGISTER} - Virgin Islands, British"},
+            {"key": 2, "alias": "GRIIS-VG", "title": f"{REGISTER} - Tortola, Virgin Islands, British"},
+        ],
+    )
+    assert [(d.key, d.alias) for d in griis_datasets(api.base)] == [(1, "GRIIS-VG"), (2, "GRIIS-VG-Tortola")]
+
+
+@pytest.mark.parametrize(
+    "clashing",
+    [
+        # two country lists, neither of which is the other's place
+        [{"key": 1, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - Zedland"}, {"key": 2, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - Zedland"}],
+        # two places and no country list
+        [{"key": 1, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - North, Zedland"}, {"key": 2, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - South, Zedland"}],
+        # a place of another country
+        [{"key": 1, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - Zedland"}, {"key": 2, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - North, Otherland"}],
+        # a title that says nothing
+        [{"key": 1, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - Zedland"}, {"key": 2, "alias": "GRIIS-ZZ", "title": "GRIIS checklist"}],
+        [{"key": 1, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - Zedland"}, {"key": 2, "alias": "GRIIS-ZZ", "title": None}],
+        # two places of one name
+        [
+            {"key": 1, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - Zedland"},
+            {"key": 2, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - North Zed, Zedland"},
+            {"key": 3, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - NorthZed, Zedland"},
+        ],
+        # a place of two parts, which is no single name to put in an alias
+        [{"key": 1, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - Zedland"}, {"key": 2, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - North, East, Zedland"}],
+        # the same alias with a subdivision on two datasets
+        [{"key": 1, "alias": "GRIIS-ZZ-North", "title": f"{REGISTER} - Zedland"}, {"key": 2, "alias": "GRIIS-ZZ-North", "title": f"{REGISTER} - North, Zedland"}],
+    ],
+)
+def test_griis_a_clash_the_titles_do_not_settle_raises_naming_both(api, clashing):
+    griis_listing(api, clashing)
+    with pytest.raises(ValueError) as raised:
+        griis_datasets(api.base)
+    message = str(raised.value)
+    named = [d for d in clashing if f"{d['key']} " in message]
+    assert len(named) >= 2 and "GRIIS-ZZ" in message
+    assert all(repr(d["title"]) in message for d in named)
+
+
+def test_griis_an_alias_made_up_that_another_dataset_has_raises(api):
+    griis_listing(api, [*CAYMAN, {"key": 7, "alias": "GRIIS-KY-CaymanBrac", "title": f"{REGISTER} - Cayman Brac, Cayman Islands (second)"}])
+    with pytest.raises(ValueError, match=r"28940.*Cayman Brac, Cayman Islands'.*7.*GRIIS-KY-CaymanBrac|7.*28940.*GRIIS-KY-CaymanBrac"):
+        griis_datasets(api.base)
+
+
+def test_griis_without_a_clash_nothing_changes(api):
+    listing = [
+        {"key": 20359, "alias": "GRIIS-US-Hawaii", "title": f"{REGISTER} - Hawaii, United States"},
+        {"key": 26226, "alias": "GRIIS-EC", "title": f"{REGISTER} - Ecuador"},
+        {"key": 28939, "alias": "GRIIS-KY-Grand", "title": f"{REGISTER} - Grand Cayman, Cayman Islands"},
+        {"key": 28938, "alias": "GRIIS-KY-Little", "title": f"{REGISTER} - Little Cayman, Cayman Islands"},
+        {"key": 28941, "alias": "GRIIS-KY", "title": f"{REGISTER} - Cayman Islands"},
+        {"key": 23284, "alias": "GRIIS-SH-StHelena", "title": None},
+    ]
+    griis_listing(api, listing)
+    assert [(d.key, d.alias, d.country, d.subdivision) for d in griis_datasets(api.base)] == [
+        (20359, "GRIIS-US-Hawaii", "US", "Hawaii"),
+        (26226, "GRIIS-EC", "EC", None),
+        (28939, "GRIIS-KY-Grand", "KY", "Grand"),
+        (28938, "GRIIS-KY-Little", "KY", "Little"),
+        (28941, "GRIIS-KY", "KY", None),
+        (23284, "GRIIS-SH-StHelena", "SH", "StHelena"),
+    ]
+
+
+def test_griis_a_clash_in_a_protected_area_list_is_not_one(api):
+    griis_listing(
+        api,
+        [
+            {"key": 1, "alias": "GRIIS-ZZ", "title": f"{REGISTER} - Zedland"},
+            {"key": 2, "alias": "GRIIS-ZZ", "title": f"Protected Areas - {REGISTER} - Zedland"},
+        ],
+    )
+    assert [(d.key, d.alias) for d in griis_datasets(api.base)] == [(1, "GRIIS-ZZ")]
+
+
 COLUMNS = ["col:ID", "col:parentID", "col:status", "col:rank", "col:scientificName", "col:extinct", "col:environment", "col:genus", "col:family", "col:order", "col:class", "col:phylum", "col:kingdom"]
 ROWS = [
     ["F1", "", "accepted", "family", "Fidae", "", "", "", "", "Oales", "Cea", "Phy", "Animalia"],

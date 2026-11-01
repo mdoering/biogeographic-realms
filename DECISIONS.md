@@ -1559,3 +1559,49 @@ for, and it still waits on Markus's choices below.
 
 **For Markus, before `--score-half-b`:** confirm the 5% reading; choose N (the rule's 7, resolution 6's 75, or the design's 40); and decide whether to widen the grid towards smaller rate factors first.
 The scoring refuses unless this run's `report.json` exists, and it records whether N is the dry run's choice.
+
+### Two GRIIS datasets with one alias, and every GRIIS list with a table (2026-11-01)
+
+**The defect.** ChecklistBank gives the alias `GRIIS-KY` to two datasets: 28941, "Global Register of Introduced and Invasive Species - Cayman Islands" (the country list, 85 species entries), and 28940,
+"... - Cayman Brac, Cayman Islands" (a sub-national list of 8). **28940's alias is wrong at the source** (its siblings 28939 `GRIIS-KY-Grand` and 28938 `GRIIS-KY-Little` are right); Markus can fix it in ChecklistBank. Both wrote
+`exports/extended/griis/GRIIS-KY.zip`, so `fetch_reference.py` stopped with "incomplete download ... GRIIS-KY.zip has 5108 bytes, expected 10615" and never rewrote the manifest, whose `griis/GRIIS-KY`
+entry pointed at 28940. **Until now Cayman Brac's 8 species stood for the Cayman Islands' country list**, so they were taken as alien in the whole of KY and the country list's own 85 were not applied at all. The
+runs that read that manifest (check_natives, clean_counts, calibrate, the dry run on half A) have the wrong list for KY.
+
+**How it is handled.** `reference.griis_datasets` never returns two datasets with one alias. Where aliases collide it reads the titles (`<register> - <Country name>` for a country list, `<register> - <Place>, <Country name>` for a
+sub-national one, with whichever dash the title uses): exactly one of the colliding datasets must be the country list, whose part after the dash is what every other title ends with, and it keeps the alias.
+The others become `GRIIS-<country code>-<Place without spaces>` with the place as subdivision: **28940 is now `GRIIS-KY-CaymanBrac`**, subdivision "Cayman Brac". `natives` matches a subdivision folded to letters and digits, so `CaymanBrac` and
+`Cayman Brac` are one name (tested). **Anything else raises a `ValueError` that names every key and title**, and nothing is picked: two country lists, two places and no country list, a place of another country,
+a title with no part after the dash or none at all, two places that fold to one alias, a place of two parts (`North, East, Zedland`), a collision of an alias that already has a subdivision, and an alias made up that another dataset has. Natural Earth has one polygon for
+KY, "Cayman Islands", and none for Cayman Brac, so **`KY-CaymanBrac` is unplaced** on the grid, as `KY-Grand` and `KY-Little` were. That is expected. Tests: `tests/test_reference.py` (the KY case, eight unresolvable collisions, the made-up alias, no collision unchanged,
+a protected-areas list that is not a collision) and two in `tests/test_natives.py`; the suite has 1,030 tests, all passing.
+
+**The fetch.** The stale `exports/extended/griis/GRIIS-KY.zip` held 28940's export, so it would have been read as the country list under the new manifest and it blocked the fetch (a file at its path with another size raises), and it was removed. It was the only file removed:
+the exports are read only through the manifest's `path` (`natives._manifest_path`, `check_natives.py`), so the 250 plain exports that are no longer referenced are never read, among them `plain/griis/GRIIS-KY.zip`, which is 28941's own. The first rerun of `scripts/fetch_reference.py` completed:
+**317 items, 0 missing**, and no incomplete download. `manifest.json` lists `griis/GRIIS-KY` (28941, 10,615 bytes) and `griis/GRIIS-KY-CaymanBrac` (28940, 5,108 bytes) apart, with `GRIIS-KY-Grand` and `GRIIS-KY-Little`. **All 305 GRIIS lists are extended exports**, with 305 different datasets
+and paths. The `key` in each zip's `metadata.yaml` is the manifest's dataset and each has a `Distribution.tsv`.
+
+**GRIIS after this, and before** (`scripts/check_natives.py -I`, species-rank entries, resolution 6, COL 315557, 16.3 GB peak, 54 s):
+
+| | Before | Now |
+|---|---|---|
+| Lists | 304 in the manifest, 303 with entries | 305, all with entries |
+| Lists with a distribution table | 55 | **305** |
+| Lists without one | 248 | 0 |
+| Species entries in lists with a table | 52,462 | **132,479** |
+| Introduced | 48,972 | 127,338 |
+| Native (left out) | 3,457 | 5,077 |
+| Uncertain (left out) | 5 | 13 |
+| No value, counted as introduced | 28 (all GRIIS-TR) | 51 (GRIIS-TR, NU, TO-Haapai) |
+| Pairs applied (`References.griis`) | 46,519 of 20,556 species in 53 lists | **115,371 of 26,734 species in 303 lists** |
+| Name-only pairs (`griis_name_only`) | 62,375 of 14,170 species in 248 lists | 0 |
+| Unplaced subdivisions (no admin-1 cells) | 61: 6 with a table (1,630 pairs) and 55 with none (5,190 pairs) | **62 with 6,569 pairs**, all with a table: the 61 and `KY-CaymanBrac` |
+| Placed subdivisions | 24 with 263 cells | 24 with 263 cells |
+
+The 2 lists that apply nothing are `GRIIS-EC` (731 of 731 entries native) and `GRIIS-SR` (176 of 176), as before. Native entries remain the largest in GRIIS-EC, US-Hawaii (440 of 5,542), US-United (429 of 8,349), IC-Tenerife (423 of 1,119), IC-Gran-Canaria (287 of 777) and IC-Palma (252 of 661).
+**`griis_without_status="apply"` no longer has anything to apply**: no list is without a table. GRIIS names matched to COL 92.0% after GBIF's fallback (7.5% unmatched, 140 ambiguous; 91.3% matched and 2,607 unmatched before); 3 lists are over 10% unmatched (IL, MH-Namdrik-2, TO-Haapai),
+GBIF's match API was asked about 103 names and placed 78 (132 and 97 before), and `gbif_fallback.parquet` was rewritten by the script.
+
+**The extended exports are not only the old lists with a table added.** The 250 plain exports were of older versions of the datasets: GRIIS-CY's plain one is version 4 and the extended one version 9, and 559 of the plain one's entries are ranked `other`, which the species rule drops (23 species entries
+against 860 now). The 250 lists hold 80,017 species entries now against 68,170 in their plain exports (+11,847), and 85 more come from the Cayman Islands list taking the slot Cayman Brac's 8 held: the 132,479 of now against the 120,547 of before.
+Nothing is cleaned or calibrated here. The numbers of the section "GRIIS by its own establishment means" above, of Task 11a and of the dry run before this one, were made with the old manifest, and the GRIIS rules of the cleaning and the calibration are to be run again on this one.

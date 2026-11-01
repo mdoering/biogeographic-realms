@@ -26,6 +26,8 @@ USED_COLUMNS = ["col:parentID", "col:status", "col:rank", *SPECIES_COLUMNS]
 ACCEPTED = ("accepted", "provisionally accepted")
 ID_RANKS = ("genus", "family")
 GRIIS_ALIAS = re.compile(r"^GRIIS-([A-Z]{2})(?:-(.+))?$")
+# what a GRIIS title names after the register's own name, whichever dash it uses: `... Species - Cayman Brac, Cayman Islands`
+GRIIS_TITLE = re.compile(r"^.*?Species\s*[-\u2013\u2014]\s*(.+?)\s*$")
 
 
 @dataclass(frozen=True)
@@ -61,16 +63,70 @@ def latest_export(dataset_key: int, *, classification: bool = False, extended: b
     return ExportInfo(newest["key"], newest["download"], newest["size"], newest["created"])
 
 
+def _griis_place(title: str | None) -> str | None:
+    """What a GRIIS title names after the register's name, `Cayman Brac, Cayman Islands` or `Cayman Islands`, or None for a title that has no such part."""
+    match = GRIIS_TITLE.match(title or "")
+    return " ".join(match.group(1).split()) if match else None
+
+
+def _tell_apart(alias: str, group: list[dict]) -> list[GriisDataset]:
+    """The datasets of `group`, which all have the country alias `alias`, under aliases of their own, told apart by their titles.
+
+    A GRIIS title is `<register> - <Country name>` for a country list and `<register> - <Place>, <Country name>` for a sub-national one. Exactly one
+    dataset must be the country list, whose part after the dash is the end of every other title, and it keeps `alias`. Each of the others
+    is that country's list for one place, `GRIIS-<country code>-<Place without spaces>`, with the place as its subdivision. Natural Earth's admin-1 names
+    are matched folded to letters and digits (`natives._fold`), so `CaymanBrac` and `Cayman Brac` are one name. Anything else raises, naming every key and title.
+    """
+    country = GRIIS_ALIAS.match(alias).group(1)
+    listed = ", ".join(f"{d['key']} {d.get('title')!r}" for d in group)
+    places = {d["key"]: _griis_place(d.get("title")) for d in group}
+    countries = [] if None in places.values() or GRIIS_ALIAS.match(alias).group(2) else [
+        d for d in group if all(o is d or places[o["key"]].casefold().endswith(f", {places[d['key']].casefold()}") for o in group)
+    ]
+    if len(countries) != 1:
+        raise ValueError(f"datasets {listed} share the alias {alias}, and their titles do not make one of them the country list and the others its places")
+    tail = len(places[countries[0]["key"]]) + 2
+    tell = []
+    for dataset in group:
+        if dataset is countries[0]:
+            tell.append(GriisDataset(dataset["key"], alias, country, None))
+            continue
+        place = places[dataset["key"]][:-tail].strip()
+        if not place or "," in place:
+            raise ValueError(f"datasets {listed} share the alias {alias}, and dataset {dataset['key']} has no single place before its country in its title")
+        tell.append(GriisDataset(dataset["key"], f"{alias}-{''.join(place.split())}", country, place))
+    return tell
+
+
 def griis_datasets(api: str = CLB_API) -> list[GriisDataset]:
-    """Country and sub-national GRIIS checklists, without the separate lists for protected areas."""
+    """Country and sub-national GRIIS checklists, without the separate lists for protected areas, each under an alias of its own.
+
+    ChecklistBank has the alias `GRIIS-KY` on two datasets, the Cayman Islands and Cayman Brac, which would write one file twice and make
+    the sub-national list the country's. Datasets that share an alias are told apart by their titles (`_tell_apart`). A clash the titles
+    don't settle raises, as does an alias made up that another dataset has, and no two datasets are returned with one alias.
+    """
     query = urllib.parse.urlencode({"q": "GRIIS", "limit": 1000})
     _, body = get_json(f"{api}/dataset?{query}")
-    found = []
+    by_alias: dict[str, list[dict]] = {}
     for dataset in (body or {}).get("result", []):
-        match = GRIIS_ALIAS.match(dataset.get("alias") or "")
-        if match and "Protected Areas" not in (dataset.get("title") or ""):
-            found.append(GriisDataset(dataset["key"], dataset["alias"], match.group(1), match.group(2)))
-    return found
+        if GRIIS_ALIAS.match(dataset.get("alias") or "") and "Protected Areas" not in (dataset.get("title") or ""):
+            by_alias.setdefault(dataset["alias"], []).append(dataset)
+    titles = {d["key"]: d.get("title") for group in by_alias.values() for d in group}
+    found: dict[str, GriisDataset] = {}
+    for alias, group in by_alias.items():
+        if len(group) > 1:
+            told = _tell_apart(alias, group)
+        else:
+            match = GRIIS_ALIAS.match(alias)
+            told = [GriisDataset(group[0]["key"], alias, match.group(1), match.group(2))]
+        for dataset in told:
+            if dataset.alias in found:
+                other = found[dataset.alias]
+                raise ValueError(
+                    f"datasets {other.key} {titles[other.key]!r} and {dataset.key} {titles[dataset.key]!r} would both have the alias {dataset.alias}"
+                )
+            found[dataset.alias] = dataset
+    return list(found.values())
 
 
 def _ancestor_ids(usages: pl.DataFrame, species: list[str]) -> pl.DataFrame:

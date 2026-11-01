@@ -324,6 +324,13 @@ def test_country_and_subdivision_come_from_the_file_name(tmp_path, index):
     assert pairs.rows() == [("A1", "NO", None), ("A1", "US", "Hawaii"), ("A2", "NO", None)]
 
 
+def test_a_place_list_and_its_country_list_stay_apart_when_the_place_has_two_words(tmp_path, index):
+    # `fetch_reference.py` names the list of Cayman Brac `GRIIS-KY-CaymanBrac`, as ChecklistBank gives it the alias of the country's `GRIIS-KY`
+    country = griis_zip(tmp_path, "GRIIS-KY", plain_rows("Aus bus"))
+    place = griis_zip(tmp_path, "GRIIS-KY-CaymanBrac", plain_rows("Aus cus"))
+    assert griis_pairs([country, place], index).rows() == [("A1", "KY", None), ("A2", "KY", "CaymanBrac")]
+
+
 def test_a_plain_list_takes_its_kingdom_from_the_kingdom_row_above(tmp_path, index):
     path = griis_zip(tmp_path, "GRIIS-ZW", plain_rows("Aus bus"))
     assert griis_names([path])["kingdom"].to_list() == ["Animalia"]
@@ -557,6 +564,11 @@ ADMIN1 = [
 def test_a_subdivision_is_found_by_its_name_in_any_form(tmp_path):
     places = admin1_places(write_admin1(tmp_path / "a.geojson", ADMIN1), [("US", "Hawaii"), ("TO", "Haapai"), ("PT", "Madeira"), ("XX", "Nowhere")])
     assert sorted(zip(places["country"], places["subdivision"], strict=True)) == [("PT", "Madeira"), ("TO", "Haapai"), ("US", "Hawaii")]
+
+
+def test_a_subdivision_named_without_spaces_is_found_by_its_name_with_them(tmp_path):
+    places = admin1_places(write_admin1(tmp_path / "a.geojson", [("Cayman Brac", "KY", None, box(-79.9, 19.68, -79.7, 19.76))]), [("KY", "CaymanBrac")])
+    assert list(zip(places["country"], places["subdivision"], strict=True)) == [("KY", "CaymanBrac")]
 
 
 def test_a_name_in_several_countries_takes_the_lists_own(tmp_path):
