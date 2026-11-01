@@ -1,0 +1,214 @@
+"""Clean half A's counts through layers 1 to 4, once per WCVP mode, and report what each layer, rule and mode removed.
+
+Reads the ingested download (`data/gbif/<key>`), the frozen split and the references, and for each of `--modes` runs `clean` with every
+layer on. Half A only: `load_country_counts` raises for half B and nothing here asks it to. Everything goes to
+`results/clean/res<r>/<mode>/`: `presence.parquet`, `removed.parquet` (every row taken out or moved, with its layer and rule),
+`unplaced.parquet`, `summary.csv` (per layer, rule, group and country), `summary_by_group.csv` and `summary_by_rule.csv`. The report of the
+whole run is `results/clean/res<r>/report.json`, with the removals per layer and rule in records and in presences, the effect of each
+WCVP mode, the fold of zero-area parts, the Caspian check and the provisionally accepted species whose name also has an accepted species.
+
+References are loaded once and need about 16 GB at the peak (`load_taxa`), so the modes share them. The counts are a download:
+`uv run python -I scripts/clean_counts.py --counts data/gbif/<key> [--modes native_only introduced off]`.
+"""
+
+import argparse
+import gc
+import json
+import logging
+import resource
+import sys
+import time
+from pathlib import Path
+
+import polars as pl
+
+from realms.clean import LAYERS, WCVP_MODES, Settings, clean, provisional_twin_records, provisional_twins, removal_summary
+from realms.grid import KINDS, ZERO_KM2, load_grid, parts
+from realms.natives import load_references, name_index
+from realms.occurrences import load_country_counts
+from realms.split import load_split
+
+# The Caspian Sea is no land in Natural Earth and no country in GADM. The box is on cell centres, wide enough for the cells of 265 km that
+# overlap it, and "Caspian" below means the cells of it with 1,000 km2 of Natural Earth sea or more: anything smaller is some other water.
+CASPIAN_BOX = {"lon": (44.5, 56.5), "lat": (35.0, 49.5)}
+CASPIAN_SEA_KM2 = 1_000
+
+
+def peak_gb() -> float:
+    """The most memory this process has had resident so far. `ru_maxrss` is in bytes on macOS and kilobytes on Linux."""
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak / (1e9 if sys.platform == "darwin" else 1e6)
+
+
+def twins_of(col: Path) -> pl.DataFrame:
+    index = name_index(col)
+    twins = provisional_twins(index)
+    del index
+    gc.collect()
+    return twins
+
+
+def caspian(grid, counts: pl.DataFrame, cleaned) -> dict:
+    """Whether the Caspian's cells have Natural Earth sea area, and whether their records stay in the sea part."""
+    box = grid.cells.filter(
+        pl.col("lon").is_between(*CASPIAN_BOX["lon"]), pl.col("lat").is_between(*CASPIAN_BOX["lat"]), pl.col("sea_km2") >= ZERO_KM2
+    ).sort("lat", "lon")
+    big = box.filter(pl.col("sea_km2") >= CASPIAN_SEA_KM2)
+    names = pl.concat([counts["part"], cleaned.presence["part"], cleaned.removed["part"], cleaned.removed["to_part"].drop_nulls()]).unique()
+    where = parts(grid, names).select("part", "cell", "kind")
+
+    def per_cell(frame: pl.DataFrame, column: str, name: str) -> pl.DataFrame:
+        return (
+            frame.join(where, on="part")
+            .join(big.select("cell"), on="cell", how="semi")
+            .group_by("cell", "kind")
+            .agg(pl.col(column).sum().alias(name), pl.len().alias(f"{name}_rows"))
+        )
+
+    raw = per_cell(counts, "n", "n_in")
+    after = per_cell(cleaned.presence, "records", "records_out")
+    folded = per_cell(cleaned.removed.filter(pl.col("rule") == "zero_area_part"), "records", "zero_area_records")
+    table = (
+        big.join(pl.DataFrame({"kind": list(KINDS)}), how="cross")
+        .join(raw, on=["cell", "kind"], how="left")
+        .join(after, on=["cell", "kind"], how="left")
+        .join(folded, on=["cell", "kind"], how="left")
+        .fill_null(0)
+        .sort("lat", "lon", "kind")
+    )
+    sea = table.filter(pl.col("kind") == "sea")
+    land = table.filter(pl.col("kind") == "land")
+    return {
+        "cells_in_box_with_sea": box.height,
+        "caspian_cells": big.height,
+        "sea_km2": [round(v, 1) for v in big["sea_km2"].to_list()],
+        "land_km2": [round(v, 1) for v in big["land_km2"].to_list()],
+        "box_cells_below_threshold_km2": [round(v, 1) for v in box.filter(pl.col("sea_km2") < CASPIAN_SEA_KM2)["sea_km2"].to_list()],
+        "records_in_on_sea_parts": int(sea["n_in"].sum()),
+        "records_in_on_land_parts": int(land["n_in"].sum()),
+        "records_out_on_sea_parts": int(sea["records_out"].sum()),
+        "records_out_on_land_parts": int(land["records_out"].sum()),
+        "records_folded_by_zero_area_part": int(table["zero_area_records"].sum()),
+        "cells": table.to_dicts(),
+    }
+
+
+def zero_area(grid, cleaned) -> dict:
+    fold = cleaned.removed.filter(pl.col("rule") == "zero_area_part")
+    kinds = parts(grid, fold["part"].unique()).select("part", "kind")
+    by_kind = fold.join(kinds, on="part").group_by("kind").agg(
+        pl.col("part").n_unique().alias("parts"), pl.len().alias("rows"), pl.col("records").sum().alias("records"), pl.col("species_id").n_unique().alias("species")
+    )
+    return {
+        "parts": fold["part"].n_unique(),
+        "rows": fold.height,
+        "records": int(fold["records"].sum() or 0),
+        "presences_lost": int(fold.filter(pl.col("presence_lost")).select("species_id", "part").unique().height),
+        **{row["kind"]: {k: row[k] for k in ("parts", "rows", "records", "species")} for row in by_kind.iter_rows(named=True)},
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--counts", type=Path, required=True, help="the Parquet parts of an ingested download, data/gbif/<key>")
+    parser.add_argument("--resolution", type=int, default=6, help="the ISEA3H resolution of the counts, default 6")
+    parser.add_argument("--modes", nargs="+", choices=WCVP_MODES, default=list(WCVP_MODES), help="the WCVP modes to run, default all three")
+    parser.add_argument("--reference", type=Path, default=Path("data/reference"), help="default data/reference")
+    parser.add_argument("--split", type=Path, default=Path("data/split/halves-315557.parquet"))
+    parser.add_argument("--results", type=Path, default=Path("results/clean"), help="where res<r>/ goes, default results/clean")
+    args = parser.parse_args()
+
+    reference = args.reference
+    gpkg = reference / "grids" / f"ISEA3H-{args.resolution}.gpkg"
+    land = reference / "natural_earth" / "ne_10m_land.zip"
+    col = reference / "exports" / "extended" / "col.zip"
+    missing = [str(p) for p in (args.counts, args.split, gpkg, land, col) if not p.exists()]
+    if missing:
+        raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
+    directory = args.results / f"res{args.resolution}"
+    directory.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[logging.StreamHandler(), logging.FileHandler(directory / "clean.log", mode="w")])
+    say = logging.getLogger("clean_counts").info
+
+    report: dict = {"half": "A", "resolution": args.resolution, "counts": str(args.counts), "layers": list(LAYERS), "modes": {}}
+    started = time.perf_counter()
+
+    twins = twins_of(col)
+    say(f"provisional twins: {twins.height} provisionally accepted species share a name with an accepted one (peak {peak_gb():.1f} GB)")
+    grid = load_grid(gpkg, land)
+    say(f"grid: {grid.cells.height} cells at resolution {grid.resolution}")
+    refs = load_references(grid, reference)
+    gc.collect()
+    say(f"references loaded, {refs.taxa.height} species, missing {list(refs.missing)} (peak {peak_gb():.1f} GB)")
+    split = load_split(args.split)
+    counts = load_country_counts(args.counts, split, "A")  # never unsealed: half B is not looked at before the freeze
+    del split
+    clean_rows = counts.filter((pl.col("n") - pl.col("n_human_text")) > 0)
+    report["input"] = {
+        "rows": counts.height,
+        "species": counts["species_id"].n_unique(),
+        "n_raw": int(counts["n_raw"].sum()),
+        "n": int(counts["n"].sum()),
+        "clean_records": int((counts["n"] - counts["n_human_text"]).sum()),
+        "clean_rows": clean_rows.height,
+        "clean_presences": clean_rows.select("species_id", "part").unique().height,
+        "clean_species": clean_rows["species_id"].n_unique(),
+    }
+    say(f"counts of half A: {report['input']} (peak {peak_gb():.1f} GB)")
+    report["provisional_twins"] = {
+        "ids": twins.height,
+        "with_one_accepted_twin": twins.filter(pl.col("accepted_ids") == 1).height,
+        "with_several_accepted_twins": twins.filter(pl.col("accepted_ids") > 1).height,
+        "in_half_a_counts": provisional_twin_records(counts, twins),
+        "in_half_a_clean_rows": provisional_twin_records(clean_rows, twins),
+    }
+    say(f"provisional twins in half A: {report['provisional_twins']}")
+    del clean_rows
+    report["unplaced_in_references"] = {"griis_pairs": refs.griis_no_cells.height, "wrims_pairs": refs.wrims_no_country.height}
+
+    for mode in args.modes:
+        say(f"--- wcvp_mode {mode}")
+        begun = time.perf_counter()
+        out = directory / mode
+        out.mkdir(exist_ok=True)
+        cleaned = clean(counts, refs, grid, frozenset(LAYERS), Settings(wcvp_mode=mode))
+        seconds = time.perf_counter() - begun
+        cleaned.presence.write_parquet(out / "presence.parquet")
+        cleaned.removed.write_parquet(out / "removed.parquet")
+        cleaned.unplaced.write_parquet(out / "unplaced.parquet")
+        summary = removal_summary(cleaned, refs)
+        summary.write_csv(out / "summary.csv")
+        by_group = removal_summary(cleaned, refs, by=("tax_group",))
+        by_group.write_csv(out / "summary_by_group.csv")
+        by_rule = removal_summary(cleaned, refs, by=())
+        by_rule.write_csv(out / "summary_by_rule.csv")
+        survivors = cleaned.presence["species_id"].n_unique()
+        entry = {
+            "seconds": round(seconds, 1),
+            "peak_gb": round(peak_gb(), 1),
+            "presence_rows": cleaned.presence.height,
+            "presence_species": survivors,
+            "presence_records": int(cleaned.presence["records"].sum()),
+            "removed_rows": cleaned.removed.height,
+            "by_rule": by_rule.to_dicts(),
+            "by_group": by_group.to_dicts(),
+            "zero_area": zero_area(grid, cleaned),
+            "caspian": caspian(grid, counts, cleaned),
+        }
+        report["modes"][mode] = entry
+        say(f"{mode}: {seconds:.0f} s, peak {peak_gb():.1f} GB, presence {entry['presence_rows']} rows of {survivors} species, {entry['presence_records']} records")
+        with pl.Config(tbl_rows=60, tbl_cols=12, fmt_str_lengths=40):
+            say(str(by_rule.filter(pl.col("applied")).drop("applied")))
+            say(str(by_rule.filter(~pl.col("applied")).drop("applied", "presences")))
+        say(f"zero-area fold: {entry['zero_area']}")
+        del cleaned, summary, by_group, by_rule
+        gc.collect()
+
+    report["seconds"] = round(time.perf_counter() - started, 1)
+    report["peak_gb"] = round(peak_gb(), 1)
+    (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+    say(f"wrote {directory / 'report.json'}, {report['seconds']:.0f} s, peak {report['peak_gb']} GB")
+
+
+if __name__ == "__main__":
+    main()

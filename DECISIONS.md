@@ -718,3 +718,158 @@ the real files (the rows with a code that isn't three letters are dropped earlie
 it varies from run to run), almost all of it `load_taxa`, which `load_references` calls and which was
 already known to need about 15 GB. Everything new reads the exports through Polars scans and peaks at 3.2 GB (`name_index`).
 
+
+### Cleaning, layers 1 to 4
+
+`src/realms/clean.py` (`clean`, `removal_summary`, `Settings`) and `scripts/clean_counts.py`. `clean` takes the country counts of half A and
+returns `Cleaned`: `presence` (species and part, summed over countries, with a `records` column), `removed` (one row for every row of the counts
+that a layer took out or moved: `layer`, `rule`, species, part, country, `records`, `to_part`, and `presence_lost`) and `unplaced`. Nothing is
+removed without a layer and a rule, and each can be switched off: a layer with `layers`, one rule with `Settings.rules_off`
+(`extinct`, `no_wild_range`, `griis`, `griis_subnational`, `wrims`), WCVP with `wcvp_mode`. Layer 5 is accepted in `layers` and does nothing until
+Task 12. All thresholds are starting values until the freeze.
+
+**Records.** `records` is `n - n_human_text` with layer 1 on and `n_raw` with it off. Layer 1 takes out a row with no such record: rule
+`failed_flags` if `n` is 0 (every record failed the flag checks) and `human_text` otherwise. An emptied row is logged with its `n_raw`, as that is what it
+took with it. A row that loses some records and keeps others is not in `removed`: `n_raw - records` in `presence` is what it lost. The other counts
+(datasets, years, licence and source counts) are kept as the download has them, with the distinct ones taking the maximum over rows, as `load_presence` does.
+
+**Zero-area parts: layer 0, rule `zero_area_part`.** Records in a part with an area below `ZERO_KM2` fold into the other part of the same cell, first of
+all and with every layer off. It is not switchable: a zero-area part cannot carry a realm (`excess_table` divides by its area), so this repairs the data
+and is no cleaning. A cell whose two parts are both below `ZERO_KM2` keeps its records, and a row folded into a part that holds none of the
+species' records creates the row there. Rows with no records at all are moved but not logged.
+
+**Layer 2.** `extinct` (COL's flag) and `no_wild_range` (`NO_WILD_RANGE`), each its own rule.
+
+**Layer 3: order of the rules.** `griis`, then `griis_subnational`, `wrims`, and WCVP last. A row goes with the first rule that catches it, so
+that `removed` never counts a row twice. WCVP is last on purpose: what `wcvp_*` reports is what no alien list had already removed, which is
+the number that matters for the worry below. To measure one source alone, switch the others off. The runs of M1 ("layer 2 alone", "GRIIS alone") are
+`layers={1, 2}` and `layers={1, 3}` with `wcvp_mode="off"` and `rules_off={"wrims", "griis_subnational"}`.
+
+**WCVP, three modes, and why.** WCVP's native regions come from regional floras, and a flora stops at a TDWG region's border. Cutting a plant back to
+them may predefine realm edges along TDWG regions, and a map drawn from such data could then "find" those edges. Layer 3 is the only rule that does it, so
+it has three modes. Which one the analysis uses is decided in M1 by the circularity gate (the share of realm boundary within one cell of a TDWG level 3
+boundary against rotated boundaries, with WCVP off, `introduced` and `native_only`), not by endemism excess, which trimming raises by construction.
+
+- `native_only`, the design's rule and the default (`wcvp_outside_native`): a plant with at least one native region loses the parts touching none of them.
+- `introduced` (`wcvp_introduced`): a plant loses the parts that touch an introduced region and no native one. Parts WCVP says nothing about stay,
+  so documented introductions go without ranges being cut back to the floras' polygons.
+- `off`: WCVP removes nothing, and GRIIS and WRiMS still apply.
+
+Rulings that go with them, which Markus can revert in `_wcvp`:
+
+- **Plants only:** `kingdom` is Plantae in `refs.taxa`. A plant WCVP does not list is not touched, and `native_only` does not touch a plant with
+  introduced regions only.
+- **A part touches a region** when it is in `tdwg3_parts` for it. A cell on a border touches both regions, and a part touching a native region counts as
+  native whatever else it touches.
+- **Sea parts have no TDWG region, so WCVP never removes a sea part.**
+- **Nor does it remove a land part that no region reaches** (80 land parts at resolution 6: specks of coast and ice the scheme leaves out). The
+  brief reads "parts that touch none of its native regions", which would take them, but WCVP says nothing there rather than that the plant is not native. This is
+  an extension of the ruling above.
+
+**GRIIS and sub-national lists.** A country's list (subdivision null) applies to rows by `countrycode`, rule `griis`, **except in the cells of that
+country's sub-national lists**, which apply there by cell (`admin1_cells`), whatever the row's country code, rule `griis_subnational`. So the
+country's list applies to the rest of the country, as the brief says, and a species on the conterminous United States' list is not removed from
+Hawaii's cells, where Hawaii's list rules. Overseas lists carry the sovereign's code (`FR-Reunion`) while GBIF's records say `RE`, which is why they match on
+cells and never on `countrycode`. Both rules apply to land and sea parts. The separate name `griis_subnational` is so that the sub-national lists' effect
+can be told from the country lists'.
+
+**What Task 10 could not place is never applied** (`griis_no_cells`, `wrims_no_country`) and is listed in `Cleaned.unplaced` with the records of each
+species, for the species that have records: pairs at the level of a list or area. `removal_summary` puts them in as rows `unplaced_griis` and
+`unplaced_wrims` with `applied` False; `rows` are the pairs, and `records` the species' records in all, which is only an upper bound on the gap. No pair of the
+gap is removed, and nothing is counted for a rule that is off.
+
+**WRiMS** removes a row when the species is introduced for the row's `countrycode` (the country the area name gives) and the part is a sea part, rule `wrims`.
+It rests on the Denmark check: GBIF sets `countrycode` on sea records inside EEZs.
+
+**Layer 4.** A land species is exactly `terrestrial` in COL's environment, or has at least `land_share` of its records on land parts, and a sea species is the
+same the other way round, with the same share (`land_share` is symmetrical, which is why it must be above one half). The share is taken after layers 1 to 3.
+COL's environment is a sorted, comma-separated list, so "exactly terrestrial" is the value `terrestrial` alone, and a species with freshwater or brackish
+in it is exempt, as is all of Aves. A row on the wrong side folds into the other part of its cell if that has area (`land_sea_fold`), or else into the
+right-side part of the neighbouring cell that holds most of the species' records, the lowest cell id on a tie (`land_sea_neighbour`), or else is dropped
+(`land_sea_dropped`). Three points the brief leaves open:
+
+- **A neighbour counts only if the species has records on the part.** A neighbour with the right kind of part and none of the species' records is
+  not one: folding there would invent a presence where the species was never seen, so the row is dropped.
+- **The lowest id is the lowest as a number** (ids are long integers kept as text, and `9` comes before `100`).
+- **Where COL's environment and the records disagree, the environment decides** (`Settings.side_conflict="environment"`; `"leave"` leaves the species alone).
+  The brief's "or" lets a species be both: of half A's species, 1,536 are exactly terrestrial with at least 95% of their records in sea parts, and 4,729 are
+  exactly marine with that on land parts. They are mostly rare (the median is 2 records) shore molluscs, crustaceans and insects, whose records fall in a
+  coastal cell's land part because GADM draws country polygons into the shallows, and a land/sea label that rests on GADM is the weaker word. The effect on the
+  map is small either way: 183 species lose every presence with `environment`, none with `leave`. Markus can switch it.
+
+### Layers 1 to 4 on half A at resolution 6 (2026-11-01)
+
+`scripts/clean_counts.py` on `data/gbif/0019721-261023074918325`, half A, every layer on, 3 modes in one process (55 s, peak 18.9 GB: the references
+peak at 15.5 GB, mostly `load_taxa`, and the counts' load adds to what they leave). Outputs in `results/clean/res6/<mode>/` (git-ignored), with the log in `results/clean/res6/clean.log` and the whole
+report in `report.json`. **The counts are of COL 315557 (COL26.6 XR).** The input is 10,126,245 rows of 647,326 species and 1,909,146,347 clean records
+(`n - n_human_text`), in 8,919,665 species-and-part presences.
+
+| Layer | Rule | Rows | Presences | Records | Share of clean records |
+|---|---|---|---|---|---|
+| 0 | `zero_area_part` (moved) | 216,241 | 199,419 | 1,255,754 | 0.07% |
+| 1 | `failed_flags` | 166,251 | 153,218 | 1,188,700 (`n_raw`) | |
+| 1 | `human_text` | 26,852 | 25,752 | 52,328 (`n_raw`) | |
+| 2 | `extinct` | 58,303 | 57,416 | 622,394 | 0.03% |
+| 2 | `no_wild_range` | 8,036 | 7,052 | 628,291 | 0.03% |
+| 3 | `griis` | 325,520 | 262,907 | 84,405,810 | 4.42% |
+| 3 | `griis_subnational` | 78,247 | 76,318 | 47,923,761 | 2.51% |
+| 3 | `wrims` | 3,125 | 2,930 | 259,332 | 0.01% |
+| 3 | `wcvp_outside_native` (`native_only`) | 355,511 | 338,112 | 7,176,959 | 0.38% |
+| 4 | `land_sea_fold` (moved) | 794,698 | 744,151 | 9,954,205 | 0.52% |
+| 4 | `land_sea_neighbour` (moved) | 5,627 | 5,574 | 20,781 | 0.00% |
+| 4 | `land_sea_dropped` | 12,989 | 12,874 | 37,974 | 0.00% |
+
+The rows of layers 0 to 2 and of the three alien-list rules are the same in all three modes, and layer 4's differ by under 2% (it follows what layer 3 leaves). Presences are the
+(species, part) pairs left with nothing by the rule, so a country's presences do not add up (use `removal_summary(by=())`), and a fold's presence
+reappears at the part it went to. Per layer, `native_only` lost 199,419 (0), 178,943 (1), 64,468 (2), 680,267 (3) and 762,599 (4) presences.
+**The result is 7,391,207 presences of 611,163 species and 1,768,091,826 records** (of 8,919,665 presences, 83%).
+Records are conserved: 1,768,091,826 left + 1,250,685 (layer 2) + 139,765,862 (layer 3) + 37,974 (layer 4, dropped) = 1,909,146,347, the clean records of the input,
+as the folds move records and the rows of layers 0 and 1 carry none of that count.
+
+**Layer 3 is mostly records, not presences, and mostly GRIIS.** The two GRIIS rules take 132.3M records (6.9% of the clean records) in 403,767 rows
+and 339,225 presences (3.8%). Of the country lists' records, 51.0M are chordates and 28.9M angiosperms, and AU (15.2M), GB (13.1M), SE (10.4M) and CA (9.0M) are the
+largest countries. The sub-national lists' 47.9M are almost all `US` (47.6M), and 42.2M of the 47.9M are chordates: *Sturnus vulgaris* (15.5M), *Passer
+domesticus* (12.5M), *Columba livia* (6.3M) and *Streptopelia decaocto* (3.7M) lead. **The gap the lists leave:** 4,027 unplaced GRIIS pairs and 1,140 unplaced WRiMS pairs name species with records in half A, of 7,468 and 1,995
+in all.
+
+**The effect of each WCVP mode** (plants, `kingdom` Plantae, are 169,163 species and 2,568,687 presences of half A with WCVP off):
+
+| `wcvp_mode` | Rule rows | Rule presences | Rule records | Presences left (all species) | Plant presences left | Species left |
+|---|---|---|---|---|---|---|
+| `off` | 0 | 0 | 0 | 7,704,561 | 2,568,687 | 612,687 |
+| `introduced` | 110,910 | 99,962 | 5,271,123 | 7,620,169 (-1.1%) | 2,484,295 (-3.3%) | 612,648 (-39) |
+| `native_only` | 355,511 | 338,112 | 7,176,959 | 7,391,207 (-4.1%) | 2,255,333 (-12.2%) | 611,163 (-1,524) |
+
+`native_only` removes 313,354 plant presences net, 3.7 times as many as `introduced`, but only 36% more records (7.18M to 5.27M): a presence `introduced` takes
+has 62 records on average, and each of the 228,962 more that only `native_only` takes has 8. Those are parts that WCVP lists neither as native nor as introduced for
+the plant (it removes from 50,866 species, `introduced` from 5,063), which is where the incompleteness of WCVP and the edges of its regions would act, and it is
+what the circularity gate in M1 tests. The three modes agree on every other rule.
+
+**The zero-area fold.** 923 parts (890 sea, 33 land: the pilot's figures, and the same in every mode), 216,241 rows, 1,255,754 clean records and
+199,419 presences. Sea: 890 parts, 215,089 rows, 1,243,297 records of 46,370 species. Land: 33 parts, 1,152 rows, 12,457 records of 827 species. (Task 7's 2.3M
+and 24.6k are over all species, with half B.) None of the 8,624 parts of the result has an area below `ZERO_KM2`, and no cell of the grid has both parts below it,
+so no record is left without a part to go to.
+
+**The Caspian.** Natural Earth does give its cells sea area: 13 cells in a box around it (lon 44.5 to 56.5, lat 35 to 49.5, on the cells' centres) have 1,000 km2 or
+more of sea, 10 of them 9,269 to 66,317 km2 and 3 of 2,299 to 3,616 km2, and 3 more with 34 to 393 km2 are left out. So the fold of zero-area parts never touches
+them (0 records folded), and the records GBIF puts in their sea parts stay there as far as that fold goes. There are few: 8,161 of the 622,663 clean records of these
+cells (1.3%) are in the sea parts and 614,502 in the land parts, and the cells that are mostly water hold their records in the land part of the shore (cell
+644184800048851186: 3,900 records on its 3,802 km2 of land and 3 on its 66,317 km2 of sea). After all layers 1,755 records are in these sea parts with `native_only` (1,656
+with `introduced`, 1,617 with `off`), against 8,161: layer 4 folds a land species' sea records into the land part of the cell. So the Caspian is a sea part in the network, as
+intended, and a sparse one, which the sparse-part rules of M1 will have to judge.
+
+**Provisionally accepted twins** (reported, nothing changed). 33,811 provisionally accepted species ids share a name and kingdom with an accepted species
+(33,789 with one accepted twin, which Task 10 joins to, and 22 with several, which it leaves ambiguous). Half A has records on 2,835 of them: 59,773
+rows and 2,728,658 clean (`n`) records, 0.14% of half A's; 2,789 species and 58,565 rows pass layer 1. None of them has several accepted twins.
+So a GRIIS, WCVP or WRiMS record on such a name reaches the accepted twin and not the provisional id, whose records are then not cleaned by it.
+
+**Layer 4 in numbers.** After layer 3, `native_only`: of 611,346 species 454,559 are land, 80,916 sea, 27,543 exempt (freshwater, brackish or Aves) and the rest have
+no side. 6,265 species were in the conflict above. The folds move 9.95M records (0.52%), of 744,151 presences, and drop 37,974 records of 12,874 presences,
+which end 183 species' presences altogether.
+
+**GRIIS lists whole countries, and some of its largest removals are in the species' native range (observed, nothing changed).** A country's list removes a
+species from every row of that country. Among the biggest single removals are species that are native there: *Gymnorhina tibicen*, the Australian Magpie, in AU (2.8M records),
+*Anas platyrhynchos*, the Mallard, in SE (1.5M) and DK (0.8M), and *Columba livia* in IN (1.1M), where the Rock Dove is wild, while in CA (1.7M) and GB it is feral. Presumably GRIIS lists a
+species wherever some population is introduced (released Mallards, feral pigeons), which the rule turns into the whole country. It is the rule as the brief gives it, and the
+design's softening is the sub-national lists, which help only where they exist. Nothing in `References` says where in a country a species is native, so `clean` cannot soften this.
+GRIIS's effect on its own is one of the runs of M1, and these are the first rows to look at there.

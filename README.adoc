@@ -43,6 +43,13 @@ uv run python -I scripts/check_columns.py data/gbif/<key>.zip # a Denmark SQL do
 uv run python -I scripts/ingest.py data/gbif/<key>.zip --resolution 6 # stream a SQL download into Parquet in data/gbif/<key>/, check it and write results/pilot/res6/qa.json, exiting non-zero if a pass mark fails
 ----
 
+== Cleaning the counts
+
+[source,bash]
+----
+uv run python -I scripts/clean_counts.py --counts data/gbif/<key> # layers 1 to 4 on half A, once per WCVP mode (native_only, introduced, off), into results/clean/res<r>/<mode>/: presence, removed (every row taken out or moved, with its layer and rule), unplaced, and the removal summaries; report.json holds the removals per layer and rule, the effect of each WCVP mode, the zero-area fold, the Caspian check and the provisionally accepted twins. About 20 GB at the peak, 1 minute
+----
+
 == Measuring scale
 
 [source,bash]
