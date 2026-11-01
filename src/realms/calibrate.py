@@ -1,0 +1,474 @@
+"""The calibration of layer 5 on WCVP plants, and the known cases of the design's Verification section.
+
+**What the calibration measures.** WCVP says where a plant is native, and a plant record outside those regions is either a mistake or an
+introduction, which layer 3 would take out. With layer 3 off, layer 5's heuristics have to catch such presences by their own evidence, so
+the plants tell how well they do and what they cost. For a table of presences (species and part), `native_status` marks each plant presence
+`native`, where its part touches one of the species' native TDWG level 3 regions, or `outside`, where it touches none. Only plants with a
+native region get a status, and only land parts with a TDWG region: a sea part, or a land part the scheme leaves out, says nothing.
+`rates` are the two numbers that matter: the share of outside presences that the heuristics remove, and the share of native presences they
+lose. Both count presences, which is what the network is built from, and not records.
+
+**The baseline** is what layers 1, 2 and 4 leave. Those layers don't depend on the thresholds, so `calibrate` runs them once and then only layer 5
+for each setting (`clean.outlier_rows`, the same code that `clean` runs for layer 5). A presence that layer 1 or 2 took out, or that layer 4 moved, is
+not counted as lost to the heuristics, as the thresholds had nothing to do with it. `calibrate` therefore measures what the four thresholds do.
+
+**The species** are the plants WCVP gives a native region and every other species of their taxonomic groups. Layer 5 judges a species against its
+group's records in a cell (`under_reported`), and some groups hold species of other kingdoms, so the whole group is kept and the group totals are
+what they are in the real run. Everything else in layers 1 to 5 is per species.
+
+**The setting** is chosen by `choose`: the one that removes the most outside presences while losing at most 5% of the native ones. A tie goes to
+the lower native loss, and then to the order of the grid. Where no setting loses so little, the one that loses least is taken, and the caller is told.
+
+**Known cases** (`CASES`) are checked on the fully cleaned half A with `known_cases`. An area is the cells whose land touches a TDWG level 3 region (or
+the regions of a level 1 region), so both parts of a coastal cell count. The cases of a family in half B are not run (the half is looked up in the split
+file, which holds no occurrences), and are returned with nothing but the family and the half.
+"""
+
+import itertools
+import json
+import logging
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Literal
+
+import polars as pl
+
+from realms.clean import Settings, clean, outlier_rows
+from realms.grid import Grid, cell_of
+from realms.natives import References, match_names
+
+log = logging.getLogger(__name__)
+
+NATIVE_LOSS_LIMIT = 0.05
+EPS = 1e-9  # a share compared with a count: 0.05 * 60 is 3.0000000000000004
+LEFTOVER = 10  # the regions listed for the presences that break a case
+# the thresholds to try, in the order of the grid (the first varies slowest): the design's value is the middle of each
+GRID = {
+    "satellite_record_share": (0.005, 0.01, 0.02),
+    "satellite_cell_share": (0.02, 0.05, 0.10),
+    "under_rate_factor": (0.005, 0.01, 0.02),
+    "group_min_records": (300, 1000, 3000),
+}
+BEFORE_5 = frozenset({1, 2, 4})  # layer 3 is off in the calibration, and layer 5 is what is measured
+STATUS_SCHEMA = {"species_id": pl.String, "part": pl.String, "status": pl.String}
+SCORE = ("outside", "outside_removed", "native", "native_lost", "outside_rate", "native_loss")
+TABLE_SCHEMA = {
+    "setting": pl.Int64,
+    **{k: pl.Float64 if k.endswith(("share", "factor")) else pl.Int64 for k in GRID},
+    "outside": pl.Int64,
+    "outside_removed": pl.Int64,
+    "native": pl.Int64,
+    "native_lost": pl.Int64,
+    "outside_rate": pl.Float64,
+    "native_loss": pl.Float64,
+}
+REGION_SCHEMA = {"tdwg3": pl.String, "name": pl.String, "level2": pl.Int64, "level1": pl.Int64}
+
+
+# ---- native and outside presences
+
+def native_status(presence: pl.DataFrame, wcvp: pl.DataFrame, tdwg3_parts: pl.DataFrame) -> pl.DataFrame:
+    """`species_id`, `part` and `status` (`native` or `outside`) of the plant presences in `presence`, a table with `species_id` and `part`.
+
+    A plant is a species with at least one native row in `wcvp` (`species_id`, `tdwg3`, `native`). Its presence on a land part is `native` when the
+    part touches a native region of the species, as `tdwg3_parts` (`part`, `tdwg3`) has it, and `outside` when it touches none: a region where WCVP
+    lists the species as introduced, or does not list it, is not native. A part touching a native and an introduced region is native, as layer 3
+    softens it. Presences with no status are left out: other species, sea parts and land parts with no region. Each (species, part) is counted once.
+    """
+    native = wcvp.filter(pl.col("native")).select("species_id", "tdwg3").unique()
+    region = tdwg3_parts.drop_nulls("tdwg3").select("part", "tdwg3")
+    pairs = (
+        presence.select("species_id", "part")
+        .unique()
+        .join(native.select("species_id").unique(), on="species_id", how="semi")
+        .join(region.select("part").unique(), on="part", how="semi")
+    )
+    touching = (
+        pairs.join(region, on="part")
+        .join(native.with_columns(pl.lit(True).alias("is_native")), on=["species_id", "tdwg3"], how="left")
+        .group_by("species_id", "part")
+        .agg(pl.col("is_native").is_not_null().any().alias("native"))
+    )
+    status = pl.when(pl.col("native")).then(pl.lit("native")).otherwise(pl.lit("outside")).alias("status")
+    return touching.select("species_id", "part", status).cast(STATUS_SCHEMA).sort("species_id", "part")
+
+
+def tally(status: pl.DataFrame, removed: pl.DataFrame) -> dict[str, int]:
+    """How many `outside` and `native` presences of `status` there are, and how many of each `removed` (a table with `species_id` and `part`) holds.
+
+    A presence is a (species, part) and counts once however many rows of `removed` name it. Presences of `removed` with no status are not counted.
+    """
+    gone = removed.select("species_id", "part").unique().with_columns(pl.lit(True).alias("gone"))
+    by = (
+        status.join(gone, on=["species_id", "part"], how="left")
+        .group_by("status")
+        .agg(pl.len().alias("n"), pl.col("gone").is_not_null().sum().alias("lost"))
+    )
+    found = {row["status"]: (int(row["n"]), int(row["lost"])) for row in by.iter_rows(named=True)}
+    outside, outside_removed = found.get("outside", (0, 0))
+    native, native_lost = found.get("native", (0, 0))
+    return {"outside": outside, "outside_removed": outside_removed, "native": native, "native_lost": native_lost}
+
+
+def _share(part: int, whole: int) -> float:
+    return part / whole if whole else float("nan")
+
+
+def rates(status: pl.DataFrame, removed: pl.DataFrame) -> tuple[float, float]:
+    """The share of the outside presences of `status` that `removed` holds, and the share of the native ones: what the heuristics got and what they cost.
+
+    Not a number (`nan`) where there are no presences of the kind.
+    """
+    t = tally(status, removed)
+    return _share(t["outside_removed"], t["outside"]), _share(t["native_lost"], t["native"])
+
+
+# ---- the settings
+
+def settings_grid(base: Settings = Settings()) -> list[Settings]:
+    """The 81 settings of `GRID`, with `base` for everything else, in the order of the grid: the first threshold varies slowest."""
+    return [replace(base, **dict(zip(GRID, values, strict=True))) for values in itertools.product(*GRID.values())]
+
+
+def choose(table: pl.DataFrame, limit: float = NATIVE_LOSS_LIMIT) -> tuple[int, bool]:
+    """The `setting` of `table` (from `calibrate`) that removes the most outside presences among those losing at most `limit` of the native ones.
+
+    A tie goes to the fewer native presences lost, and then to the lower setting, which is the order of the grid. Where no setting is within the limit,
+    the one that loses the fewest native presences is taken, the lower setting again winning a tie. Returns the setting and whether the limit was met.
+    The native presences are the same for every setting of one table, so counts are compared and not shares.
+    """
+    if table.is_empty():
+        raise ValueError("there are no settings to choose from")
+    within = table.filter(pl.col("native_lost") <= limit * pl.col("native") + EPS)
+    if within.height:
+        best = within.sort(["outside_removed", "native_lost", "setting"], descending=[True, False, False]).row(0, named=True)
+        return int(best["setting"]), True
+    return int(table.sort(["native_lost", "setting"]).row(0, named=True)["setting"]), False
+
+
+# ---- the species and the calibration
+
+def calibration_species(refs: References) -> pl.Series:
+    """The species the calibration cleans: plants with a native region in WCVP, and every other species of their taxonomic groups."""
+    plants = refs.wcvp.filter(pl.col("native")).select("species_id").unique()
+    groups = refs.groups.drop_nulls("tax_group").select("species_id", "tax_group").unique()
+    plant_groups = groups.join(plants, on="species_id", how="semi").select("tax_group").unique()
+    mates = groups.join(plant_groups, on="tax_group", how="semi").select("species_id")
+    return pl.concat([plants, mates]).unique().sort("species_id")["species_id"]
+
+
+def calibration_counts(counts: pl.DataFrame, refs: References) -> pl.DataFrame:
+    """The rows of `counts` (the country counts) of `calibration_species`."""
+    return counts.join(calibration_species(refs).to_frame(), on="species_id", how="semi")
+
+
+def _early(settings: Settings) -> tuple:
+    """What layers 1, 2 and 4 take from the settings, which `calibrate` runs once."""
+    return settings.land_share, settings.side_conflict, settings.rules_off & {"extinct", "no_wild_range"}
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """What layers 1, 2 and 4 leave of the calibration species (`presence`, rows by species and part) and the `native_status` of those presences."""
+
+    presence: pl.DataFrame
+    status: pl.DataFrame
+
+
+def baseline(counts: pl.DataFrame, refs: References, grid: Grid, settings: Settings = Settings()) -> Baseline:
+    """Run layers 1, 2 and 4 on the `calibration_counts` of `counts` with `settings`, and mark the plant presences that are left."""
+    presence = clean(calibration_counts(counts, refs), refs, grid, BEFORE_5, settings).presence
+    return Baseline(presence, native_status(presence, refs.wcvp, refs.tdwg3_parts))
+
+
+def calibrate(counts: pl.DataFrame, settings_grid: Sequence[Settings], refs: References, grid: Grid, start: Baseline | None = None) -> pl.DataFrame:
+    """One row per setting of `settings_grid`: its thresholds, and what layer 5 does to the plants' native and outside presences.
+
+    Runs on the `calibration_species` of `counts` (country counts, `load_country_counts`), with layer 3 off: layers 1, 2 and 4 once, and layer 5
+    at each setting. `setting` is the index in `settings_grid`. `outside` and `native` are the presences of each kind that layer 5 judges, the same in
+    every row, `outside_removed` and `native_lost` those it takes, and `outside_rate` and `native_loss` the shares. The settings must agree on
+    what layers 1, 2 and 4 use (`land_share`, `side_conflict` and the layer 2 rules of `rules_off`), as those run once. `start` is that run, if the
+    caller has it (`baseline`, made with the first setting).
+    """
+    if not len(settings_grid):
+        raise ValueError("there are no settings to calibrate")
+    first = settings_grid[0]
+    for setting in settings_grid[1:]:
+        if _early(setting) != _early(first):
+            raise ValueError("the settings differ in land_share, side_conflict or the layer 2 rules of rules_off, which layers 1, 2 and 4 use and which run once")
+    start = start or baseline(counts, refs, grid, first)
+    present = tally(start.status, start.presence.head(0))
+    if not present["outside"] or not present["native"]:
+        raise ValueError(f"the calibration needs outside and native presences, and has {present['outside']} outside and {present['native']} native")
+    table = []
+    for i, setting in enumerate(settings_grid):
+        t = tally(start.status, outlier_rows(start.presence, refs, grid, setting))
+        table.append(
+            {
+                "setting": i,
+                **{k: getattr(setting, k) for k in GRID},
+                **t,
+                "outside_rate": _share(t["outside_removed"], t["outside"]),
+                "native_loss": _share(t["native_lost"], t["native"]),
+            }
+        )
+        if (i + 1) % 9 == 0:
+            log.info("setting %d of %d", i + 1, len(settings_grid))
+    return pl.DataFrame(table, schema=TABLE_SCHEMA)
+
+
+def pipeline_tally(raw: pl.DataFrame, final: pl.DataFrame, wcvp: pl.DataFrame, tdwg3_parts: pl.DataFrame) -> dict[str, int]:
+    """The tally of the whole of cleaning: the plant presences of `raw` (before any layer) that `final` (after them) no longer has, as `tally` counts.
+
+    Unlike `calibrate` this counts what layers 1, 2 and 4 take as well, the records layer 1 rightly drops and the presences layer 4 moves to the other
+    side of a cell included, so the native loss it gives is the whole run's and not the thresholds'.
+    """
+    lost = raw.select("species_id", "part").unique().join(final.select("species_id", "part"), on=["species_id", "part"], how="anti")
+    return tally(native_status(raw, wcvp, tdwg3_parts), lost)
+
+
+def score(counts: pl.DataFrame, setting: Settings, refs: References, grid: Grid) -> dict:
+    """What one `setting` does to the plants of `counts`: the counts and rates of `calibrate`, for a setting chosen on other plants."""
+    row = calibrate(counts, [setting], refs, grid).row(0, named=True)
+    return {k: row[k] for k in SCORE}
+
+
+# ---- regions
+
+def tdwg_regions(level3: Path) -> pl.DataFrame:
+    """`tdwg3`, `name`, `level2` and `level1` of the TDWG level 3 regions, from the WGSRPD GeoJSON (its properties only)."""
+    features = json.loads(Path(level3).read_text())["features"]
+    rows = [(p["LEVEL3_COD"], p["LEVEL3_NAM"], p["LEVEL2_COD"], p["LEVEL1_COD"]) for p in (f["properties"] for f in features)]
+    return pl.DataFrame(rows, schema=REGION_SCHEMA, orient="row").sort("tdwg3")
+
+
+def area_cells(tdwg3_parts: pl.DataFrame, regions: pl.DataFrame, area: str) -> set[str]:
+    """The cells whose land touches the area: `level1:<n>` for the regions of a TDWG level 1 region, or `tdwg3:<code>` for one level 3 region.
+
+    Both parts of such a cell are in the area, and so is a cell on the border of it, as the cells are large.
+    """
+    kind, _, value = area.partition(":")
+    if kind == "level1":
+        codes = regions.filter(pl.col("level1") == int(value))["tdwg3"]
+    elif kind == "tdwg3":
+        codes = regions.filter(pl.col("tdwg3") == value)["tdwg3"]
+    else:
+        raise ValueError(f"an area is level1:<n> or tdwg3:<code>, not {area!r}")
+    if codes.is_empty():
+        raise ValueError(f"no region for the area {area!r}")
+    found = tdwg3_parts.filter(pl.col("tdwg3").is_in(codes.implode())).select(cell_of(pl.col("part")).alias("cell")).unique()
+    return set(found["cell"].to_list())
+
+
+def region_loss(status: pl.DataFrame, removed: pl.DataFrame, wcvp: pl.DataFrame, tdwg3_parts: pl.DataFrame, regions: pl.DataFrame) -> pl.DataFrame:
+    """The native presences lost per TDWG level 3 region: `tdwg3`, `name`, `level1`, `parts` (land parts touching the region), `native`, `lost` and `loss`.
+
+    A native presence is counted in each region its part touches and where the species is native, so a part on a border counts in both and the rows
+    do not add up to the total. Sorted by `loss`, highest first, and then by `native`.
+    """
+    native_in = wcvp.filter(pl.col("native")).select("species_id", "tdwg3")
+    region = tdwg3_parts.drop_nulls("tdwg3").select("part", "tdwg3")
+    gone = removed.select("species_id", "part").unique().with_columns(pl.lit(True).alias("gone"))
+    per = (
+        status.filter(pl.col("status") == "native")
+        .join(region, on="part")
+        .join(native_in, on=["species_id", "tdwg3"], how="inner")
+        .join(gone, on=["species_id", "part"], how="left")
+        .group_by("tdwg3")
+        .agg(pl.len().cast(pl.Int64).alias("native"), pl.col("gone").is_not_null().sum().cast(pl.Int64).alias("lost"))
+    )
+    size = region.group_by("tdwg3").agg(pl.col("part").n_unique().cast(pl.Int64).alias("parts"))
+    return (
+        per.join(size, on="tdwg3", how="left")
+        .join(regions.select("tdwg3", "name", "level1"), on="tdwg3", how="left")
+        .with_columns((pl.col("lost") / pl.col("native")).alias("loss"))
+        .select("tdwg3", "name", "level1", "parts", "native", "lost", "loss")
+        .sort(["loss", "native", "tdwg3"], descending=[True, True, False])
+    )
+
+
+def top_regions(losses: pl.DataFrame, min_native: int = 100, n: int = 20) -> pl.DataFrame:
+    """The `n` regions of `region_loss` with the highest loss among those with at least `min_native` native presences."""
+    return losses.filter(pl.col("native") >= min_native).head(n)
+
+
+# ---- the known cases
+
+@dataclass(frozen=True)
+class Case:
+    """A known case of the design. `kind` says what is checked, in the area `area` (see `area_cells`) for the first, third and fourth:
+
+    - `absent`: no presence in the area, and some left outside it.
+    - `native_only`: no presence outside the species' WCVP native regions, and some inside.
+    - `kept`: at most `NATIVE_LOSS_LIMIT` of its presences in the area lost, of at least one.
+    - `only_in`: no presence outside the area, and some inside.
+
+    A case is a species by `name` (matched in COL, so a synonym finds its accepted species), or all the species of a `family`.
+    """
+
+    key: str
+    claim: str
+    kind: Literal["absent", "native_only", "kept", "only_in"]
+    kingdom: str
+    name: str | None = None
+    family: str | None = None
+    area: str | None = None
+
+
+CASES = (
+    Case("tiger", "no tiger presence in Europe", "absent", "Animalia", name="Panthera tigris", area="level1:1"),
+    Case("potato", "potato removed outside its native regions", "native_only", "Plantae", name="Solanum tuberosum"),
+    Case("starling", "starling in North America removed by GRIIS", "absent", "Animalia", name="Sturnus vulgaris", area="level1:7"),
+    Case("hawaiian_bird", "a Hawaiian endemic bird keeps its range", "kept", "Animalia", name="Drepanis coccinea", area="tdwg3:HAW"),
+    Case("lemurs", "Lemuridae stays endemic to Madagascar", "only_in", "Animalia", family="Lemuridae", area="tdwg3:MDG"),
+)
+CRITERIA = {
+    "absent": "no presence in the area, and some left outside it",
+    "native_only": "no presence outside the native regions, and some inside",
+    "kept": f"at least {1 - NATIVE_LOSS_LIMIT:.0%} of the presences in the area kept, of at least one",
+    "only_in": "no presence outside the area, and some inside",
+}
+
+
+def resolve_species(case: Case, index: pl.DataFrame, taxa: pl.DataFrame) -> list[str]:
+    """The COL ids of the species of a case: the one `case.name` names in `index` (`name_index`), or those of `case.family` in `taxa`, sorted."""
+    if case.name is not None:
+        found = match_names(pl.DataFrame({"name": [case.name], "kingdom": [case.kingdom]}), index).row(0, named=True)
+        if found["status"] != "matched":
+            raise ValueError(f"{case.name} is not found among COL's species ({found['status']})")
+        return [found["species_id"]]
+    species = taxa.filter((pl.col("family") == case.family) & (pl.col("kingdom") == case.kingdom))["species_id"]
+    if species.is_empty():
+        raise ValueError(f"there are no species in the family {case.family}")
+    return sorted(species.to_list())
+
+
+def _lost_by_rule(removed: pl.DataFrame, species: Collection[str], zone: pl.Expr | None) -> dict[str, int]:
+    """The presences of `species` that cleaning lost or moved, per rule, in `zone` (an expression on `cell`) or anywhere."""
+    lost = removed.filter(pl.col("presence_lost"), pl.col("species_id").is_in(list(species)))
+    if zone is not None:
+        lost = lost.with_columns(cell_of(pl.col("part")).alias("cell")).filter(zone)
+    by = lost.select("rule", "species_id", "part").unique().group_by("rule").agg(pl.len().cast(pl.Int64).alias("presences")).sort("rule")
+    return dict(by.iter_rows())
+
+
+def _where(presences: pl.DataFrame, tdwg3_parts: pl.DataFrame, regions: pl.DataFrame, n: int = LEFTOVER) -> list[dict]:
+    """The TDWG level 3 regions that `presences` (`species_id`, `part`) touch, with the presences of each, the most first and at most `n`.
+
+    A presence on a part that touches several regions counts in each, and one on a part that touches none (a sea part, mostly) is counted as `(no region)`.
+    """
+    found = (
+        presences.select("species_id", "part")
+        .unique()
+        .join(tdwg3_parts.drop_nulls("tdwg3").select("part", "tdwg3"), on="part", how="left")
+        .join(regions.select("tdwg3", "name"), on="tdwg3", how="left")
+        .with_columns(pl.col("name").fill_null("(no region)"))
+        .group_by("name")
+        .agg(pl.struct("species_id", "part").n_unique().cast(pl.Int64).alias("presences"))
+        .sort(["presences", "name"], descending=[True, False])
+    )
+    return found.head(n).rename({"name": "region"}).to_dicts()
+
+
+def evaluate_case(
+    case: Case,
+    species: Collection[str],
+    before: pl.DataFrame,
+    after: pl.DataFrame,
+    removed: pl.DataFrame,
+    cells: Collection[str],
+    wcvp: pl.DataFrame | None = None,
+    tdwg3_parts: pl.DataFrame | None = None,
+    regions: pl.DataFrame | None = None,
+) -> dict:
+    """Check a case against the presences of its `species` before cleaning (`before`) and after it (`after`), tables with `species_id` and `part`.
+
+    `removed` is `Cleaned.removed`, for what took the presences in the area (outside it for `only_in`, anywhere for `native_only`). `cells` are the area's
+    cells (`area_cells`), and `wcvp` and `tdwg3_parts` are needed for `native_only`. The result has `case`, `claim`, `kind`, `criterion`, `species`, the
+    presences before and after in all and in the area or outside it or native and outside, `removed_by_rule` and `passed`. With `tdwg3_parts` and `regions`
+    it also has `leftover_regions`, where the presences that break an `absent`, `only_in` or `native_only` case are (see `_where`), empty if none do.
+    """
+    mine = pl.DataFrame({"species_id": list(species)}, schema={"species_id": pl.String})
+
+    def own(frame: pl.DataFrame) -> pl.DataFrame:
+        return frame.join(mine, on="species_id", how="semi").select("species_id", "part").unique()
+
+    b, a = own(before), own(after)
+    area = list(cells)
+
+    def inside(frame: pl.DataFrame) -> int:
+        return frame.filter(cell_of(pl.col("part")).is_in(area)).height
+
+    out: dict = {
+        "case": case.key,
+        "claim": case.claim,
+        "kind": case.kind,
+        "criterion": CRITERIA[case.kind],
+        "species": len(set(species)),
+        "presences_before": b.height,
+        "presences_after": a.height,
+    }
+    in_area = pl.col("cell").is_in(area)
+    in_area_part = cell_of(pl.col("part")).is_in(area)
+    if case.kind == "native_only":
+        if wcvp is None or tdwg3_parts is None:
+            raise ValueError("native_only needs wcvp and tdwg3_parts")
+        s_before, s_after = (native_status(frame, wcvp, tdwg3_parts)["status"].value_counts() for frame in (b, a))
+        n_b, n_a = (dict(v.iter_rows()) for v in (s_before, s_after))
+        out |= {
+            "native_before": n_b.get("native", 0),
+            "outside_before": n_b.get("outside", 0),
+            "native_after": n_a.get("native", 0),
+            "outside_after": n_a.get("outside", 0),
+        }
+        out["passed"] = out["outside_after"] == 0 and out["native_after"] > 0
+        zone = None
+        offenders = native_status(a, wcvp, tdwg3_parts).filter(pl.col("status") == "outside")
+    else:
+        out |= {"area_before": inside(b), "area_after": inside(a)}
+        if case.kind == "absent":
+            out["passed"] = out["area_after"] == 0 and a.height - out["area_after"] > 0
+            zone = in_area
+            offenders = a.filter(in_area_part)
+        elif case.kind == "kept":
+            kept_enough = out["area_after"] >= (1 - NATIVE_LOSS_LIMIT) * out["area_before"] - EPS
+            out["passed"] = out["area_before"] > 0 and kept_enough
+            zone = in_area
+            offenders = a.head(0)
+        else:
+            out |= {"outside_before": b.height - out["area_before"], "outside_after": a.height - out["area_after"]}
+            out["passed"] = out["outside_after"] == 0 and out["area_after"] > 0
+            zone = ~in_area
+            offenders = a.filter(~in_area_part)
+    out["passed"] = bool(out["passed"])
+    out["removed_by_rule"] = _lost_by_rule(removed, species, zone)
+    if tdwg3_parts is not None and regions is not None:
+        out["leftover_regions"] = _where(offenders, tdwg3_parts, regions)
+    return out
+
+
+def known_cases(cases: Collection[Case], index: pl.DataFrame, split: pl.DataFrame, counts: pl.DataFrame, cleaned, refs: References, regions: pl.DataFrame) -> list[dict]:
+    """Run the `cases` whose species are in half A, and list the others as waiting for step 9.
+
+    `split` is `species_id, lineage, half` and is where the half comes from, never the occurrences. `counts` are half A's country counts and `cleaned`
+    their `Cleaned` result with every layer on. A case whose family is in half B is returned with its `case`, `claim`, `family`, `half` and `status` and
+    nothing else. A case whose species are in both halves is an error, as the split keeps a family whole.
+    """
+    results = []
+    for case in cases:
+        species = resolve_species(case, index, refs.taxa)
+        held = split.filter(pl.col("species_id").is_in(species))
+        halves = sorted(held["half"].unique().to_list())
+        if held.height != len(species) or len(halves) != 1:
+            raise ValueError(f"{case.key}: the species of the case are in the halves {halves} of the split, with {held.height} of {len(species)} in it, and a case belongs to one half")
+        family = case.family or refs.taxa.filter(pl.col("species_id") == species[0])["family"][0]
+        head = {"case": case.key, "claim": case.claim, "family": family, "half": halves[0]}
+        if halves[0] != "A":
+            results.append({**head, "status": "waiting for step 9"})
+            continue
+        cells = area_cells(refs.tdwg3_parts, regions, case.area) if case.area else set()
+        before = counts.filter(pl.col("species_id").is_in(species), pl.col("n_raw") > 0).select("species_id", "part")
+        done = evaluate_case(case, species, before, cleaned.presence, cleaned.removed, cells, refs.wcvp, refs.tdwg3_parts, regions)
+        results.append({**head, "status": "run", **{k: v for k, v in done.items() if k not in head}})
+    return results

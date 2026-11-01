@@ -442,11 +442,20 @@ def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settin
     run.move(pl.concat([same, chosen, dropped]), ["species_id", "part"])
 
 
+def outlier_rows(rows: pl.DataFrame, refs: References, grid: Grid, settings: Settings) -> pl.DataFrame:
+    """The rows of `rows` that layer 5 takes out, with the `rule` of each: every row of a flagged species in a flagged cell.
+
+    `rows` is what layers 1 to 4 leave, by species and part or also by country (`Cleaned.presence`, or the rows `clean` holds). Layer 5 is the
+    last layer and judges species and cells, so the rows it takes from `Cleaned.presence` are the presences that cleaning with it would
+    lose. That lets the calibration run layers 1 to 4 once and layer 5 for every setting.
+    """
+    flagged = flag_outliers(rows, refs.groups, grid, settings)
+    return rows.with_columns(cell_of(pl.col("part")).alias("cell")).join(flagged, on=["species_id", "cell"], how="inner").drop("cell")
+
+
 def _layer_5(run: _Run, refs: References, grid: Grid, settings: Settings) -> None:
     """Take out what `realms.outliers` flags: every row of a flagged species in a flagged cell, under the rule that flagged it."""
-    flagged = flag_outliers(run.rows, refs.groups, grid, settings)
-    hit = run.rows.with_columns(cell_of(pl.col("part")).alias("cell")).join(flagged, on=["species_id", "cell"], how="inner").drop("cell")
-    run.drop(hit, pl.col("rule"))
+    run.drop(outlier_rows(run.rows, refs, grid, settings), pl.col("rule"))
 
 
 def clean(
