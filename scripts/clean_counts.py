@@ -22,7 +22,8 @@ from pathlib import Path
 
 import polars as pl
 
-from realms.clean import LAYERS, WCVP_MODES, Settings, clean, provisional_twin_records, provisional_twins, removal_summary
+from realms.clean import LAYERS, WCVP_MODES, Settings, clean
+from realms.clean_report import provisional_twin_records, provisional_twins, removal_summary
 from realms.grid import KINDS, ZERO_KM2, load_grid, parts
 from realms.natives import load_references, name_index
 from realms.occurrences import load_country_counts
@@ -49,7 +50,10 @@ def twins_of(col: Path) -> pl.DataFrame:
 
 
 def caspian(grid, counts: pl.DataFrame, cleaned) -> dict:
-    """Whether the Caspian's cells have Natural Earth sea area, and whether their records stay in the sea part."""
+    """Whether the Caspian's cells have Natural Earth sea area, and whether their records stay in the sea part.
+
+    Before and after are the same measure, the clean records `n - n_human_text` that layer 1 counts (`records` in the result).
+    """
     box = grid.cells.filter(
         pl.col("lon").is_between(*CASPIAN_BOX["lon"]), pl.col("lat").is_between(*CASPIAN_BOX["lat"]), pl.col("sea_km2") >= ZERO_KM2
     ).sort("lat", "lon")
@@ -65,7 +69,7 @@ def caspian(grid, counts: pl.DataFrame, cleaned) -> dict:
             .agg(pl.col(column).sum().alias(name), pl.len().alias(f"{name}_rows"))
         )
 
-    raw = per_cell(counts, "n", "n_in")
+    raw = per_cell(counts.select("part", (pl.col("n") - pl.col("n_human_text")).alias("records")), "records", "records_in")
     after = per_cell(cleaned.presence, "records", "records_out")
     folded = per_cell(cleaned.removed.filter(pl.col("rule") == "zero_area_part"), "records", "zero_area_records")
     table = (
@@ -84,8 +88,8 @@ def caspian(grid, counts: pl.DataFrame, cleaned) -> dict:
         "sea_km2": [round(v, 1) for v in big["sea_km2"].to_list()],
         "land_km2": [round(v, 1) for v in big["land_km2"].to_list()],
         "box_cells_below_threshold_km2": [round(v, 1) for v in box.filter(pl.col("sea_km2") < CASPIAN_SEA_KM2)["sea_km2"].to_list()],
-        "records_in_on_sea_parts": int(sea["n_in"].sum()),
-        "records_in_on_land_parts": int(land["n_in"].sum()),
+        "records_in_on_sea_parts": int(sea["records_in"].sum()),
+        "records_in_on_land_parts": int(land["records_in"].sum()),
         "records_out_on_sea_parts": int(sea["records_out"].sum()),
         "records_out_on_land_parts": int(land["records_out"].sum()),
         "records_folded_by_zero_area_part": int(table["zero_area_records"].sum()),
@@ -192,14 +196,16 @@ def main() -> None:
             "removed_rows": cleaned.removed.height,
             "by_rule": by_rule.to_dicts(),
             "by_group": by_group.to_dicts(),
+            "layer_4_species": cleaned.sides,
             "zero_area": zero_area(grid, cleaned),
             "caspian": caspian(grid, counts, cleaned),
         }
         report["modes"][mode] = entry
         say(f"{mode}: {seconds:.0f} s, peak {peak_gb():.1f} GB, presence {entry['presence_rows']} rows of {survivors} species, {entry['presence_records']} records")
         with pl.Config(tbl_rows=60, tbl_cols=12, fmt_str_lengths=40):
-            say(str(by_rule.filter(pl.col("applied")).drop("applied")))
-            say(str(by_rule.filter(~pl.col("applied")).drop("applied", "presences")))
+            say(str(by_rule.filter(~pl.col("unplaced")).drop("unplaced")))
+            say(str(by_rule.filter(pl.col("unplaced")).drop("unplaced", "presences")))
+        say(f"layer 4 species: {entry['layer_4_species']}")
         say(f"zero-area fold: {entry['zero_area']}")
         del cleaned, summary, by_group, by_rule
         gc.collect()

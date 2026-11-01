@@ -4,88 +4,19 @@ The grid has cells named by numbers, so that "lowest cell id" can be told from t
 `(land_km2, sea_km2)`, and a part with less than `ZERO_KM2` of area is none.
 """
 
+import numpy as np
 import polars as pl
 import pytest
 
-from realms.clean import LAYERS, SWITCHABLE, Cleaned, Settings, clean, provisional_twin_records, provisional_twins, removal_summary
-from realms.grid import ZERO_KM2, Grid, part_adjacency, parts
+from clean_helpers import GRID, counts, gone, kept, make_grid, refs, row, taxon
+from realms.clean import LAYERS, RULES, SWITCHABLE, Settings, _Run, clean
+from realms.clean_report import removal_summary
+from realms.grid import ZERO_KM2, part_adjacency, parts
 from realms.matrix import cell_taxa
-from realms.natives import References
 from realms.nullmodel import excess_table
-from realms.occurrences import COUNTS, DISTINCT
+from realms.occurrences import COUNTS
 
 ALL = frozenset(LAYERS)
-
-
-def make_grid(cells: dict[str, tuple[float, float]], edges: list[tuple[str, str]] = ()) -> Grid:
-    names = list(cells)
-    table = pl.DataFrame(
-        {
-            "cell": names,
-            "lat": [0.0] * len(names),
-            "lon": [float(i) for i in range(len(names))],
-            "area_km2": [land + sea for land, sea in cells.values()],
-            "land_km2": [land for land, _ in cells.values()],
-            "sea_km2": [sea for _, sea in cells.values()],
-        }
-    )
-    adjacency = {c: set() for c in names}
-    for a, b in edges:
-        adjacency[a].add(b)
-        adjacency[b].add(a)
-    return Grid(6, table, adjacency)
-
-
-# 10 and 13 are land only, 11 and 9 are coastal, 12 is open sea, 100 is land only. In a chain 10 - 11 - 12 - 13.
-GRID = make_grid({"10": (1000.0, 0.0), "11": (500.0, 500.0), "12": (0.0, 1000.0), "13": (1000.0, 0.0)}, [("10", "11"), ("11", "12"), ("12", "13")])
-
-
-def row(species, part, country="AA", n=10, **given):
-    """A row of country counts. Every count is `n` but the distinct ones, which are 1, and the human-text one, which is 0."""
-    values = {c: (1 if c in DISTINCT else n) for c in COUNTS} | {"n_human_text": 0} | given
-    return {"species_id": species, "countrycode": country, "part": part, **values}
-
-
-def counts(*rows) -> pl.DataFrame:
-    schema = {"species_id": pl.String, "countrycode": pl.String, "part": pl.String, **{c: pl.Int64 for c in COUNTS}}
-    return pl.DataFrame(list(rows), schema=schema)
-
-
-def taxon(species, kingdom="Animalia", cls="Insecta", environment=None, extinct=False):
-    return {"species_id": species, "kingdom": kingdom, "class": cls, "environment": environment, "extinct": extinct}
-
-
-def refs(taxa=(), groups=None, wcvp=(), griis=(), wrims=(), tdwg3=(), admin1=(), griis_no_cells=(), wrims_no_country=(), no_wild_range=()) -> References:
-    taxa = pl.DataFrame(list(taxa), schema={"species_id": pl.String, "kingdom": pl.String, "class": pl.String, "environment": pl.String, "extinct": pl.Boolean})
-    griis_schema = {"species_id": pl.String, "country": pl.String, "subdivision": pl.String}
-    wrims_schema = {"species_id": pl.String, "area_id": pl.String, "area": pl.String, "country": pl.String}
-    if groups is None:
-        groups = [(s, "Insects") for s in taxa["species_id"]]
-    return References(
-        taxa=taxa,
-        groups=pl.DataFrame(list(groups), schema={"species_id": pl.String, "tax_group": pl.String}, orient="row"),
-        wcvp=pl.DataFrame(list(wcvp), schema={"species_id": pl.String, "tdwg3": pl.String, "native": pl.Boolean}, orient="row"),
-        griis=pl.DataFrame(list(griis), schema=griis_schema, orient="row"),
-        wrims=pl.DataFrame(list(wrims), schema=wrims_schema, orient="row"),
-        tdwg3_parts=pl.DataFrame(list(tdwg3), schema={"part": pl.String, "tdwg3": pl.String}, orient="row"),
-        admin1_cells=pl.DataFrame(list(admin1), schema={"cell": pl.String, "country": pl.String, "subdivision": pl.String, "via": pl.String}, orient="row"),
-        griis_no_cells=pl.DataFrame(list(griis_no_cells), schema=griis_schema, orient="row"),
-        wrims_no_country=pl.DataFrame(list(wrims_no_country), schema=wrims_schema, orient="row"),
-        no_wild_range=frozenset(no_wild_range),
-    )
-
-
-def kept(cleaned: Cleaned, column="records") -> dict:
-    return {(s, p): v for s, p, v in cleaned.presence.select("species_id", "part", column).iter_rows()}
-
-
-def gone(cleaned: Cleaned, layer=None, rule=None) -> set:
-    removed = cleaned.removed
-    if layer is not None:
-        removed = removed.filter(pl.col("layer") == layer)
-    if rule is not None:
-        removed = removed.filter(pl.col("rule") == rule)
-    return {(s, p, c) for s, p, c in removed.select("species_id", "part", "countrycode").iter_rows()}
 
 
 # ---- settings
@@ -168,16 +99,6 @@ def test_the_zero_area_fold_is_not_a_layer_and_counts_only_records_that_count():
     assert kept(off) == {("s1", "10:land"): 4, ("s2", "10:land"): 4}
 
 
-def zero_area_map(presence: pl.DataFrame, grid: Grid):
-    """Realm 1 is the part `20:land` alone where the presence has it, and realm 0 is everything else."""
-    names = sorted(presence["part"].unique())
-    table = parts(grid, names)
-    areas = dict(zip(table["part"], table["area_km2"], strict=True))
-    labels = {p: 1 if p == "20:land" else 0 for p in names}
-    ct = cell_taxa(presence.select("species_id", pl.col("part").alias("cell")), None)
-    return {2: labels}, ct, part_adjacency(grid, names), areas
-
-
 def test_excess_table_runs_on_maps_built_from_cleaned_presence():
     grid = make_grid(
         {"1": (1000.0, 0.0), "2": (1000.0, 0.0), "3": (500.0, 500.0), "4": (1000.0, 0.0), "5": (1000.0, 0.0), "20": (0.0, 1000.0)},
@@ -186,12 +107,6 @@ def test_excess_table_runs_on_maps_built_from_cleaned_presence():
     rows = [row(s, p, n=3) for s in ("a", "b", "c") for p in ("1:land", "2:land", "3:land", "3:sea", "4:land", "5:land")]
     rows += [row(s, "20:land", n=3) for s in ("a", "b")]  # a sliver of land in a cell of sea
     c = counts(*rows)
-
-    # as the pilot had it: a realm that is a zero-area part alone, which `null_partitions` divides by
-    raw = pl.DataFrame({"species_id": c["species_id"], "part": c["part"]}).unique()
-    maps, ct, adjacency, areas = zero_area_map(raw, grid)
-    with pytest.raises(ZeroDivisionError):
-        excess_table(maps, ct, adjacency, areas, n_null=3)
 
     # after the fold no part of zero area is left, and the map's realms all have area
     cleaned = clean(c, refs(), grid)
@@ -381,7 +296,7 @@ def test_what_task_10_could_not_place_is_not_applied_and_is_counted():
         ("griis_subnational", "s2", "FR", "Clipperton", 4),
         ("wrims", "s1", None, "Open sea", 7),
     ]
-    summary = removal_summary(out, r).filter(~pl.col("applied"))
+    summary = removal_summary(out, r).filter(pl.col("unplaced"))
     assert set(summary["rule"]) == {"unplaced_griis", "unplaced_wrims"}
     assert summary.filter(pl.col("rule") == "unplaced_griis")["rows"].sum() == 2  # pairs
     assert summary.filter(pl.col("rule") == "unplaced_wrims")["rows"].sum() == 1
@@ -634,82 +549,96 @@ def test_a_part_is_removed_once_by_one_rule():
     assert out.removed.height == 1 and out.removed["rule"].to_list() == ["extinct"]
 
 
-# ---- the summary
-
-def test_removal_summary_counts_records_and_presences_per_layer_rule_group_and_country():
-    r = refs(
-        [taxon("ext1", extinct=True), taxon("ext2", extinct=True), taxon("alien")],
-        groups=[("ext1", "Birds"), ("ext2", "Insects"), ("alien", "Insects")],
-        griis=[("alien", "AA", None)],
-    )
-    c = counts(
-        row("ext1", "10:land", country="AA", n=5), row("ext1", "10:land", country="BB", n=3), row("ext1", "13:land", country="AA", n=2),
-        row("ext2", "10:land", country="AA", n=7),
-        row("alien", "10:land", country="AA", n=11),
-    )
-    out = clean(c, r, GRID)
-    summary = removal_summary(out, r)
-    assert summary.columns == ["layer", "rule", "applied", "tax_group", "countrycode", "rows", "presences", "records"]
-
-    def cell(**k):
-        return [(d["rows"], d["presences"], d["records"]) for d in summary.filter(*(pl.col(a) == b for a, b in k.items())).to_dicts()]
-
-    assert cell(rule="extinct", tax_group="Birds", countrycode="AA") == [(2, 2, 7)]
-    assert cell(rule="extinct", tax_group="Birds", countrycode="BB") == [(1, 1, 3)]  # 10:land is also AA's, so a country's presences don't add up
-    assert cell(rule="extinct", tax_group="Insects") == [(1, 1, 7)]
-    assert cell(rule="griis") == [(1, 1, 11)]
-    assert summary.filter(pl.col("rule") == "griis")["layer"].to_list() == [3]
-    assert set(summary["applied"]) == {True}
-    assert summary["records"].sum() == 5 + 3 + 2 + 7 + 11
-    # with no country in the key, the presences are the true ones: 10:land and 13:land of ext1
-    by_group = removal_summary(out, r, by=("tax_group",))
-    assert by_group.columns == ["layer", "rule", "applied", "tax_group", "rows", "presences", "records"]
-    assert by_group.filter(pl.col("rule") == "extinct", pl.col("tax_group") == "Birds").row(0, named=True)["presences"] == 2
-    by_rule = removal_summary(out, r, by=())
-    assert by_rule.filter(pl.col("rule") == "extinct").row(0, named=True)["presences"] == 3  # ext1's two and ext2's one
-    assert by_rule.filter(pl.col("rule") == "extinct").row(0, named=True)["records"] == 17
 
 
-def test_a_presence_that_survives_in_another_country_is_not_a_presence_lost():
-    r = refs([taxon("s")], griis=[("s", "AA", None)])
-    c = counts(row("s", "10:land", country="AA", n=5), row("s", "10:land", country="BB", n=3))
-    out = clean(c, r, GRID)
-    assert out.removed["presence_lost"].to_list() == [False]
-    assert removal_summary(out, r, by=()).row(0, named=True)["presences"] == 0
+def test_a_rule_that_is_not_in_rules_raises_before_anything_changes():
+    rows = counts(row("s", "10:land")).with_columns(pl.col("n").alias("records"))
+    run = _Run(rows)
+    with pytest.raises(ValueError, match="no_such_rule"):
+        run.drop(rows, "no_such_rule")
+    assert run.rows.equals(rows) and not run.removed
+    moves = pl.DataFrame({"part": ["10:land"], "to_part": ["11:land"], "rule": ["no_such_rule"]})
+    with pytest.raises(ValueError, match="no_such_rule"):
+        run.move(moves, ["part"])
+    assert run.rows.equals(rows)
 
 
-def test_removal_summary_of_a_clean_with_no_removals_is_empty_and_has_the_columns():
-    r = refs([taxon("s")])
-    summary = removal_summary(clean(counts(row("s", "10:land")), r, GRID), r)
-    assert summary.height == 0 and summary.columns == ["layer", "rule", "applied", "tax_group", "countrycode", "rows", "presences", "records"]
+# ---- conservation: records are never lost without a rule
+
+# 1 and 7 are land only, 4 has a sea of 0.4 m2 and 5 a land of 0.5 m2 (zero-area parts), 2 and 6 are coastal, 3 and 8 are open sea. A ring, with a chord.
+RANDOM_CELLS = {
+    "1": (1000.0, 0.0), "2": (500.0, 500.0), "3": (0.0, 1000.0), "4": (1000.0, 0.0004),
+    "5": (0.0005, 1000.0), "6": (300.0, 700.0), "7": (1000.0, 0.0), "8": (0.0, 1000.0),
+}
+RANDOM_EDGES = [("1", "2"), ("2", "3"), ("3", "4"), ("4", "5"), ("5", "6"), ("6", "7"), ("7", "8"), ("8", "1"), ("2", "6")]
+RANDOM_GRID = make_grid(RANDOM_CELLS, RANDOM_EDGES)
+RANDOM_PARTS = [f"{cell}:{kind}" for cell in RANDOM_CELLS for kind in ("land", "sea")]
+# the land parts with area, and the TDWG regions they touch: 7 is in none, and 5's land has no area
+RANDOM_TDWG3 = [("1:land", "R1"), ("2:land", "R1"), ("2:land", "R2"), ("4:land", "R2"), ("6:land", "R3"), ("7:land", None)]
+RANDOM_ADMIN1 = [("2", "AA", "Sub", "centre"), ("6", "AA", "Sub", "overlap")]
+COUNTRIES = ["AA", "BB", "CC", None]
 
 
-def test_removal_summary_names_a_species_with_no_group():
-    r = refs([taxon("s", extinct=True)], groups=[])
-    summary = removal_summary(clean(counts(row("s", "10:land")), r, GRID), r)
-    assert summary["tax_group"].to_list() == ["unknown"]
+def random_case(seed: int):
+    """A small random table of country counts, and references that have a hit for every rule of layers 2 to 4."""
+    rng = np.random.default_rng(seed)
+    ids = [f"s{i}" for i in range(40)]
+    kingdoms = ["Plantae", "Animalia", "Fungi"]
+    classes = ["Aves", "Insecta", "Magnoliopsida"]
+    environments = [None, "terrestrial", "marine", "freshwater", "brackish,marine", "marine,terrestrial"]
+    taxa, wcvp, griis, wrims, no_wild_range, griis_no_cells, wrims_no_country, rows = [], [], [], [], [], [], [], []
+    for species in ids:
+        kingdom = kingdoms[rng.choice(3, p=[0.5, 0.4, 0.1])]
+        taxa.append(taxon(species, kingdom, classes[rng.choice(3, p=[0.1, 0.4, 0.5])], environments[rng.integers(len(environments))], bool(rng.random() < 0.1)))
+        if kingdom == "Plantae" and rng.random() < 0.8:
+            for region in ("R1", "R2", "R3", "R4"):
+                draw = rng.random()
+                if draw < 0.3:
+                    wcvp.append((species, region, True))
+                elif draw < 0.5:
+                    wcvp.append((species, region, False))
+        for country in ("AA", "BB"):
+            if rng.random() < 0.15:
+                griis.append((species, country, None))
+        if rng.random() < 0.1:
+            griis.append((species, "AA", "Sub"))
+        if rng.random() < 0.05:
+            griis_no_cells.append((species, "AA", "Nowhere"))
+        if rng.random() < 0.15:
+            wrims.append((species, "a", "an area", COUNTRIES[rng.integers(3)]))
+        if rng.random() < 0.05:
+            wrims_no_country.append((species, "b", "open sea", None))
+        for _ in range(rng.integers(1, 7)):
+            n = 0 if rng.random() < 0.1 else int(rng.integers(1, 60))
+            human = n if rng.random() < 0.15 else int(rng.integers(0, n + 1))
+            rows.append(row(species, RANDOM_PARTS[rng.integers(len(RANDOM_PARTS))], COUNTRIES[rng.integers(len(COUNTRIES))], n=n, n_raw=n + int(rng.integers(0, 6)), n_human_text=human))
+    no_wild_range = set(rng.choice(ids, 3, replace=False))
+    return counts(*rows), refs(taxa, wcvp=wcvp, griis=griis, wrims=wrims, tdwg3=RANDOM_TDWG3, admin1=RANDOM_ADMIN1, griis_no_cells=griis_no_cells, wrims_no_country=wrims_no_country, no_wild_range=no_wild_range)
 
 
-# ---- provisionally accepted twins
+@pytest.mark.parametrize("layer_1", [True, False], ids=["layer1", "no-layer1"])
+@pytest.mark.parametrize("side_conflict", ["environment", "leave"])
+@pytest.mark.parametrize("wcvp_mode", ["native_only", "introduced", "off"])
+@pytest.mark.parametrize("seed", range(4))
+def test_records_are_conserved(seed, wcvp_mode, side_conflict, layer_1):
+    """What is left plus what layers 2 to 4 removed is what came in. Folds move records and the zero-area fold loses none."""
+    c, r = random_case(seed)
+    layers = ALL if layer_1 else ALL - {1}
+    out = clean(c, r, RANDOM_GRID, layers, Settings(wcvp_mode=wcvp_mode, side_conflict=side_conflict))
+    came_in = int((c["n"] - c["n_human_text"]).sum() if layer_1 else c["n_raw"].sum())
+    lost = out.removed.filter(pl.col("layer") >= 2, pl.col("to_part").is_null())["records"].sum()
+    assert int(out.presence["records"].sum()) + int(lost) == came_in
+    # a removal has no `to_part` and a move has one, and the layer of every row is that of its rule
+    assert out.removed.filter(pl.col("layer") == 0)["to_part"].null_count() == 0
+    assert all(RULES[rule] == layer for rule, layer in out.removed.select("rule", "layer").unique().iter_rows())
+    assert out.presence["records"].min() > 0
+    assert not out.presence.select("species_id", "part").is_duplicated().any()
 
-def test_provisional_twins_are_the_provisional_ids_whose_name_also_has_an_accepted_id():
-    index = pl.DataFrame(
-        {
-            "name": ["Aus bus", "Aus bus", "Aus cus", "Aus dus", "Aus dus", "Aus eus", "Aus eus", "Aus fus", "Aus fus"],
-            "kingdom": ["Animalia"] * 7 + ["Animalia", "Plantae"],
-            "species_id": ["A1", "A2", "B1", "C1", "C2", "D1", "D2", "E1", "E2"],
-            "status": ["accepted", "provisionally accepted", "provisionally accepted", "accepted", "synonym", "accepted", "accepted", "accepted", "provisionally accepted"],
-        }
-    )
-    twins = provisional_twins(index)
-    assert twins.columns == ["species_id", "name", "kingdom", "accepted_ids"]
-    # A2 has an accepted twin; B1 has none; a synonym is not a twin; E2 is a plant, which an animal does not twin
-    assert twins["species_id"].to_list() == ["A2"]
-    assert twins["accepted_ids"].to_list() == [1]
 
-
-def test_provisional_twin_records_count_the_records_of_those_ids():
-    twins = pl.DataFrame({"species_id": ["A2", "A3"], "name": ["x", "y"], "kingdom": ["Animalia"] * 2, "accepted_ids": [1, 2]})
-    c = counts(row("A2", "10:land", n=5), row("A2", "13:land", n=2), row("A1", "10:land", n=100), row("A3", "10:land", n=0, n_raw=4))
-    found = provisional_twin_records(c, twins)
-    assert found == {"species": 2, "rows": 3, "n": 7, "n_raw": 11, "ambiguous_species": 1}
+def test_the_random_tables_reach_every_rule():
+    reached = set()
+    for seed in range(4):
+        for mode in ("native_only", "introduced"):
+            c, r = random_case(seed)
+            reached |= set(clean(c, r, RANDOM_GRID, ALL, Settings(wcvp_mode=mode)).removed["rule"])
+    assert reached == set(RULES)

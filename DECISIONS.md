@@ -721,16 +721,19 @@ already known to need about 15 GB. Everything new reads the exports through Pola
 
 ### Cleaning, layers 1 to 4
 
-`src/realms/clean.py` (`clean`, `removal_summary`, `Settings`) and `scripts/clean_counts.py`. `clean` takes the country counts of half A and
+`src/realms/clean.py` (`clean`, `Settings`), `src/realms/clean_report.py` (`removal_summary`, the provisional twins) and `scripts/clean_counts.py`. `clean` takes the country counts of half A and
 returns `Cleaned`: `presence` (species and part, summed over countries, with a `records` column), `removed` (one row for every row of the counts
-that a layer took out or moved: `layer`, `rule`, species, part, country, `records`, `to_part`, and `presence_lost`) and `unplaced`. Nothing is
-removed without a layer and a rule, and each can be switched off: a layer with `layers`, one rule with `Settings.rules_off`
+that a layer took out or moved: `layer`, `rule`, species, part, country, `records`, `to_part`, and `presence_lost`), `unplaced` and `sides` (layer 4's counts of
+species). Nothing is removed without a layer and a rule, `RULES` says which layer each rule is of and a rule that is not in it raises, and each can be switched off: a layer with `layers`, one rule with `Settings.rules_off`
 (`extinct`, `no_wild_range`, `griis`, `griis_subnational`, `wrims`), WCVP with `wcvp_mode`. Layer 5 is accepted in `layers` and does nothing until
 Task 12. All thresholds are starting values until the freeze.
 
 **Records.** `records` is `n - n_human_text` with layer 1 on and `n_raw` with it off. Layer 1 takes out a row with no such record: rule
 `failed_flags` if `n` is 0 (every record failed the flag checks) and `human_text` otherwise. An emptied row is logged with its `n_raw`, as that is what it
-took with it. A row that loses some records and keeps others is not in `removed`: `n_raw - records` in `presence` is what it lost. The other counts
+took with it. A row that loses some records and keeps others is not in `removed`: `n_raw - records` in `presence` is what it lost.
+**The unit of `removed.records` is therefore `n_raw` for layer 1 and the row's `records` for every other layer** (the clean records `n - n_human_text`, or `n_raw` with
+layer 1 off), so it must not be summed across layer 1 and the rest. From layer 2 on records are conserved: `presence.records` plus the `records` of the removals
+of layers 2 to 4 (a null `to_part`) are the input's `n - n_human_text`, which `test_records_are_conserved` states for every WCVP mode and `side_conflict`, with layer 1 on and off. The other counts
 (datasets, years, licence and source counts) are kept as the download has them, with the distinct ones taking the maximum over rows, as `load_presence` does.
 
 **Zero-area parts: layer 0, rule `zero_area_part`.** Records in a part with an area below `ZERO_KM2` fold into the other part of the same cell, first of
@@ -775,8 +778,9 @@ can be told from the country lists'.
 
 **What Task 10 could not place is never applied** (`griis_no_cells`, `wrims_no_country`) and is listed in `Cleaned.unplaced` with the records of each
 species, for the species that have records: pairs at the level of a list or area. `removal_summary` puts them in as rows `unplaced_griis` and
-`unplaced_wrims` with `applied` False; `rows` are the pairs, and `records` the species' records in all, which is only an upper bound on the gap. No pair of the
-gap is removed, and nothing is counted for a rule that is off.
+`unplaced_wrims`, with a boolean column `unplaced` True so that a consumer filters on it (`~unplaced` for the removals); the rule names are kept. This replaces the
+`applied` column the first version had, which said the same the other way round. `rows` are the pairs, and `records` the species' records in all, which is only an
+upper bound on the gap. No pair of the gap is removed, and nothing is counted for a rule that is off.
 
 **WRiMS** removes a row when the species is introduced for the row's `countrycode` (the country the area name gives) and the part is a sea part, rule `wrims`.
 It rests on the Denmark check: GBIF sets `countrycode` on sea records inside EEZs.
@@ -789,7 +793,10 @@ right-side part of the neighbouring cell that holds most of the species' records
 (`land_sea_dropped`). Three points the brief leaves open:
 
 - **A neighbour counts only if the species has records on the part.** A neighbour with the right kind of part and none of the species' records is
-  not one: folding there would invent a presence where the species was never seen, so the row is dropped.
+  not one: folding there would invent a presence where the species was never seen, so the row is dropped. **"Most records" is what the neighbour holds
+  before this pass moves anything**, so the records that the same pass folds into a part within its own cell do not count towards it. It could change which
+  neighbour takes a row, and it is a choice of simplicity (one pass, no order among species' rows). It touches only `land_sea_neighbour`, which is
+  20,781 records with `native_only` (20,945 with `introduced`, 21,178 with `off`), 0.001% of the clean records.
 - **The lowest id is the lowest as a number** (ids are long integers kept as text, and `9` comes before `100`).
 - **Where COL's environment and the records disagree, the environment decides** (`Settings.side_conflict="environment"`; `"leave"` leaves the species alone).
   The brief's "or" lets a species be both: of half A's species, 1,536 are exactly terrestrial with at least 95% of their records in sea parts, and 4,729 are
@@ -852,11 +859,12 @@ so no record is left without a part to go to.
 
 **The Caspian.** Natural Earth does give its cells sea area: 13 cells in a box around it (lon 44.5 to 56.5, lat 35 to 49.5, on the cells' centres) have 1,000 km2 or
 more of sea, 10 of them 9,269 to 66,317 km2 and 3 of 2,299 to 3,616 km2, and 3 more with 34 to 393 km2 are left out. So the fold of zero-area parts never touches
-them (0 records folded), and the records GBIF puts in their sea parts stay there as far as that fold goes. There are few: 8,161 of the 622,663 clean records of these
-cells (1.3%) are in the sea parts and 614,502 in the land parts, and the cells that are mostly water hold their records in the land part of the shore (cell
-644184800048851186: 3,900 records on its 3,802 km2 of land and 3 on its 66,317 km2 of sea). After all layers 1,755 records are in these sea parts with `native_only` (1,656
-with `introduced`, 1,617 with `off`), against 8,161: layer 4 folds a land species' sea records into the land part of the cell. So the Caspian is a sea part in the network, as
-intended, and a sparse one, which the sparse-part rules of M1 will have to judge.
+them (0 records folded), and the records GBIF puts in their sea parts stay there as far as that fold goes. There are few. **On one measure throughout, the clean
+records `n - n_human_text`:** 8,160 of the 622,268 in these cells (1.3%) are in the sea parts and 614,108 in the land parts, and the cells that are mostly water hold their
+records in the land part of the shore (cell 644184800048851186: 3,900 records on its 3,803 km2 of land and 3 on its 66,317 km2 of sea). After all layers 1,755 records are in
+these sea parts with `native_only` (1,656 with `introduced`, 1,617 with `off`), against the 8,160 that came in. (The first version of this paragraph set the input's `n`
+against the output's `records`, and gave 8,161, 622,663 and 614,502.) So the Caspian is a sea part in the network, as intended, and a sparse one, which the sparse-part rules
+of M1 will have to judge.
 
 **Provisionally accepted twins** (reported, nothing changed). 33,811 provisionally accepted species ids share a name and kingdom with an accepted species
 (33,789 with one accepted twin, which Task 10 joins to, and 22 with several, which it leaves ambiguous). Half A has records on 2,835 of them: 59,773

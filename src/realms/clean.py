@@ -20,23 +20,23 @@ Order and attribution:
   word of the two ways to be clear, so where it disagrees with the records `Settings.side_conflict` lets it decide, or leaves the species be.
 - **Layer 5**, the rare-outlier heuristics, is accepted in `layers` and does nothing yet.
 
-The records of a row are `records` throughout: the clean records the first layer leaves, or `n_raw` without it. Other counts (datasets,
+The records of a row are `records` throughout: the clean records `n - n_human_text` that layer 1 leaves, or `n_raw` without it. The one
+exception is the `records` that layer 1 logs for the rows it empties, which is their `n_raw` (see `Cleaned`). Other counts (datasets,
 years, licence and source counts) are kept as the download has them, summed as `load_presence` sums them over countries, folds and
 parts, with the distinct counts taking the maximum, which is a lower bound.
+
+The summaries of a `Cleaned`, and the report on provisionally accepted twins, are in `realms.clean_report`.
 """
 
-import logging
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
 import polars as pl
 
 from realms.grid import KINDS, ZERO_KM2, Grid, part_id, parts
-from realms.natives import SYNONYM, WCVP_KINGDOM, References
+from realms.natives import WCVP_KINGDOM, References
 from realms.occurrences import COUNTS, DISTINCT, SUMMED
-
-log = logging.getLogger(__name__)
 
 LAYERS = (1, 2, 3, 4, 5)
 WCVP_MODES = ("native_only", "introduced", "off")
@@ -44,6 +44,7 @@ SIDE_CONFLICTS = ("environment", "leave")
 # the rules that can be switched off one at a time. WCVP has `wcvp_mode`, layer 1 and layer 4 have their layers, and the fold of
 # zero-area parts has no switch.
 SWITCHABLE = ("extinct", "no_wild_range", "griis", "griis_subnational", "wrims")
+# Authoritative: every logged row's layer is looked up here from its rule, and a rule that is not in it raises.
 RULES = {
     "zero_area_part": 0,
     "failed_flags": 1,
@@ -60,7 +61,7 @@ RULES = {
     "land_sea_dropped": 4,
 }
 KEY = ["species_id", "countrycode", "part"]
-ROW_COLUMNS = [*KEY, *COUNTS, "records"]
+OTHER = dict(zip(KINDS, reversed(KINDS), strict=True))  # the other part of a cell: land for sea and sea for land
 REMOVED_SCHEMA = {
     "layer": pl.Int8,
     "rule": pl.String,
@@ -72,8 +73,6 @@ REMOVED_SCHEMA = {
     "presence_lost": pl.Boolean,
 }
 UNPLACED_SCHEMA = {"rule": pl.String, "species_id": pl.String, "country": pl.String, "place": pl.String, "records": pl.Int64}
-SUMMARY_KEYS = ("tax_group", "countrycode")
-UNKNOWN_GROUP = "unknown"
 # COL's environment is a sorted, comma-separated list ("brackish,freshwater,marine,terrestrial")
 FRESH_OR_BRACKISH = r"(^|,)(freshwater|brackish)(,|$)"
 
@@ -124,27 +123,30 @@ class Cleaned:
     """What `clean` leaves, and what it did.
 
     `presence`: `species_id`, `part`, the counts, and `records`, summed over countries.
-    `removed`: one row per row of the country counts that a layer took out or moved: `layer` (0 for the zero-area fold), `rule`,
+    `removed`: one row per row of the country counts that a layer took out or moved: `layer` (0 for the zero-area fold, from `RULES`), `rule`,
     `species_id`, `part` (where the row was), `countrycode`, `records`, `to_part` (where a fold put it, null for a removal) and
     `presence_lost`, whether the species had nothing left at that part afterwards.
+    **The unit of `removed.records` differs by layer:** it is `n_raw` for layer 1 (everything the emptied row held, flagged records
+    included) and the row's `records` for every other layer, which is the clean records `n - n_human_text`, or `n_raw` where layer 1 is
+    off. So do not sum it across layer 1 and the rest. Count is conserved from layer 2 on: `presence.records` plus the `records` of the
+    removals of layers 2 to 4 (those with a null `to_part`) are the input's `n - n_human_text`.
     `unplaced`: the pairs Task 10 could not place on the grid, for the species that have records: `rule` (the one that would
     have applied them), `species_id`, `country`, `place` (the subdivision or the marine area) and the species' `records`.
+    `sides`: how layer 4 sorted the species (`species`, `land`, `sea`, `exempt`, `conflict`, and the two kinds of conflict), empty if
+    layer 4 was off.
     """
 
     presence: pl.DataFrame
     removed: pl.DataFrame
     unplaced: pl.DataFrame = field(default_factory=lambda: pl.DataFrame(schema=UNPLACED_SCHEMA))
-
-
-def _other_kind(kind: str) -> str:
-    return "sea" if kind == "land" else "land"
+    sides: dict[str, int] = field(default_factory=dict)
 
 
 def _part_table(grid: Grid) -> pl.DataFrame:
     """Every part of the grid: `part`, `cell`, `kind`, `area_km2`, the id and kind of the other part of its cell, and whether each has area."""
     table = parts(grid, [part_id(cell, kind) for cell in grid.cells["cell"] for kind in KINDS])
-    other = [part_id(cell, _other_kind(kind)) for cell, kind in zip(table["cell"], table["kind"], strict=True)]
-    table = table.with_columns(pl.Series("other", other, dtype=pl.String), pl.col("kind").replace_strict({"land": "sea", "sea": "land"}).alias("other_kind"))
+    other = [part_id(cell, OTHER[kind]) for cell, kind in zip(table["cell"], table["kind"], strict=True)]
+    table = table.with_columns(pl.Series("other", other, dtype=pl.String), pl.col("kind").replace_strict(OTHER).alias("other_kind"))
     return (
         table.join(table.select(pl.col("part").alias("other"), pl.col("area_km2").alias("other_area")), on="other")
         .with_columns((pl.col("area_km2") >= ZERO_KM2).alias("has_area"), (pl.col("other_area") >= ZERO_KM2).alias("other_has_area"))
@@ -165,23 +167,35 @@ def _cell_key(cell: str) -> tuple[int, int, str]:
         return (1, 0, cell)
 
 
+def _check_rules(rules: Iterable[str]) -> None:
+    unknown = sorted(set(rules) - set(RULES))
+    if unknown:
+        raise ValueError(f"{unknown} are not rules of RULES, which says which layer a rule is of: {sorted(RULES)}")
+
+
 class _Run:
-    """The rows as the layers have left them, and the log of what they took."""
+    """The rows as the layers have left them, the log of what they took, and what the layers have to report besides."""
 
     def __init__(self, rows: pl.DataFrame) -> None:
         self.rows = rows
         self.removed: list[pl.DataFrame] = []
+        self.unplaced = pl.DataFrame(schema=UNPLACED_SCHEMA)  # set by layer 3
+        self.sides: dict[str, int] = {}  # set by layer 4
 
-    def _log(self, hit: pl.DataFrame, layer: int, records: pl.Expr | None = None) -> None:
-        """Log `hit`, rows with `rule` and `to_part`, after `self.rows` no longer has them (where they were taken out)."""
+    def _log(self, hit: pl.DataFrame, records: pl.Expr | None = None) -> None:
+        """Log `hit`, rows with `rule` and `to_part`, after `self.rows` no longer has them (where they were taken out).
+
+        The layer comes from `RULES`. `records` is an expression for the logged records where that is not the row's `records`.
+        """
         if hit.is_empty():
             return
+        _check_rules(hit["rule"].unique())
         pairs = hit.select("species_id", "part").unique()
         alive = pairs.join(self.rows.select("species_id", "part"), on=["species_id", "part"], how="semi")
         lost = pairs.join(alive, on=["species_id", "part"], how="anti").with_columns(pl.lit(True).alias("presence_lost"))
         entry = (
             hit.select(
-                pl.lit(layer, dtype=pl.Int8).alias("layer"),
+                pl.col("rule").replace_strict(RULES, return_dtype=pl.Int8).alias("layer"),
                 "rule",
                 "species_id",
                 "part",
@@ -194,38 +208,40 @@ class _Run:
         )
         self.removed.append(entry.select(*REMOVED_SCHEMA))
 
-    def drop(self, hit: pl.DataFrame, layer: int, rule: str | pl.Expr, records: pl.Expr | None = None, log: pl.Expr | None = None) -> None:
+    def drop(self, hit: pl.DataFrame, rule: str | pl.Expr, records: pl.Expr | None = None, log: pl.Expr | None = None) -> None:
         """Take `hit`, a subset of the rows, out, and log it under `rule` (a name, or an expression for a column of `hit`)."""
         if hit.is_empty():
             return
-        self.rows = self.rows.join(hit.select(KEY), on=KEY, how="anti", nulls_equal=True)
         rule_column = pl.lit(rule) if isinstance(rule, str) else rule
         logged = hit.with_columns(rule_column.alias("rule"), pl.lit(None, dtype=pl.String).alias("to_part"))
-        self._log(logged if log is None else logged.filter(log), layer, records)
+        _check_rules(logged["rule"].unique())  # before anything is changed
+        self.rows = self.rows.join(hit.select(KEY), on=KEY, how="anti", nulls_equal=True)
+        self._log(logged if log is None else logged.filter(log), records)
 
-    def move(self, moves: pl.DataFrame, on: list[str], layer: int) -> None:
+    def move(self, moves: pl.DataFrame, on: list[str]) -> None:
         """Move the rows that `moves` names (by `on`) to its `to_part`, or take them out where that is null, and log each under its `rule`.
 
         A moved row is added to the row of the same species and country at the part it goes to, if there is one. Rows with no records are
         moved, but not logged: a row that counts for nothing is not a presence.
         """
+        _check_rules(moves["rule"].unique())
         hit = self.rows.join(moves, on=on, how="inner", nulls_equal=True)
         if hit.is_empty():
             return
         rest = self.rows.join(moves.select(on).unique(), on=on, how="anti", nulls_equal=True)
         moved = hit.filter(pl.col("to_part").is_not_null()).with_columns(pl.col("to_part").alias("part")).select(rest.columns)
         self.rows = _sum_rows(pl.concat([rest, moved]))
-        self._log(hit.filter(pl.col("records") > 0), layer)
+        self._log(hit.filter(pl.col("records") > 0))
 
 
-def _layer_1(run: _Run, layers: frozenset[int]) -> None:
+def _layer_1(run: _Run) -> None:
+    """Take out the rows with no clean record. The records of such a row are all lost with it, so it is logged with `n_raw`.
+
+    A row with no record at all is no row, and goes unlogged.
+    """
     empty = run.rows.filter(pl.col("records") <= 0)
-    if 1 not in layers:
-        run.rows = run.rows.filter(pl.col("records") > 0)
-        return
-    # the records of a row that nothing counts for are all lost with it, so it is logged with `n_raw`. A row of no record at all is no row.
     rule = pl.when(pl.col("n") == 0).then(pl.lit("failed_flags")).otherwise(pl.lit("human_text"))
-    run.drop(empty, 1, rule, records=pl.col("n_raw"), log=pl.col("n_raw") > 0)
+    run.drop(empty, rule, records=pl.col("n_raw"), log=pl.col("n_raw") > 0)
 
 
 def _layer_2(run: _Run, refs: References, settings: Settings) -> None:
@@ -233,7 +249,7 @@ def _layer_2(run: _Run, refs: References, settings: Settings) -> None:
     no_wild_range = pl.DataFrame({"species_id": sorted(refs.no_wild_range)}, schema={"species_id": pl.String})
     for rule, species in (("extinct", extinct), ("no_wild_range", no_wild_range)):
         if rule not in settings.rules_off:
-            run.drop(run.rows.join(species, on="species_id", how="semi"), 2, rule)
+            run.drop(run.rows.join(species, on="species_id", how="semi"), rule)
 
 
 def _unplaced(rows: pl.DataFrame, refs: References, settings: Settings) -> pl.DataFrame:
@@ -289,10 +305,10 @@ def _wcvp(rows: pl.DataFrame, refs: References, mode: str) -> pl.DataFrame:
     return rows.join(outside.select("species_id", "part"), on=["species_id", "part"], how="semi")
 
 
-def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings) -> pl.DataFrame:
-    """Returns the pairs it could not place."""
+def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings) -> None:
+    """Layer 3, and `run.unplaced`: the pairs it could not place."""
     off = settings.rules_off
-    unplaced = _unplaced(run.rows, refs, settings)
+    run.unplaced = _unplaced(run.rows, refs, settings)
     places = meta.select("part", "cell", "kind")
 
     def located() -> pl.DataFrame:
@@ -303,7 +319,7 @@ def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings
         country = refs.griis.filter(pl.col("subdivision").is_null()).select("species_id", pl.col("country").alias("countrycode")).unique()
         covered = refs.admin1_cells.select("cell", pl.col("country").alias("countrycode")).unique()
         hit = located().join(country, on=["species_id", "countrycode"], how="semi").join(covered, on=["cell", "countrycode"], how="anti")
-        run.drop(hit, 3, "griis")
+        run.drop(hit, "griis")
     if "griis_subnational" not in off:
         # by the cell alone: an overseas place carries the sovereign's country code in its list and GBIF's own in its records
         listed = (
@@ -312,23 +328,22 @@ def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings
             .select("species_id", "cell")
             .unique()
         )
-        run.drop(located().join(listed, on=["species_id", "cell"], how="semi"), 3, "griis_subnational")
+        run.drop(located().join(listed, on=["species_id", "cell"], how="semi"), "griis_subnational")
     if "wrims" not in off:
         introduced = refs.wrims.filter(pl.col("country").is_not_null()).select("species_id", pl.col("country").alias("countrycode")).unique()
-        run.drop(located().filter(pl.col("kind") == "sea").join(introduced, on=["species_id", "countrycode"], how="semi"), 3, "wrims")
+        run.drop(located().filter(pl.col("kind") == "sea").join(introduced, on=["species_id", "countrycode"], how="semi"), "wrims")
     if settings.wcvp_mode != "off":
         rule = "wcvp_outside_native" if settings.wcvp_mode == "native_only" else "wcvp_introduced"
-        run.drop(_wcvp(run.rows, refs, settings.wcvp_mode), 3, rule)
-    return unplaced
+        run.drop(_wcvp(run.rows, refs, settings.wcvp_mode), rule)
 
 
-def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings: Settings) -> pl.DataFrame:
-    """`species_id` and `side` ("land", "sea" or null) of each species, from COL's environment and the side of its records.
+def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings: Settings) -> tuple[pl.DataFrame, dict[str, int]]:
+    """`species_id` and `side` ("land", "sea" or null) of each species, from COL's environment and the side of its records, and the counts.
 
     A land species is exactly terrestrial in COL or has at least `land_share` of its records on land parts, and a sea species is the
     same the other way round. Freshwater and brackish species and all of Aves are exempt. Where the two disagree, as for a species that
     is exactly marine with nearly all its records in land parts, `settings.side_conflict` says: COL's environment decides, or the
-    species is left alone.
+    species is left alone. The counts are `Cleaned.sides`.
     """
     share = (
         rows.join(meta.select("part", "kind"), on="part", how="left")
@@ -364,25 +379,21 @@ def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings:
         )
     )
     both = found.filter(pl.col("conflict"))
-    log.info(
-        "layer 4: %d species, of which %d land, %d sea, %d exempt, and %d where COL's environment and the records disagree (%d exactly terrestrial "
-        "with at least %s of the records at sea, %d exactly marine with that on land), which side_conflict=%s %s",
-        found.height,
-        found.filter(pl.col("side") == "land").height,
-        found.filter(pl.col("side") == "sea").height,
-        found.filter(pl.col("exempt")).height,
-        both.height,
-        both.filter(pl.col("land_env") & pl.col("sea_records")).height,
-        settings.land_share,
-        both.filter(pl.col("sea_env") & pl.col("land_records")).height,
-        settings.side_conflict,
-        "decides by the environment" if settings.side_conflict == "environment" else "leaves alone",
-    )
-    return found.select("species_id", "side")
+    counts = {
+        "species": found.height,
+        "land": found.filter(pl.col("side") == "land").height,
+        "sea": found.filter(pl.col("side") == "sea").height,
+        "exempt": found.filter(pl.col("exempt")).height,
+        "conflict": both.height,
+        "conflict_terrestrial_at_sea": both.filter(pl.col("land_env") & pl.col("sea_records")).height,
+        "conflict_marine_on_land": both.filter(pl.col("sea_env") & pl.col("land_records")).height,
+    }
+    return found.select("species_id", "side"), counts
 
 
 def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settings: Settings) -> None:
-    sides = _sides(run.rows, refs.taxa, meta, settings).drop_nulls("side")
+    sides, run.sides = _sides(run.rows, refs.taxa, meta, settings)
+    sides = sides.drop_nulls("side")
     places = meta.select("part", "cell", "kind", "other", "other_kind", "other_has_area")
     wrong = (
         run.rows.select("species_id", "part")
@@ -396,7 +407,8 @@ def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settin
     same = wrong.filter(pl.col("other_has_area")).select("species_id", "part", pl.col("other").alias("to_part"), pl.lit("land_sea_fold").alias("rule"))
     far = wrong.filter(~pl.col("other_has_area")).select("species_id", "part", "cell", pl.col("other_kind").alias("right_kind"))
 
-    # no such part in the cell: the right-side part of the neighbouring cell that holds most of the species' records, the lowest id on a tie
+    # no such part in the cell: the right-side part of the neighbouring cell that holds most of the species' records, the lowest id on a tie.
+    # `held` is what the species has there before this pass moves anything, the same-cell folds of `same` included.
     adjacent = [(cell, other) for cell, near in grid.adjacency.items() for other in near]
     neighbours = pl.DataFrame(adjacent, schema={"cell": pl.String, "neighbour": pl.String}, orient="row")
     order = sorted(grid.adjacency, key=_cell_key)
@@ -417,7 +429,7 @@ def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settin
         .join(chosen.select("species_id", "part"), on=["species_id", "part"], how="anti")
         .select("species_id", "part", pl.lit(None, dtype=pl.String).alias("to_part"), pl.lit("land_sea_dropped").alias("rule"))
     )
-    run.move(pl.concat([same, chosen, dropped]), ["species_id", "part"], 4)
+    run.move(pl.concat([same, chosen, dropped]), ["species_id", "part"])
 
 
 def clean(
@@ -459,92 +471,19 @@ def clean(
     run = _Run(_sum_rows(counts.select(*KEY, *COUNTS).with_columns(records.alias("records"))))
 
     zero = meta.filter(pl.col("area_km2") < ZERO_KM2, pl.col("other_has_area")).select("part", pl.col("other").alias("to_part"), pl.lit("zero_area_part").alias("rule"))
-    run.move(zero, ["part"], 0)
-    _layer_1(run, layers)
+    run.move(zero, ["part"])
+    if 1 in layers:
+        _layer_1(run)
+    # a row with no record at all is no row. With layer 1 on that is gone already, and with it off it is a row of `n_raw` 0.
+    run.rows = run.rows.filter(pl.col("records") > 0)
     if 2 in layers:
         _layer_2(run, refs, settings)
-    unplaced = pl.DataFrame(schema=UNPLACED_SCHEMA)
     if 3 in layers:
-        unplaced = _layer_3(run, refs, meta, settings)
+        _layer_3(run, refs, meta, settings)
     if 4 in layers:
         _layer_4(run, refs, grid, meta, settings)
 
     presence = _sum_rows(run.rows, ["species_id", "part"]).sort("species_id", "part")
     removed = pl.concat(run.removed) if run.removed else pl.DataFrame(schema=REMOVED_SCHEMA)
     removed = removed.sort("layer", "rule", "species_id", "part", "countrycode", nulls_last=True)
-    return Cleaned(presence, removed, unplaced)
-
-
-def removal_summary(cleaned: Cleaned, refs: References, by: Sequence[str] = SUMMARY_KEYS) -> pl.DataFrame:
-    """What was removed per `layer`, `rule` and the columns of `by` (`tax_group`, from `refs.groups`, and `countrycode`).
-
-    `rows` are the rows of the country counts, `records` their records and `presences` the (species, part) pairs that were left with
-    nothing by it. Rows of folds are counted as removed from the part they left. A country's presences do not add up over countries,
-    as one part's presence can be in several, so use `by=("tax_group",)` or `by=()` for totals.
-
-    `applied` is False for what the lists could not place (`unplaced_griis`, `unplaced_wrims`), which are not removed: `rows` are the
-    pairs of species that have records, `records` the records of those species in all, as an upper bound on what the gap leaves, and
-    `countrycode` the country of the list, null for WRiMS. Species with no group are `unknown`.
-    """
-    bad = [c for c in by if c not in SUMMARY_KEYS]
-    if bad:
-        raise ValueError(f"by is made of {SUMMARY_KEYS}, not {bad}")
-    keys = list(by)
-    groups = refs.groups.unique("species_id")
-    group = pl.col("tax_group").fill_null(UNKNOWN_GROUP)
-    done = (
-        cleaned.removed.join(groups, on="species_id", how="left")
-        .with_columns(group)
-        .group_by("layer", "rule", *keys)
-        .agg(
-            pl.len().cast(pl.Int64).alias("rows"),
-            pl.struct("species_id", "part").filter(pl.col("presence_lost")).n_unique().cast(pl.Int64).alias("presences"),
-            pl.col("records").sum().cast(pl.Int64),
-        )
-        .with_columns(pl.col("layer").cast(pl.Int64), pl.lit(True).alias("applied"))
-    )
-    gap = (
-        cleaned.unplaced.join(groups, on="species_id", how="left")
-        .with_columns(
-            group,
-            pl.col("country").alias("countrycode"),
-            pl.lit(3, dtype=pl.Int64).alias("layer"),
-            pl.when(pl.col("rule") == "wrims").then(pl.lit("unplaced_wrims")).otherwise(pl.lit("unplaced_griis")).alias("rule"),
-        )
-        .group_by("layer", "rule", *keys)
-        .agg(pl.len().cast(pl.Int64).alias("rows"), pl.lit(None, dtype=pl.Int64).alias("presences"), pl.col("records").sum().cast(pl.Int64))
-        .with_columns(pl.lit(False).alias("applied"))
-    )
-    columns = ["layer", "rule", "applied", *keys, "rows", "presences", "records"]
-    return pl.concat([done.select(columns), gap.select(columns)]).sort("layer", "rule", *keys, nulls_last=True)
-
-
-def provisional_twins(index: pl.DataFrame) -> pl.DataFrame:
-    """The provisionally accepted species whose name also belongs to an accepted species of the same kingdom, from `natives.name_index`.
-
-    `species_id`, `name`, `kingdom` and `accepted_ids`, the number of accepted species with that name. Task 10 joins such a name to the
-    accepted twin (and leaves it ambiguous where there are several), so a source's record on the name never reaches the provisional id.
-    """
-    species = index.filter(pl.col("status") != SYNONYM)
-    accepted = species.filter(pl.col("status") == "accepted").group_by("name", "kingdom").agg(pl.len().alias("accepted_ids"))
-    return (
-        species.filter(pl.col("status") == "provisionally accepted")
-        .select("species_id", "name", "kingdom")
-        .join(accepted, on=["name", "kingdom"], how="inner", nulls_equal=True)
-        .select("species_id", "name", "kingdom", "accepted_ids")
-        .sort("name", "species_id")
-    )
-
-
-def provisional_twin_records(table: pl.DataFrame, twins: pl.DataFrame) -> dict:
-    """How many species, rows and records (`n`, `n_raw` and `records` where `table` has them) of `table` sit on the ids of `twins`.
-
-    `ambiguous_species` are those whose name has several accepted twins, which Task 10 does not join at all. Reports only.
-    """
-    hit = table.join(twins.select("species_id", "accepted_ids"), on="species_id", how="inner")
-    return {
-        "species": hit["species_id"].n_unique(),
-        "rows": hit.height,
-        **{c: int(hit[c].sum() or 0) for c in ("n", "n_raw", "records") if c in hit.columns},
-        "ambiguous_species": hit.filter(pl.col("accepted_ids") > 1)["species_id"].n_unique(),
-    }
+    return Cleaned(presence, removed, run.unplaced, run.sides)
