@@ -1160,10 +1160,11 @@ It replaces placement by cell centre, with overlap only for the islands no centr
 
 - **A sub-national list applies to the rows in those cells, and where GBIF uses the list's country code in them, only to the rows with that `countrycode`** (`griis_subnational`). A cell is bigger than the places, so a border cell holds a neighbour's rows too, and a CA row in a cell that overlaps a US state is Canada's: it stays, and Canada's own list may take it (`griis`).
   **"GBIF uses the code" is read per list, from the counts, in that list's cells:** the code occurs as a `countrycode` among the rows (all rows of the download of half A, before layer 1 takes any out) of the cells of the list. The brief reads "the code occurs as a `countrycode` in the counts", which I first took over the whole counts, and **changed to the cells of the list on the real data**: the sovereign's code is used elsewhere for an overseas place and not in it.
-  `FR` is in the counts and in none of the cells of Reunion, Guadeloupe, Martinique and Saint-Pierre, whose rows say `RE`, `GP`, `MQ` and `PM`, so over the whole counts those four lists would apply to nothing (Reunion alone, 84,691 records of `RE` that the list takes). Read per list they apply by the cells alone, as `IC` (the Canary Islands, `ES` in GBIF, no row says `IC`) does, and the lists of the US, PT, TO and FM, where the code is used, apply by code.
+  `FR` is in the counts and in none of the cells of Reunion, Guadeloupe, Martinique and Saint-Pierre, whose rows say `RE`, `GP`, `MQ` and `PM`, so over the whole counts those four lists would apply to nothing (Reunion alone, 84,691 records of `RE` that the list takes). Read per list they apply by the cells alone, and the lists of the US, PT, TO and FM, where the code is used, apply by code. **On the real data only the FR overseas lists take the cells-alone way** (Reunion and Guadeloupe have a table, Martinique and Saint-Pierre are plain): **`IC`, the Canary Islands, has no Natural Earth polygon, so it has no cells at all** (IC-Tenerife and IC-Gran-Canaria are among the 6 subdivisions without cells, below). It is the case of the tests, where no row says `IC` and GBIF says `ES`, and not one of the data.
   **The cost of the cells-alone case is that a neighbour's rows in the same cells go too:** in the default run `MU` 1,056 records (Reunion's cell), `AG` 1,930, `KN` 1,906, `DM` 1,004 and `MQ` 6,893 (Guadeloupe's cells), which is what happened to them before this change (`AG` 4,267, `KN` 3,138, `MQ` 7,516). The code is not told from the polygon's `iso_3166_2` (`FR-RE`), which would spare them; that is a refinement not made.
   `NO-Svalbard` is the other way: `NO` occurs in its cells (960 records, 3 rows) and GBIF says `SJ` (347,303), so by code it would take almost nothing; its list is plain and not applied under `skip` in any case.
 - **A country's own list still applies to the rest of the country**, meaning its rows outside the cells covered by that country's sub-national lists (`covered`, now larger). Tested with a cell by centre and a cell by overlap only: both are left to the sub-national list, and the rows in the rest of the country are the country list's.
+  **`covered` is made of the lists that are applied only** (review of Task 11a, 2026-11-01). The first version took every placed list, so under `skip` a sub-national list with no distribution table, which is not applied, still exempted its cells from the country's own list, and the country list's rows there were taken by no rule. A list counts as applied when it has pairs in `References.griis` (and under `apply` in `griis_name_only` too). Tested with a country list with a table and a plain sub-national list. **No real-data figure changes:** `clean_counts.py` run again on half A in the three modes, with `skip` and with `apply`, gives the same rows, presences and records for every rule and the same presences left as the first run (no `FR` row is in the cells of the plain FR lists, so the country list had nothing there to take). The GRIIS pairs of `load_references` are made by `natives.griis_split`, which `griis_pairs` and `griis_name_only_pairs` call too, so the tested functions are the ones the references use.
   It is by definition that a border cell that overlaps a subdivision is the sub-national list's for that country's own rows, so a species on the country list only keeps its rows there.
 - **Result at resolution 6:** 263 cells for the same 24 subdivisions (138 by centre, 125 by overlap only), against 186 (138 and 48); at resolution 7 it was not run. **Task 10's unplaced subdivisions are unchanged: 61 have no polygon in Natural Earth**, and their pairs fell from 7,468 to 6,820 (1,630 in 6 subdivisions of lists with a table: IC-Gran-Canaria, IC-Tenerife, KY-Grand, KY-Little, SH-StHelena, SH-Tristan, and 5,190 in 55 of lists with none), the 648 being native and uncertain entries left out.
 
@@ -1237,26 +1238,61 @@ The calibration itself is untouched (the same chosen setting, 75, and the same r
 
 There are 4,229,411 animal presences after layers 1, 2 and 4; 43,388 of them (1.0%, 2,977 species, 64.5M records) are listed. **Layer 5 takes 1.7 to 1.8 times as many of the listed presences as of the others, and 13% of them at most, so the heuristics find some of what GRIIS says is introduced and far from all of it.**
 By records the listed presences lose less than the others (0.02% against 0.04%): they are the large, long-established populations of the best sampled countries (the US, GB, AU), which layer 5 spares by design as core cells, and a presence it takes has a handful of records. So it is no substitute for GRIIS where GRIIS has a table, and it is not tuned on it. The listed set is also biased towards the 55 countries and places with an extended list, which is not the world.
-Report only: nothing was tuned on it, and the base rates of the two sets differ (a listed species is one GRIIS knows because it is widespread). Files: `results/calibrate/res6/griis_cross_check.json`.
+The unit that is listed is the (species, cell) pair, so another country's rows in a listed species' border cell count as listed with it, though no GRIIS rule took them. Report only: nothing was tuned on it, and the base rates of the two sets differ (a listed species is one GRIIS knows because it is widespread). Files: `results/calibrate/res6/griis_cross_check.json`.
 
 **Report only, for Markus and M1: the 20 largest GRIIS removals, by records, of species that also have clean, unlisted records in at least three neighbouring countries.** Two countries are **neighbours where GBIF has rows of both in the same cell or in adjacent cells of the grid** (from all of half A's rows, `realms.clean_report.neighbour_countries`; it takes in sea neighbours, as the cells are 265 km). "Clean" is `n - n_human_text` above 0 and "unlisted" is not taken by a GRIIS rule.
-These are the likely feral or released forms of native species. GRIIS calls them introduced, so **no rule changes**. `scripts/griis_review.py`, files `griis_neighbours.csv` and, with 100 records at least in each neighbour, `griis_neighbours_min100.csv` in `results/clean/res6/griis_review` and `results/clean-apply/res6/griis_review`. With `apply` (the lists of DK, SE and IN are plain, so only there; the first 12 of 20; records removed, neighbours):
+These are the likely feral or released forms of native species. GRIIS calls them introduced, so **no rule changes**. `scripts/griis_review.py`, files `griis_neighbours.csv` and, with 100 records at least in each neighbour, `griis_neighbours_min100.csv` in `results/clean/res6/griis_review` and `results/clean-apply/res6/griis_review`. All 20 rows for each of the two settings follow.
 
-| # | Species | Country | Records removed | Neighbours with unlisted records |
-|---|---|---|---|---|
-| 1 | *Sturnus vulgaris* | US | 16,762,779 | 5 (RU 95,874, CA 664, KY, MX, CU) |
-| 2 | *Streptopelia decaocto* | US | 4,263,041 | 5 (RU 10,210, KY 663, MX 215, CA, BM) |
-| 3 | *Cygnus olor* | US | 1,527,775 | 4 (RU 27,868, CA 97, MX, BM) |
-| 4 | *Anas platyrhynchos* | SE | 1,487,602 | 10 (NL 1,053,414, NO 787,556, DE 489,491, RU, FI, PL, EE, LT, LV, AX) |
-| 5 | *Cygnus cygnus* | SE | 1,184,996 | 11 (DK 334,975, NO 261,715, FI 91,773, NL, DE, RU, PL, EE, LT, LV, AX) |
-| 6 | *Columba livia* | IN | 1,103,587 | 10 (TH 97,859, NP 31,985, CN 14,815, BD 10,721, OM, PK, MM, TJ, AF, BT) |
-| 7 | *Streptopelia decaocto* | FR | 1,007,611 | 23 (ES 571,789, GB 558,339, NL 430,752, PT, DE, BE, IT, CZ, AT, IE, ...) |
-| 8 | *Cygnus olor* | SE | 974,504 | 10 (NL 831,258, DK 684,569, NO 341,163, DE, PL, FI, RU, LT, LV, AX) |
-| 9 | *Ondatra zibethicus* | NL | 898,530 | 8 (GB 129, FR 120, DE 23, IT, PL, AT, BE, LU: 292 records in all) |
-| 10 | *Branta canadensis* | SE | 876,176 | 6 (NL 368,057, AX 328, DE 151, FI, RU, PL) |
-| 11 | *Sturnus vulgaris* | AU | 840,097 | 3 (NF 2,290, ID 2, NC 2) |
-| 12 | *Anas platyrhynchos* | DK | 781,870 | 12 (GB 1,209,662, NL 1,053,414, NO 787,556, DE, BE, RU, PL, EE, LT, ...) |
+**With `skip`, the default** (`results/clean/res6/griis_review/griis_neighbours.csv`; records removed by the two GRIIS rules in that country, then how many neighbouring countries hold clean, unlisted records of the species, with the three largest as country:records):
 
-These include the examples of the brief: **the Mallard in SE (1.49M) and DK (0.78M)** and **the Rock Dove in IN (1.10M)**, and the Mute and Whooper Swans in SE. Under `skip` (the default) the Swedish and Danish rows are not removed, and the list, with the species whose neighbours hold a handful of records (the Muskrat's 292, the starling's 2 in AU) still in it, is: the starling in US 16.7M and CA 3.3M,
-the House Sparrow in CA 2.1M and the Rock Dove in CA 1.7M (their US rows are no longer GRIIS's, see above), the collared dove in US 4.3M and FR 1.0M, the Mute Swan in US 1.5M, the Muskrat in NL 0.9M, then AU, ES, NL, GB and BE. **The definition is generous**: any three neighbours count, however few records, so the list also has the starling in AU, whose neighbours are NF 2,290, ID 2 and NC 2.
-`griis_neighbours_min100.csv` asks 100 records of each neighbour. Under `apply` it leaves out the starling in the US and AU, the Mute Swan in the US and the Muskrat in NL, and keeps the Mallard, the swans, the Rock Dove in IN (9 neighbours) and the Pheasant in GB. A neighbour that holds unlisted records may also hold them because it has no list, or no table, and not because the species is native there: a native range is not what this list shows.
+| # | Species | Country | Records removed | Neighbours | The largest neighbours' unlisted records |
+|---|---|---|---|---|---|
+| 1 | *Sturnus vulgaris* | US | 16,740,718 | 7 | RU:95874 BM:22434 BS:2468 |
+| 2 | *Streptopelia decaocto* | US | 4,257,018 | 7 | BS:21677 CU:16389 RU:10210 |
+| 3 | *Sturnus vulgaris* | CA | 3,290,292 | 3 | US:22801 PM:627 GL:13 |
+| 4 | *Passer domesticus* | CA | 2,077,204 | 3 | US:13225272 PM:578 GL:4 |
+| 5 | *Columba livia* | CA | 1,675,621 | 3 | US:6978356 PM:209 GL:1 |
+| 6 | *Cygnus olor* | US | 1,527,775 | 4 | RU:27868 CA:97 MX:17 |
+| 7 | *Streptopelia decaocto* | FR | 1,007,611 | 24 | ES:571789 GB:558339 NL:430752 |
+| 8 | *Ondatra zibethicus* | NL | 898,530 | 14 | CH:4064 PL:2104 AT:840 |
+| 9 | *Sturnus vulgaris* | AU | 840,097 | 3 | NF:2290 ID:2 NC:2 |
+| 10 | *Acridotheres tristis* | AU | 808,680 | 5 | NC:1986 ID:932 SB:471 |
+| 11 | *Spilopelia chinensis* | AU | 704,001 | 4 | NZ:31290 ID:29827 NC:1822 |
+| 12 | *Passer domesticus* | AU | 611,436 | 5 | NF:2014 NC:1089 PG:657 |
+| 13 | *Cistus ladanifer* | ES | 559,068 | 6 | PT:10977 FR:5371 MA:103 |
+| 14 | *Alopochen aegyptiaca* | NL | 555,805 | 12 | DK:19071 CZ:10821 SE:7877 |
+| 15 | *Columba livia* | ES | 542,079 | 13 | GB:589200 PT:257033 FR:238891 |
+| 16 | *Phasianus colchicus* | GB | 534,745 | 13 | NL:366845 DK:201015 DE:106883 |
+| 17 | *Dactylis glomerata* | GB | 470,172 | 15 | FR:473886 NL:172114 DK:93628 |
+| 18 | *Columba livia* | AU | 434,438 | 4 | ID:4791 NF:1100 NC:290 |
+| 19 | *Quercus suber* | ES | 428,837 | 8 | PT:258918 FR:11965 IT:2051 |
+| 20 | *Branta canadensis* | BE | 380,770 | 11 | GB:695480 NL:368057 DK:113480 |
+
+**With `apply`** (`results/clean-apply/res6/griis_review/griis_neighbours.csv`; the lists of DK, SE and IN are plain, so they apply only here):
+
+| # | Species | Country | Records removed | Neighbours | The largest neighbours' unlisted records |
+|---|---|---|---|---|---|
+| 1 | *Sturnus vulgaris* | US | 16,762,779 | 5 | RU:95874 CA:664 KY:6 |
+| 2 | *Streptopelia decaocto* | US | 4,263,041 | 5 | RU:10210 KY:663 MX:215 |
+| 3 | *Cygnus olor* | US | 1,527,775 | 4 | RU:27868 CA:97 MX:17 |
+| 4 | *Anas platyrhynchos* | SE | 1,487,602 | 10 | NL:1053414 NO:787556 DE:489491 |
+| 5 | *Cygnus cygnus* | SE | 1,184,996 | 11 | DK:334975 NO:261715 FI:91773 |
+| 6 | *Columba livia* | IN | 1,103,587 | 10 | TH:97859 NP:31985 CN:14815 |
+| 7 | *Streptopelia decaocto* | FR | 1,007,611 | 23 | ES:571789 GB:558339 NL:430752 |
+| 8 | *Cygnus olor* | SE | 974,504 | 10 | NL:831258 DK:684569 NO:341163 |
+| 9 | *Ondatra zibethicus* | NL | 898,530 | 8 | GB:129 FR:120 DE:23 |
+| 10 | *Branta canadensis* | SE | 876,176 | 6 | NL:368057 AX:328 DE:151 |
+| 11 | *Sturnus vulgaris* | AU | 840,097 | 3 | NF:2290 ID:2 NC:2 |
+| 12 | *Anas platyrhynchos* | DK | 781,870 | 12 | GB:1209662 NL:1053414 NO:787556 |
+| 13 | *Spilopelia chinensis* | AU | 704,001 | 3 | NZ:31290 NC:1822 TL:1552 |
+| 14 | *Passer domesticus* | AU | 611,436 | 5 | NF:2014 NC:1089 PG:657 |
+| 15 | *Cistus ladanifer* | ES | 559,068 | 6 | PT:10959 FR:5371 MA:103 |
+| 16 | *Alopochen aegyptiaca* | NL | 555,805 | 8 | CZ:10821 CH:4382 DE:261 |
+| 17 | *Branta leucopsis* | SE | 548,226 | 11 | NL:385046 DK:289910 NO:94174 |
+| 18 | *Columba livia* | ES | 542,079 | 13 | GB:589200 PT:257033 FR:238891 |
+| 19 | *Phasianus colchicus* | GB | 534,745 | 11 | NL:366845 DE:106883 IM:6184 |
+| 20 | *Dactylis glomerata* | GB | 470,172 | 14 | FR:473886 NL:172114 DK:93628 |
+
+These include the examples of the brief only under `apply`: **the Mallard in SE (1.49M, row 4) and DK (0.78M, row 12)** and **the Rock Dove in IN (1.10M, row 6)**, with the Whooper and Mute Swans in SE. Under `skip` (the default) the Swedish, Danish and Indian rows are not removed, and the list is the US, Canadian, French, Dutch, Australian, Spanish, British and Belgian cases above.
+In `skip` the House Sparrow and the Rock Dove appear in CA (rows 4 and 5) with the US as their largest neighbour, 13.2M and 7.0M unlisted records, because `GRIIS-US-United` calls them native (see above), not because the species is native there. **The definition is generous**: any three neighbours count, however few records, so the list also has the starling in AU, whose neighbours hold NF 2,290, ID 2 and NC 2.
+`griis_neighbours_min100.csv` asks 100 records of each neighbour: under `apply` it leaves out the starling in the US and AU, the Mute Swan in the US and the Muskrat in NL, and keeps the Mallard, the swans, the Rock Dove in IN (9 neighbours) and the Pheasant in GB. A neighbour that holds unlisted records may also hold them because it has no list, or no table, and not because the species is native there: a native range is not what this list shows.

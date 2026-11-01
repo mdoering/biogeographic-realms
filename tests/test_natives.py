@@ -1,6 +1,7 @@
 import json
 import logging
 import zipfile
+from pathlib import Path
 
 import geopandas as gpd
 import polars as pl
@@ -592,6 +593,20 @@ def test_united_has_the_cells_that_overlap_the_conterminous_states(tmp_path):
     assert cells.rows() == [("edge", "US", "United", "overlap"), ("in", "US", "United", "centre")]
 
 
+def test_a_cell_that_overlaps_two_subdivisions_belongs_to_both(tmp_path):
+    # Texas and a second state share the line x = -105: a cell across it overlaps both, one on either side only the one beside it
+    places = [("Texas", "US", None, box(-105, 26, -94, 36)), ("Utah", "US", None, box(-115, 26, -105, 36))]
+    squares = [("across", -105.0, 30.0, 1.0), ("east", -100.0, 30.0, 1.0), ("west", -110.0, 30.0, 1.0)]
+    grid = make_grid(squares, {c: 1.0 for c, *_ in squares})
+    cells = admin1_cells(grid, write_admin1(tmp_path / "a.geojson", places), [("US", "Texas"), ("US", "Utah")], write_cells(tmp_path / "g.gpkg", squares))
+    assert cells.rows() == [
+        ("across", "US", "Texas", "overlap"),
+        ("east", "US", "Texas", "centre"),
+        ("across", "US", "Utah", "overlap"),
+        ("west", "US", "Utah", "centre"),
+    ]
+
+
 def test_an_island_no_centre_falls_on_gets_the_cells_that_overlap_it(tmp_path):
     # a speck of island at (-161.5, 22.5) inside a cell centred at (-157, 20) that reaches 6 degrees each way
     squares = [("sea", -157.0, 20.0, 6.0), ("far", -100.0, 20.0, 1.0)]
@@ -760,6 +775,20 @@ def test_load_references_applies_griis_by_its_own_means_and_reports_the_rest(ref
         ("GRIIS-ZW", "ZW", None, True, 2, 1, 0, 1, 0),
     ]
     assert "1 GRIIS pairs of 1 sub-national lists with no distributions have no admin-1 cells" in caplog.text
+
+
+def test_load_references_makes_its_griis_pairs_with_the_functions_the_tests_check(reference_dir):
+    # one path: what the references hold is what `griis_pairs` and `griis_name_only_pairs` give for the same lists and index
+    root, grid = reference_dir
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["griis/GRIIS-ZW"] = {"path": str(griis_zip(root, "GRIIS-ZW", plain_rows("Aus bus", "Homo sapiens"), means={"s0": "native"}))}
+    manifest["griis/GRIIS-IC-Tenerife"] = {"path": str(griis_zip(root, "GRIIS-IC-Tenerife", plain_rows("Aus bus", "Homo sapiens"), means=None))}
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    refs = load_references(grid, root)
+    paths = [Path(v["path"]) for k, v in manifest.items() if k.startswith("griis/") and v.get("path")]
+    index = name_index(Path(manifest["col"]["path"]))
+    assert refs.griis.equals(griis_pairs(paths, index)) and refs.griis.height == 2
+    assert refs.griis_name_only.equals(griis_name_only_pairs(paths, index)) and refs.griis_name_only.height == 2
 
 
 def test_load_references_uses_wrims_when_there_is_an_export(reference_dir, caplog):

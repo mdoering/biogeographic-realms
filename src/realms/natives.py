@@ -372,18 +372,25 @@ def _pairs(entries: pl.DataFrame, means: Sequence[str]) -> pl.DataFrame:
     return keep.unique(maintain_order=True).sort("species_id", "country", "subdivision", nulls_last=True)
 
 
+def griis_split(names: pl.DataFrame, index: pl.DataFrame, fallback: pl.DataFrame | None = None) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """The pairs of `griis_pairs` and of `griis_name_only_pairs`, from the entries `names` (`griis_names`): the one place the two are made, which
+    `load_references` calls, so that what the tests see is what the references hold."""
+    entries = griis_entries(names, index, fallback)
+    return _pairs(entries, GRIIS_ALIEN), _pairs(entries, (NAME_ONLY,))
+
+
 def griis_pairs(griis_dirs: Sequence[Path], index: pl.DataFrame, fallback: pl.DataFrame | None = None) -> pl.DataFrame:
     """`species_id`, `country` and `subdivision` for each COL species an alien list names as an alien. Ranks above species (and below) are dropped.
 
     An entry is an alien where its distribution says `introduced`, or says nothing (`unstated`: a GRIIS list is a list of aliens). `native` and `uncertain`
     entries are left out, and so are the entries of a list whose export has no distribution table (`griis_name_only_pairs`).
     """
-    return _pairs(griis_entries(griis_names(griis_dirs), index, fallback), GRIIS_ALIEN)
+    return griis_split(griis_names(griis_dirs), index, fallback)[0]
 
 
 def griis_name_only_pairs(griis_dirs: Sequence[Path], index: pl.DataFrame, fallback: pl.DataFrame | None = None) -> pl.DataFrame:
     """The pairs of `griis_pairs`' shape for the lists whose export has no distribution table, which say nothing of what their entries are."""
-    return _pairs(griis_entries(griis_names(griis_dirs), index, fallback), (NAME_ONLY,))
+    return griis_split(griis_names(griis_dirs), index, fallback)[1]
 
 
 def _cell_shapes(grid: Grid, gpkg: Path) -> np.ndarray:
@@ -722,11 +729,9 @@ def load_references(grid: Grid, reference_dir: Path = Path("data/reference")) ->
             unknown.height, TDWG_LEVEL3_CODE, needed["wgsrpd_level3"], unknown["rows"].sum(), shown,
         )
     names = griis_names(list(griis.values()))
-    entries = griis_entries(names, index, fallback)
-    griis_joined = _pairs(entries, GRIIS_ALIEN)
-    griis_name_only = _pairs(entries, (NAME_ONLY,))
+    griis_joined, griis_name_only = griis_split(names, index, fallback)
     lists = griis_lists(names)
-    del names, entries
+    del names
     wrims_ = wrims_pairs(wrims, index, fallback) if wrims else pl.DataFrame(schema={"species_id": pl.String, "area_id": pl.String, "area": pl.String, "country": pl.String})
     cells = admin1_cells(grid, needed["natural_earth_admin1"], subdivisions, gpkg)
     griis_no_cells = griis_without_cells(griis_joined, cells)

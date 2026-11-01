@@ -388,7 +388,8 @@ def griis_cross_check(counts: pl.DataFrame, refs: References, grid: Grid, settin
     Layers 1, 2 and 4 run on everything `counts` holds, so that layer 5 sees the group totals of the real run, with layer 3 off, and layer 5 is
     `clean.outlier_rows`, the code that `clean` runs. An animal presence (a species on a part) is **listed** where the species' rows in its cell are taken by a
     GRIIS rule of layer 3 (`griis` or `griis_subnational`), that is where GRIIS lists the species as introduced in that country or sub-national place, and
-    **other** where not. The lists are those with a distribution table, whatever `settings.griis_without_status` says, and an entry applies as in `clean`:
+    **other** where not. **The unit that is listed is the (species, cell) pair**, as layer 3's sub-national rule and layer 5 both judge cells: another country's rows in a
+    listed species' border cell (a CA row in a cell that overlaps a US state) count as listed with it, though no GRIIS rule took them. The lists are those with a distribution table, whatever `settings.griis_without_status` says, and an entry applies as in `clean`:
     introduced, or with no value, but not native or uncertain. Layer 5 judges cells, so the units are the (species, cell) pairs it judges, the presences (species, part)
     and the records; the shares are those layer 5 takes. A listed presence is one the real run's layer 3 takes first, so the share is how much of
     that the heuristics would find unaided. Reports only: nothing is changed, and nothing of half B is read (the caller passes half A's counts).

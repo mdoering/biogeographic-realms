@@ -343,16 +343,19 @@ def _layer_3(run: _Run, refs: References, meta: pl.DataFrame, settings: Settings
         return run.rows.join(places, on="part", how="left")
 
     if "griis" not in off:
-        # a country's list is for its rows by country code, except in the cells of its sub-national lists, which have lists of their own
+        # a country's list is for its rows by country code, except in the cells of its sub-national lists, which have lists of their own. Only a list that is
+        # applied has one: under `skip` a sub-national list with no distribution table is not applied, and exempts nothing from the country's list
         country = griis.filter(pl.col("subdivision").is_null()).select("species_id", pl.col("country").alias("countrycode")).unique()
-        covered = refs.admin1_cells.select("cell", pl.col("country").alias("countrycode")).unique()
+        applied = griis.filter(pl.col("subdivision").is_not_null()).select("country", "subdivision").unique()
+        covered = refs.admin1_cells.join(applied, on=["country", "subdivision"]).select("cell", pl.col("country").alias("countrycode")).unique()
         hit = located().join(country, on=["species_id", "countrycode"], how="semi").join(covered, on=["cell", "countrycode"], how="anti")
         run.drop(hit, "griis")
     if "griis_subnational" not in off:
         # a sub-national list is for the rows in the cells that overlap its subdivision, and the cells are bigger than the places, so a border cell holds
         # a neighbour country's rows too. Where GBIF uses the list's country code in those cells only the rows with that code count, so a CA row in a cell
-        # that overlaps a US state is spared. Where it does not, the cells alone decide: the Canary Islands are `IC` in the list and `ES` in GBIF, and an
-        # overseas place carries the sovereign's code in its list (`FR`) and its own in the records (`RE`, `GP`).
+        # that overlaps a US state is spared. Where it does not, the cells alone decide: an overseas place carries the sovereign's code in its list (`FR`) and
+        # its own in the records (`RE`, `GP`). On the real data those are the only lists that take this way: `IC`, the Canary Islands (`ES` in GBIF), would, but
+        # Natural Earth has no polygon for it, so it has no cells.
         cells = refs.admin1_cells.select("cell", "country", "subdivision")
         uses_code = (
             cells.join(seen.rename({"countrycode": "country"}), on=["cell", "country"])
@@ -510,8 +513,9 @@ def clean(
 
     A country's GRIIS list applies to rows by `countrycode`, except in the cells of its sub-national lists (`griis`). A sub-national list applies to the
     rows in the cells that overlap its subdivision (`griis_subnational`), and where GBIF uses the list's country code in those cells, to the rows with that
-    code only, so that a neighbour country's row in a border cell stays. Where the code does not occur among the rows of the cells, as for `IC` (the
-    Canary Islands, `ES` in GBIF) or `FR` for Reunion (`RE`), the cells alone decide. Which GRIIS entries apply is `Settings.griis_without_status`
+    code only, so that a neighbour country's row in a border cell stays. Where the code does not occur among the rows of the cells, as for the `FR` lists
+    of Reunion (`RE`) and Guadeloupe (`GP`), the cells alone decide (`IC` for the Canary Islands, `ES` in GBIF, is the case of the tests: it has no
+    cells on the real data). A country's list is left out of the cells of its sub-national lists that are applied, and only of those. Which GRIIS entries apply is `Settings.griis_without_status`
     and what the lists say (`References.griis`). WRiMS applies to sea parts, by `countrycode` (`wrims`). What `refs` could not place is not applied,
     and is listed in `Cleaned.unplaced`.
 

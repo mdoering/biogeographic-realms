@@ -350,6 +350,31 @@ def test_the_code_gbif_uses_is_read_from_the_counts_and_not_from_what_is_left_of
     assert gone(clean(c, r, GRID), 3, "griis_subnational") == set()
 
 
+def test_a_sub_national_list_that_is_not_applied_exempts_nothing_from_the_country_list():
+    # France's list has a table and Reunion's has none: under `skip` Reunion's list is not applied, so its cell is not left to it and the country list
+    # applies there, as everywhere in France. Under `apply` Reunion's list is applied and the cell is its own
+    r = refs([taxon("s1"), taxon("s2")], griis=[("s1", "FR", None)], griis_name_only=[("s2", "FR", "Reunion")], admin1=FR_CELLS)
+    c = counts(row("s1", "10:land", country="FR"), row("s1", "11:land", country="FR"), row("s2", "11:land", country="FR"))
+    skipped = clean(c, r, GRID)
+    assert gone(skipped, 3, "griis") == {("s1", "10:land", "FR"), ("s1", "11:land", "FR")}
+    assert gone(skipped, 3, "griis_subnational") == set()
+    assert set(kept(skipped)) == {("s2", "11:land")}
+    applied = clean(c, r, GRID, settings=Settings(griis_without_status="apply"))
+    assert gone(applied, 3, "griis") == {("s1", "10:land", "FR")}
+    assert gone(applied, 3, "griis_subnational") == {("s2", "11:land", "FR")}
+    assert set(kept(applied)) == {("s1", "11:land")}
+
+
+def test_a_cell_shared_by_two_subdivisions_of_a_country_takes_both_lists():
+    # cell 11 overlaps both of the United States' subdivisions here (a border cell of two states), cell 12 only the second
+    cells = [("11", "US", "A", "overlap"), ("11", "US", "B", "overlap"), ("12", "US", "B", "overlap")]
+    r = refs([taxon("s1"), taxon("s2")], griis=[("s1", "US", "A"), ("s2", "US", "B")], admin1=cells)
+    c = counts(row("s1", "11:land", country="US"), row("s2", "11:land", country="US"), row("s1", "12:sea", country="US"), row("s2", "12:sea", country="US"))
+    out = clean(c, r, GRID)
+    assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "US"), ("s2", "11:land", "US"), ("s2", "12:sea", "US")}
+    assert set(kept(out)) == {("s1", "12:sea")}  # cell 12 is not A's, and s1 is on A's list only
+
+
 def test_a_list_with_no_distributions_is_applied_only_where_asked():
     # the name-only pairs of a list whose export has no distribution table: not applied by default, applied name-only under `apply`
     r = refs(
@@ -677,7 +702,9 @@ LOOSE_5 = {"satellite_record_share": 0.3, "satellite_cell_share": 0.6, "group_mi
 RANDOM_PARTS = [f"{cell}:{kind}" for cell in RANDOM_CELLS for kind in ("land", "sea")]
 # the land parts with area, and the TDWG regions they touch: 7 is in none, and 5's land has no area
 RANDOM_TDWG3 = [("1:land", "R1"), ("2:land", "R1"), ("2:land", "R2"), ("4:land", "R2"), ("6:land", "R3"), ("7:land", None)]
-RANDOM_ADMIN1 = [("2", "AA", "Sub", "centre"), ("6", "AA", "Sub", "overlap")]
+# `Isle` is a list of a country, XX, that no row carries (GBIF does not use its code), so the cells alone decide there; it shares cell 6 with `Sub`, whose
+# code AA is used, so that cell takes both lists
+RANDOM_ADMIN1 = [("2", "AA", "Sub", "centre"), ("6", "AA", "Sub", "overlap"), ("4", "XX", "Isle", "overlap"), ("6", "XX", "Isle", "overlap")]
 COUNTRIES = ["AA", "BB", "CC", None]
 
 
@@ -726,7 +753,22 @@ def random_case(seed: int):
         at = int(rng.integers(len(RANDOM_PARTS)))
         rows.append(row(species, RANDOM_PARTS[at], "AA", n=80))
         rows.append(row(species, RANDOM_PARTS[(at + 2 * int(rng.integers(1, 4))) % len(RANDOM_PARTS)], "AA", n=1))
-    return counts(*rows), refs(taxa, wcvp=wcvp, griis=griis, wrims=wrims, tdwg3=RANDOM_TDWG3, admin1=RANDOM_ADMIN1, griis_no_cells=griis_no_cells, wrims_no_country=wrims_no_country, no_wild_range=no_wild_range)
+    # the lists of layer 3's GRIIS rules that the draws above leave out, from a stream of their own so that those draws stay what they were: the cells-alone
+    # list `Isle`, and the lists with no distribution table, which only `griis_without_status="apply"` applies
+    extra = np.random.default_rng(seed + 1000)
+    name_only, name_only_no_cells = [], []
+    for species in ids:
+        if extra.random() < 0.1:
+            griis.append((species, "XX", "Isle"))
+        for country, subdivision in (("AA", None), ("BB", None), ("AA", "Sub"), ("XX", "Isle")):
+            if extra.random() < 0.15:
+                name_only.append((species, country, subdivision))
+        if extra.random() < 0.05:
+            name_only_no_cells.append((species, "BB", "Nowhere"))
+    return counts(*rows), refs(
+        taxa, wcvp=wcvp, griis=griis, wrims=wrims, tdwg3=RANDOM_TDWG3, admin1=RANDOM_ADMIN1, griis_no_cells=griis_no_cells, wrims_no_country=wrims_no_country,
+        no_wild_range=no_wild_range, griis_name_only=name_only, griis_name_only_no_cells=name_only_no_cells,
+    )
 
 
 @pytest.mark.parametrize("heuristics", [{}, LOOSE_5], ids=["design-layer5", "loose-layer5"])
@@ -747,6 +789,35 @@ def test_records_are_conserved(seed, wcvp_mode, side_conflict, layer_1, heuristi
     assert all(RULES[rule] == layer for rule, layer in out.removed.select("rule", "layer").unique().iter_rows())
     assert out.presence["records"].min() > 0
     assert not out.presence.select("species_id", "part").is_duplicated().any()
+
+
+@pytest.mark.parametrize("griis_without_status", ["skip", "apply"])
+@pytest.mark.parametrize("wcvp_mode", ["native_only", "off"])
+@pytest.mark.parametrize("seed", range(6))
+def test_records_are_conserved_with_every_branch_of_the_griis_rules(seed, wcvp_mode, griis_without_status):
+    """The same sum with the lists that have no table applied or not, and with the sub-national list that the cells alone decide (`XX`), which shares a cell
+    with one that goes by code (`AA`). The random world has both in every seed."""
+    c, r = random_case(seed)
+    out = clean(c, r, RANDOM_GRID, ALL, Settings(wcvp_mode=wcvp_mode, griis_without_status=griis_without_status, **LOOSE_5))
+    lost = out.removed.filter(pl.col("layer") >= 2, pl.col("to_part").is_null())["records"].sum()
+    assert int(out.presence["records"].sum()) + int(lost) == int((c["n"] - c["n_human_text"]).sum())
+    assert not out.presence.select("species_id", "part").is_duplicated().any()
+    assert out.removed.filter(pl.col("layer") == 3).select("species_id", "part", "countrycode").is_duplicated().sum() == 0  # layer 3 takes no row twice
+
+
+def test_the_random_world_reaches_the_cells_alone_branch_and_the_switch():
+    by_alone = by_skip = by_apply = 0
+    for seed in range(6):
+        c, r = random_case(seed)
+        skipped = clean(c, r, RANDOM_GRID, ALL, Settings(wcvp_mode="off", **LOOSE_5))
+        applied = clean(c, r, RANDOM_GRID, ALL, Settings(wcvp_mode="off", griis_without_status="apply", **LOOSE_5))
+        # a row of any country in cell 4, which only `Isle` has, is taken by cells alone (no row says XX)
+        alone = skipped.removed.filter(pl.col("rule") == "griis_subnational", pl.col("part").str.starts_with("4:"))
+        by_alone += alone.height
+        by_skip += skipped.removed.filter(pl.col("layer") == 3, pl.col("rule").str.starts_with("griis")).height
+        by_apply += applied.removed.filter(pl.col("layer") == 3, pl.col("rule").str.starts_with("griis")).height
+        assert not c.filter(pl.col("countrycode") == "XX").height
+    assert by_alone > 0 and by_apply > by_skip > 0
 
 
 def test_the_random_tables_reach_every_rule():
