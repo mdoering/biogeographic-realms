@@ -7,8 +7,14 @@ pass marks hold:
 2. no row has a cell code that is not in the grid
 3. synonyms are between 2% and 5% of the clean records (the API's COL facets put them at 3.6% of all records on 2026-10-31)
 
+When they hold, it writes `data/gbif/<key>/_COMPLETE` (the rows, the resolution and the zip's sha256), without which `load_presence` and
+`load_country_counts` refuse the parts: a run that is killed or fails its QA leaves none.
+
 The numbers are global: nothing lists a species, a lineage or a per-taxon figure, so half B stays unseen. The pass marks are not to be
 loosened to make a run pass.
+
+`--mark-complete` writes the marker for an ingest made before the marker existed, without ingesting again: it checks that the parts hold the rows
+of `qa.json`, that the QA passed, and that every cell of the parts is in the grid of `--resolution`, and only then writes it.
 
 The download is untrusted input, so run it as `uv run python -I scripts/ingest.py data/gbif/<key>.zip --resolution 6`.
 """
@@ -20,8 +26,10 @@ import sys
 import time
 from pathlib import Path
 
+import polars as pl
+
 from realms.grid import load_grid
-from realms.occurrences import ingest, qa, scan_counts
+from realms.occurrences import COMPLETE, IncompleteIngest, ingest, mark_complete, part_rows, qa, scan_counts
 from realms.reference import load_taxa
 
 SYNONYM_SHARE = (0.02, 0.05)
@@ -54,12 +62,50 @@ def peak_rss_mb() -> float:
     return peak / (1 << 20 if sys.platform == "darwin" else 1 << 10)
 
 
+def mark_earlier_ingest(download: Path, out_dir: Path, qa_path: Path, gpkg: Path, land: Path, resolution: int) -> dict:
+    """Write the marker for the parts of an ingest made before the marker existed, once they are shown to be that ingest. Ingests nothing.
+
+    The parts must hold the rows of `qa.json` (its `rows` and its `ingest.rows`), `qa.json` must pass the marks, and every cell of the parts must be in
+    the grid of `resolution`. Global numbers only.
+    """
+    if (out_dir / COMPLETE).exists():
+        raise SystemExit(f"FAILED {out_dir / COMPLETE} is there already")
+    missing = [str(p) for p in (download, qa_path, gpkg, land) if not p.exists()]
+    if missing:
+        raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
+    report = json.loads(qa_path.read_text())
+    try:
+        rows = part_rows(out_dir)
+    except FileNotFoundError as error:
+        raise SystemExit(f"FAILED {error}") from error
+    if not rows == report["rows"] == report["ingest"]["rows"]:
+        raise SystemExit(f"FAILED the parts hold {rows:,} rows, and {qa_path} says {report['rows']:,} (ingest {report['ingest']['rows']:,})")
+    failed = problems(report)
+    if failed:
+        raise SystemExit(f"FAILED {qa_path} fails the pass marks: " + "; ".join(failed))
+    grid = load_grid(gpkg, land)
+    if grid.resolution != resolution:
+        raise SystemExit(f"FAILED {gpkg.name} holds resolution {grid.resolution}, not {resolution}")
+    cells = scan_counts(out_dir).select(pl.col("cell").unique()).collect()
+    unknown = cells.join(grid.cells.select("cell"), on="cell", how="anti").height
+    if unknown:
+        raise SystemExit(f"FAILED {unknown:,} cell codes of the parts are not in the grid of resolution {resolution}")
+    print(f"checked: {rows:,} rows as in {qa_path}, which passes; all {cells.height:,} cells of the parts are in the grid of resolution {resolution}")
+    try:
+        return mark_complete(out_dir, download, resolution, rows, how="mark-complete")
+    except IncompleteIngest as error:
+        raise SystemExit(f"FAILED {error}") from error
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("download", type=Path, help="the SQL download, data/gbif/<key>.zip")
     parser.add_argument("--resolution", type=int, required=True, help="the ISEA3H resolution of its cells")
     parser.add_argument("--reference", type=Path, default=Path("data/reference"), help="the reference data, default data/reference")
     parser.add_argument("--results", type=Path, default=Path("results/pilot"), help="where res<r>/qa.json goes, default results/pilot")
+    parser.add_argument(
+        "--mark-complete", action="store_true", help="write the completion marker for an earlier ingest of this download, checked against its qa.json and the grid, without ingesting again"
+    )
     args = parser.parse_args(argv)
     reference = args.reference
     gpkg = reference / "grids" / f"ISEA3H-{args.resolution}.gpkg"
@@ -67,6 +113,11 @@ def main(argv: list[str] | None = None) -> None:
     release = reference / "exports" / "extended" / "col.zip"
     out_dir = args.download.parent / args.download.stem
     qa_path = args.results / f"res{args.resolution}" / "qa.json"
+
+    if args.mark_complete:
+        marker = mark_earlier_ingest(args.download, out_dir, qa_path, gpkg, land, args.resolution)
+        print(f"wrote {out_dir / COMPLETE}: {json.dumps(marker)}")
+        return
 
     # before the ingest, which takes minutes
     missing = [str(p) for p in (args.download, gpkg, land, release) if not p.exists()]
@@ -108,6 +159,8 @@ def main(argv: list[str] | None = None) -> None:
     failed = problems(report)
     if failed:
         raise SystemExit("FAILED the pass marks: " + "; ".join(failed))
+    marker = mark_complete(out_dir, args.download, args.resolution, rows)
+    print(f"    wrote {out_dir / COMPLETE}: {marker['rows']:,} rows at resolution {marker['resolution']}, zip sha256 {marker['zip_sha256']}")
     print("ok")
 
 

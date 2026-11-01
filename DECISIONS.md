@@ -1296,3 +1296,20 @@ These are the likely feral or released forms of native species. GRIIS calls them
 These include the examples of the brief only under `apply`: **the Mallard in SE (1.49M, row 4) and DK (0.78M, row 12)** and **the Rock Dove in IN (1.10M, row 6)**, with the Whooper and Mute Swans in SE. Under `skip` (the default) the Swedish, Danish and Indian rows are not removed, and the list is the US, Canadian, French, Dutch, Australian, Spanish, British and Belgian cases above.
 In `skip` the House Sparrow and the Rock Dove appear in CA (rows 4 and 5) with the US as their largest neighbour, 13.2M and 7.0M unlisted records, because `GRIIS-US-United` calls them native (see above), not because the species is native there. **The definition is generous**: any three neighbours count, however few records, so the list also has the starling in AU, whose neighbours hold NF 2,290, ID 2 and NC 2.
 `griis_neighbours_min100.csv` asks 100 records of each neighbour: under `apply` it leaves out the starling in the US and AU, the Mute Swan in the US and the Muskrat in NL, and keeps the Mallard, the swans, the Rock Dove in IN (9 neighbours) and the Pheasant in GB. A neighbour that holds unlisted records may also hold them because it has no list, or no table, and not because the species is native there: a native range is not what this list shows.
+
+### The ingest's completion marker, and the resolution read from it (2026-11-01)
+
+From the final review of the branch. **An ingest is complete when its directory holds `_COMPLETE`**, and the loaders refuse one that does not. The reason: the resolution 7 ingest is larger, and an out-of-memory kill or a
+`SIGKILL` in the middle of it runs no cleanup, so it could leave parts that `load_presence` and `load_country_counts`, and with them the one unsealed load of half B, would read without complaint.
+
+- **What it holds:** `rows`, `resolution`, `zip` (the name), `zip_sha256`, `written` and `how` (`ingest`, or `mark-complete`). It is written to a temporary file and renamed.
+- **Who writes it:** `scripts/ingest.py`, after the ingest **and** its QA, and only if the three pass marks hold (`realms.occurrences.mark_complete`), after checking that the parts hold the rows the
+  ingest counted. **`ingest` removes the marker before anything else**, then the earlier parts, so a run that is killed half way leaves parts and no marker, and one that fails its QA leaves none either.
+- **Who reads it:** `_select`, so both loaders, right after the seal and before any row is read (`read_complete`): no marker, a marker without one of its keys, or parts that hold other rows than it says
+  (from the Parquet metadata, a global count that reads no row) raise `IncompleteIngest`. `scan_counts` does not check it, as `qa` reads the parts before the marker exists.
+- **The res 6 ingest got its marker by `--mark-complete`** (`uv run python -I scripts/ingest.py data/gbif/0019721-261023074918325.zip --resolution 6 --mark-complete`), which ingests nothing: it checks that
+  the parts hold the rows of `results/pilot/res6/qa.json` (19,531,246, its `rows` and its `ingest.rows`), that `qa.json` passes the marks, and that every cell of the parts is in the grid of the stated resolution
+  (all 7,234 are in `ISEA3H-6`), and then writes the marker with the zip's sha256 (`9fbba9b1ecd81fdd47bd9febfef0fac18b01792ed7ea29d07459a352d154bc03`, the same as `shasum -a 256`), `how` `mark-complete`. 4 s, 0.7 GB.
+- **`--resolution` of `scripts/clean_counts.py` and `scripts/calibrate.py` is read from the marker** (`realms.occurrences.resolution_of`), before the references are loaded. The flag stays, as a statement
+  that must agree with the marker, and a mismatch stops the script at once; before, `--resolution` defaulted to 6 and a mismatch failed only after the 16 GB load of the references (if at all). The grid file
+  is the marker's resolution's, and its own resolution is checked against it too. `--score-half-b` checks the marker's resolution, so stating 7 for an ingest of another resolution does not get past it.

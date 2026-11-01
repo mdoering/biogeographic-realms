@@ -11,7 +11,22 @@ from polars.testing import assert_frame_equal
 from realms import grid as grid_module
 from realms import occurrences
 from realms.grid import Grid, part_id
-from realms.occurrences import COLUMNS, COUNTS, SealedHalf, ingest, load_country_counts, load_presence, qa, scan_counts
+from realms.occurrences import (
+    COLUMNS,
+    COMPLETE,
+    COUNTS,
+    IncompleteIngest,
+    SealedHalf,
+    ingest,
+    load_country_counts,
+    load_presence,
+    mark_complete,
+    qa,
+    read_complete,
+    resolution_of,
+    scan_counts,
+    sha256,
+)
 
 SCRIPT = Path(__file__).parent.parent / "scripts" / "ingest.py"
 spec = importlib.util.spec_from_file_location("ingest_script", SCRIPT)
@@ -50,8 +65,11 @@ def download(tmp_path, rows, header=None, key=KEY) -> Path:
 
 
 def ingested(tmp_path, rows, chunk_lines=3) -> Path:
+    """The parts of an ingest of `rows`, with the marker of a complete ingest that `scripts/ingest.py` writes after its QA."""
     out = tmp_path / "out"
-    ingest(download(tmp_path, rows), out, chunk_lines)
+    zip_path = download(tmp_path, rows)
+    count = ingest(zip_path, out, chunk_lines)
+    mark_complete(out, zip_path, 6, count)
     return out
 
 
@@ -133,6 +151,7 @@ def test_ingest_replaces_the_parts_of_an_earlier_run(tmp_path):
     assert ingest(download(tmp_path, SEVEN[:2]), out, chunk_lines=5) == 2
     assert [p.name for p in out.glob("part-*.parquet")] == ["part-00000.parquet"]
     assert scan_counts(out).collect().height == 2
+    assert not (out / COMPLETE).exists()  # the earlier run's marker went with its parts
 
 
 def test_ingest_rejects_other_columns(tmp_path):
@@ -172,6 +191,130 @@ def test_the_row_count_may_exceed_one_chunk_several_times_over(tmp_path):
     out = ingested(tmp_path, rows, chunk_lines=4)
     assert len(list(out.glob("part-*.parquet"))) == 7
     assert scan_counts(out).select(pl.col("n").sum()).collect().item() == sum(range(1, 26))
+
+
+# the marker of a complete ingest
+
+
+def test_the_marker_holds_the_rows_the_resolution_and_the_zips_sha256(tmp_path):
+    zip_path = download(tmp_path, SEVEN)
+    out = tmp_path / "out"
+    rows = ingest(zip_path, out, chunk_lines=3)
+    assert not (out / COMPLETE).exists()  # ingest alone does not say it is complete: the QA has not run
+    written = mark_complete(out, zip_path, 6, rows)
+    assert read_complete(out) == written == json.loads((out / COMPLETE).read_text())
+    assert (written["rows"], written["resolution"], written["zip"], written["how"]) == (7, 6, zip_path.name, "ingest")
+    assert written["zip_sha256"] == sha256(zip_path) and re.fullmatch(r"[0-9a-f]{64}", written["zip_sha256"])
+    assert not list(out.glob(f"{COMPLETE}.*"))  # the temporary file is gone
+
+
+def test_the_loaders_refuse_parts_without_the_marker(tmp_path):
+    out = tmp_path / "out"
+    ingest(download(tmp_path, SEVEN), out, chunk_lines=3)
+    for load in (load_presence, load_country_counts):
+        with pytest.raises(IncompleteIngest, match="_COMPLETE"):
+            load(out, split(S1="A"), "A")
+        with pytest.raises(IncompleteIngest):
+            load(out, split(S1="A", S2="B"), "B", unsealed=True)  # nor does unsealing get past it
+
+
+def test_the_loaders_refuse_parts_that_hold_other_rows_than_the_marker_says(tmp_path):
+    out = ingested(tmp_path, SEVEN)
+    (out / "part-00002.parquet").unlink()  # as a part lost or a run killed after its marker was copied would leave it
+    with pytest.raises(IncompleteIngest, match="6 rows"):
+        load_presence(out, split(S1="A"), "A")
+    for path in out.glob("part-*.parquet"):
+        path.unlink()
+    with pytest.raises(IncompleteIngest, match="no part"):
+        load_presence(out, split(S1="A"), "A")
+
+
+def test_a_marker_that_lacks_a_key_is_refused(tmp_path):
+    out = ingested(tmp_path, SEVEN)
+    marker = json.loads((out / COMPLETE).read_text())
+    del marker["resolution"]
+    (out / COMPLETE).write_text(json.dumps(marker))
+    with pytest.raises(IncompleteIngest, match="resolution"):
+        read_complete(out)
+
+
+def test_a_marker_is_not_written_for_parts_that_hold_other_rows(tmp_path):
+    zip_path = download(tmp_path, SEVEN)
+    out = tmp_path / "out"
+    ingest(zip_path, out, chunk_lines=3)
+    with pytest.raises(IncompleteIngest, match="7 rows"):
+        mark_complete(out, zip_path, 6, 8)
+    assert not (out / COMPLETE).exists()
+
+
+def test_ingest_removes_the_marker_of_an_earlier_run_before_it_writes_anything(tmp_path):
+    out = ingested(tmp_path, SEVEN)
+    assert (out / COMPLETE).exists()
+    bad = [row("S1", "DK", C1, "land")] * 3 + [row("S1", "DK", C1, "land", n="many")]
+    with pytest.raises(ValueError, match="many"):
+        ingest(download(tmp_path, bad), out, chunk_lines=3)
+    assert not (out / COMPLETE).exists() and not list(out.glob("part-*"))
+    # and a run that succeeds leaves no marker either, until the QA has passed
+    ingest(download(tmp_path, SEVEN), out, chunk_lines=3)
+    assert not (out / COMPLETE).exists()
+    with pytest.raises(IncompleteIngest):
+        load_presence(out, split(S1="A"), "A")
+
+
+def test_the_marker_is_gone_before_the_first_part_is_written(tmp_path, monkeypatch):
+    """A kill (SIGKILL, out of memory) runs no cleanup, so whatever parts it leaves must already stand without a marker: the earlier run's goes first,
+    and the loaders refuse what is left."""
+    out = ingested(tmp_path, SEVEN)
+    seen = []
+    original = pl.DataFrame.write_parquet
+
+    def spy(df, path, *args, **kwargs):
+        seen.append((out / COMPLETE).exists())
+        return original(df, path, *args, **kwargs)
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", spy)
+    ingest(download(tmp_path, SEVEN), out, chunk_lines=3)
+    assert seen == [False, False, False]
+    with pytest.raises(IncompleteIngest):
+        load_country_counts(out, split(S1="A"), "A")
+
+
+def test_the_resolution_is_the_markers_and_a_stated_one_must_agree(tmp_path):
+    out = ingested(tmp_path, SEVEN)
+    assert resolution_of(out) == 6 == resolution_of(out, 6)
+    with pytest.raises(ValueError, match="resolution 6, not 7"):
+        resolution_of(out, 7)
+    with pytest.raises(IncompleteIngest):
+        resolution_of(tmp_path / "nothing")
+
+
+def load_clean_counts():
+    spec = importlib.util.spec_from_file_location("clean_counts_script", Path(__file__).parent.parent / "scripts" / "clean_counts.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_clean_counts_takes_the_resolution_from_the_marker_before_it_loads_anything(tmp_path, monkeypatch):
+    script = load_clean_counts()
+
+    def loaded(*args, **kwargs):
+        raise AssertionError("something was loaded")
+
+    for name in ("twins_of", "load_grid", "load_references", "load_split", "load_country_counts"):
+        monkeypatch.setattr(script, name, loaded)
+    out = ingested(tmp_path, SEVEN)
+    without = tmp_path / "without"
+    ingest(download(tmp_path, SEVEN), without)
+    for argv, message in (([str(out), "--resolution", "7"], "resolution 6, not 7"), ([str(without)], "_COMPLETE")):
+        monkeypatch.setattr("sys.argv", ["clean_counts.py", "--counts", *argv, "--results", str(tmp_path / "results")])
+        with pytest.raises(SystemExit, match=message):
+            script.main()
+    assert not (tmp_path / "results").exists()
+    # with the marker and no resolution stated, it goes on, as far as the reference files that are not there
+    monkeypatch.setattr("sys.argv", ["clean_counts.py", "--counts", str(out), "--reference", str(tmp_path / "none"), "--results", str(tmp_path / "results")])
+    with pytest.raises(SystemExit, match="ISEA3H-6.gpkg"):
+        script.main()
 
 
 # scan_counts
@@ -476,6 +619,70 @@ def test_the_script_writes_the_parts_and_qa_json(run, tmp_path):
     assert report["unaccepted"]["species"] == 0 and report["unknown_cells"]["cells"] == 0
     assert report["ingest"]["rows"] == 3 and report["ingest"]["seconds"] >= 0 and report["ingest"]["parquet_bytes"] > 0
     assert report["ingest"]["peak_rss_mb"] > 0
+
+
+def test_the_script_writes_the_marker_once_the_qa_has_passed(run, tmp_path):
+    run()
+    out = tmp_path / KEY
+    marker = read_complete(out)
+    assert (marker["rows"], marker["resolution"], marker["how"]) == (3, 6, "ingest")
+    assert marker["zip_sha256"] == sha256(tmp_path / f"{KEY}.zip")
+    assert load_presence(out, split(S1="A", S2="A"), "A").height == 2
+
+
+def test_the_script_writes_no_marker_when_a_pass_mark_fails(run, tmp_path):
+    run()
+    with pytest.raises(SystemExit):
+        run([*CLEAN, row("GONE", "DK", C1, "land", n=40)])
+    assert list((tmp_path / KEY).glob("part-*.parquet")) and not (tmp_path / KEY / COMPLETE).exists()  # the first run's marker is gone too
+
+
+def test_mark_complete_writes_the_marker_for_an_earlier_ingest_without_ingesting_again(run, tmp_path):
+    run()
+    out = tmp_path / KEY
+    (out / COMPLETE).unlink()  # an ingest made before the marker existed
+    parts = {p.name: p.stat().st_mtime_ns for p in out.glob("part-*.parquet")}
+    run(CLEAN, "--mark-complete")
+    assert {p.name: p.stat().st_mtime_ns for p in out.glob("part-*.parquet")} == parts  # nothing ingested
+    marker = read_complete(out)
+    assert (marker["rows"], marker["resolution"], marker["how"]) == (3, 6, "mark-complete")
+    assert marker["zip_sha256"] == sha256(tmp_path / f"{KEY}.zip")
+    with pytest.raises(SystemExit, match="already"):
+        run(CLEAN, "--mark-complete")
+
+
+def earlier_ingest(run, tmp_path) -> Path:
+    run()
+    out = tmp_path / KEY
+    (out / COMPLETE).unlink()
+    return out
+
+
+def test_mark_complete_refuses_parts_that_hold_other_rows_than_qa_json(run, tmp_path):
+    out = earlier_ingest(run, tmp_path)
+    qa_path = tmp_path / "results" / "res6" / "qa.json"
+    report = json.loads(qa_path.read_text())
+    qa_path.write_text(json.dumps({**report, "rows": 4, "ingest": {**report["ingest"], "rows": 4}}))
+    with pytest.raises(SystemExit, match="3 rows"):
+        run(CLEAN, "--mark-complete")
+    assert not (out / COMPLETE).exists()
+
+
+def test_mark_complete_refuses_a_qa_json_that_fails_the_pass_marks(run, tmp_path):
+    out = earlier_ingest(run, tmp_path)
+    qa_path = tmp_path / "results" / "res6" / "qa.json"
+    qa_path.write_text(json.dumps({**json.loads(qa_path.read_text()), "synonym_share": 0.5}))
+    with pytest.raises(SystemExit, match="synonym"):
+        run(CLEAN, "--mark-complete")
+    assert not (out / COMPLETE).exists()
+
+
+def test_mark_complete_refuses_parts_with_a_cell_of_another_grid(run, tmp_path, monkeypatch):
+    out = earlier_ingest(run, tmp_path)
+    monkeypatch.setattr(ingest_script, "load_grid", lambda gpkg, land: grid([(C1, 1000, 0)]))  # C2 is not in it, as a grid of another resolution
+    with pytest.raises(SystemExit, match="not in the grid"):
+        run(CLEAN, "--mark-complete")
+    assert not (out / COMPLETE).exists()
 
 
 def test_the_script_prints_global_numbers_only(run, capsys):

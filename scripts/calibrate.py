@@ -68,7 +68,7 @@ from realms.calibrate import (
 from realms.clean import GRIIS_WITHOUT_STATUS, LAYERS, Settings, clean, outlier_rows
 from realms.grid import load_grid
 from realms.natives import load_references, name_index
-from realms.occurrences import load_country_counts
+from realms.occurrences import IncompleteIngest, load_country_counts, resolution_of
 from realms.split import load_split
 
 SCORE_RESOLUTION = 7  # the resolution at which half B is scored, once
@@ -121,14 +121,14 @@ def described(index: int, setting: Settings, start, refs, grid, met: bool | None
     return out if met is None else {**out, "limit_met": met}
 
 
-def refuse_a_second_scoring(args: argparse.Namespace) -> None:
+def refuse_a_second_scoring(args: argparse.Namespace, resolution: int) -> None:
     """`--score-half-b` is made once, at resolution 7: stop before anything is loaded if it is asked otherwise, or if any resolution has a scoring started or done.
 
     The marker `held_out.started` is written before half B is loaded and `held_out.json` after, so a run that fails in between is stopped too. There is no
     flag to override: a retry after a failed run is for Markus to decide.
     """
-    if args.resolution != SCORE_RESOLUTION:
-        raise SystemExit(f"FAILED --score-half-b runs at resolution {SCORE_RESOLUTION}, the analysis resolution, and not at {args.resolution}: the call that opens half B is made once")
+    if resolution != SCORE_RESOLUTION:
+        raise SystemExit(f"FAILED --score-half-b runs at resolution {SCORE_RESOLUTION}, the analysis resolution, and not at {resolution}: the call that opens half B is made once")
     how = "The call that opens half B is made once before the freeze and there is no flag to run it again: a retry after a failed run needs Markus's explicit decision."
     if started := sorted(args.results.glob("res*/held_out.started")):
         raise SystemExit(f"FAILED a scoring of half B was started, see {started[0]}: it may have loaded half B and then failed, and a retry would be a second load. {how}")
@@ -139,7 +139,9 @@ def refuse_a_second_scoring(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--counts", type=Path, required=True, help="the Parquet parts of an ingested download, data/gbif/<key>")
-    parser.add_argument("--resolution", type=int, default=6, help="the ISEA3H resolution of the counts, default 6. The binding calibration is at 7")
+    parser.add_argument(
+        "--resolution", type=int, help="the ISEA3H resolution of the counts, if stated: it must be that of the ingest's marker, which is used. The binding calibration is at 7"
+    )
     parser.add_argument(
         "--griis-without-status", choices=GRIIS_WITHOUT_STATUS, default="skip", help="the known cases' layer 3 on a GRIIS list with no distribution table: `skip` (default) or `apply` it name-only"
     )
@@ -153,11 +155,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    directory = args.results / f"res{args.resolution}"
+    try:
+        resolution = resolution_of(args.counts, args.resolution)  # before the references, which take a minute and 16 GB
+    except (IncompleteIngest, ValueError) as error:
+        raise SystemExit(f"FAILED {error}") from error
+    directory = args.results / f"res{resolution}"
     if args.score_half_b:
-        refuse_a_second_scoring(args)
+        refuse_a_second_scoring(args, resolution)
     reference = args.reference
-    gpkg = reference / "grids" / f"ISEA3H-{args.resolution}.gpkg"
+    gpkg = reference / "grids" / f"ISEA3H-{resolution}.gpkg"
     land = reference / "natural_earth" / "ne_10m_land.zip"
     col = reference / "exports" / "extended" / "col.zip"
     level3 = reference / "wgsrpd" / "level3.geojson"
@@ -172,7 +178,7 @@ def main() -> None:
     seconds: dict[str, float] = {}
     report: dict = {
         "half": "A",
-        "resolution": args.resolution,
+        "resolution": resolution,
         "counts": str(args.counts),
         "calibration_layers": [1, 2, 4, 5],
         "native_loss_limit": NATIVE_LOSS_LIMIT,
@@ -185,6 +191,8 @@ def main() -> None:
 
     begun = time.perf_counter()
     grid = load_grid(gpkg, land)
+    if grid.resolution != resolution:
+        raise SystemExit(f"FAILED {gpkg.name} holds resolution {grid.resolution}, not {resolution}")
     refs = load_references(grid, reference)
     gc.collect()
     regions = tdwg_regions(level3)

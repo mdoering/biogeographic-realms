@@ -6,11 +6,19 @@ records (`queries/occurrence_res<r>.sql`). Its rows hold no free text, so it can
 
 Half B of the species stays sealed until the pipeline is frozen (`docs/design.md`). `load_presence` and `load_country_counts` refuse it
 unless the caller says `unsealed=True`, and each such call site is listed in `DECISIONS.md`. `qa` reports global numbers only.
+
+An ingest is complete when its directory holds `_COMPLETE` (`mark_complete`), which `scripts/ingest.py` writes once the ingest and its QA have passed,
+with the rows, the resolution and the zip's sha256. `ingest` removes it before it writes anything, so a run that is killed half way leaves parts and no
+marker, and `load_presence` and `load_country_counts` refuse a directory without one (`IncompleteIngest`), or whose parts hold other rows than it says.
 """
 
+import hashlib
 import io
 import itertools
+import json
+import os
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -40,13 +48,21 @@ COLUMNS = {"specieskey": pl.String, "countrycode": pl.String, "cell": pl.String,
 HALVES = ("A", "B", "all")
 BUFFER = 1 << 20
 EXAMPLES = 10
+COMPLETE = "_COMPLETE"  # the marker of a complete ingest, in the directory of its parts
+MARKER_KEYS = ("rows", "resolution", "zip", "zip_sha256")
 
 
 class SealedHalf(Exception):
     """Half B was asked for without `unsealed=True`."""
 
 
+class IncompleteIngest(Exception):
+    """A directory of parts has no `_COMPLETE`, or its parts are not what the marker says: an ingest that did not finish, or did not pass its QA."""
+
+
 def _clear(out_dir: Path) -> None:
+    """Remove the marker first and then the parts, so that no marker ever stands beside parts it was not written for."""
+    (out_dir / COMPLETE).unlink(missing_ok=True)
     for path in out_dir.glob("part-*.parquet"):
         path.unlink()
 
@@ -66,7 +82,8 @@ def _parse(content: bytes, source: str) -> pl.DataFrame:
 def ingest(zip_path: Path, out_dir: Path, chunk_lines: int = 5_000_000) -> int:
     """Stream the zip's single member into `out_dir/part-00000.parquet` and onwards, `chunk_lines` lines to a part. Returns the rows.
 
-    The parts of an earlier run are removed first, and so are any written by a run that fails, so `out_dir` never holds a partial result.
+    The marker and the parts of an earlier run are removed first, and the parts written by a run that fails are removed too. A run that is killed
+    leaves its parts, but no marker: the loaders refuse them until `mark_complete` is written after the QA.
     """
     if chunk_lines < 1:
         raise ValueError(f"chunk_lines is at least 1, not {chunk_lines}")
@@ -99,12 +116,83 @@ def ingest(zip_path: Path, out_dir: Path, chunk_lines: int = 5_000_000) -> int:
     return rows
 
 
-def scan_counts(out_dir: Path) -> pl.LazyFrame:
-    """The parts of `ingest`, lazily, with `specieskey` renamed `species_id`. This holds every species, so look at it only in global numbers."""
+def _parts(out_dir: Path) -> list[Path]:
     parts = sorted(out_dir.glob("part-*.parquet"))
     if not parts:
         raise FileNotFoundError(f"no part-*.parquet in {out_dir}")
-    return pl.scan_parquet(parts).rename({"specieskey": "species_id"})
+    return parts
+
+
+def scan_counts(out_dir: Path) -> pl.LazyFrame:
+    """The parts of `ingest`, lazily, with `specieskey` renamed `species_id`, whether the ingest is complete or not (`qa` reads them before the marker).
+
+    It holds every species, half B included, and is not sealed. It has two readers: `qa`, whose numbers are global, and `_select`, which checks the
+    seal and the marker first and then reads it per species, for the half it was asked for.
+    """
+    return pl.scan_parquet(_parts(out_dir)).rename({"specieskey": "species_id"})
+
+
+def part_rows(out_dir: Path) -> int:
+    """How many rows the parts of `out_dir` hold, from their Parquet metadata: a global number, which reads no row."""
+    return pl.scan_parquet(_parts(out_dir)).select(pl.len()).collect().item()
+
+
+def sha256(path: Path) -> str:
+    """The sha256 of a file, read a megabyte at a time."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(BUFFER):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def mark_complete(out_dir: Path, zip_path: Path, resolution: int, rows: int, how: str = "ingest") -> dict:
+    """Write `out_dir/_COMPLETE`: the parts are a whole ingest of `zip_path` at `resolution`, and passed their QA. Returns what was written.
+
+    `rows` is what the caller counted (the ingest's rows, or `qa.json`'s), and it must be what the parts hold. The marker holds `rows`, `resolution`, `zip`
+    (the file's name), `zip_sha256`, `written` (the time) and `how` (`ingest`, or `mark-complete` for a marker added to an earlier ingest). It is written to
+    a temporary file and renamed, so a marker is never half written.
+    """
+    found = part_rows(out_dir)
+    if found != rows:
+        raise IncompleteIngest(f"the parts of {out_dir} hold {found:,} rows, not the {rows:,} of the ingest: no {COMPLETE} is written")
+    marker = {
+        "rows": rows,
+        "resolution": resolution,
+        "zip": zip_path.name,
+        "zip_sha256": sha256(zip_path),
+        "written": datetime.now(UTC).isoformat(timespec="seconds"),
+        "how": how,
+    }
+    temporary = out_dir / f"{COMPLETE}.tmp"
+    temporary.write_text(json.dumps(marker, indent=2) + "\n")
+    os.replace(temporary, out_dir / COMPLETE)
+    return marker
+
+
+def read_complete(out_dir: Path) -> dict:
+    """The marker of a complete ingest in `out_dir` (`mark_complete`), after checking that its parts hold the rows it says.
+
+    Raises `IncompleteIngest` if there is no marker, if it lacks a key, or if the parts hold other rows: an ingest that was killed, failed its QA or
+    was changed since.
+    """
+    path = out_dir / COMPLETE
+    if not path.exists():
+        raise IncompleteIngest(
+            f"{out_dir} has no {COMPLETE}: its ingest did not finish or did not pass its QA. Run scripts/ingest.py on the download again, "
+            "or, for an ingest made before the marker existed, scripts/ingest.py --mark-complete"
+        )
+    marker = json.loads(path.read_text())
+    missing = [k for k in MARKER_KEYS if k not in marker]
+    if missing:
+        raise IncompleteIngest(f"{path} lacks {missing}")
+    try:
+        found = part_rows(out_dir)
+    except FileNotFoundError as error:
+        raise IncompleteIngest(f"{path} is there, and no part is: {error}") from error
+    if found != marker["rows"]:
+        raise IncompleteIngest(f"the parts of {out_dir} hold {found:,} rows, and {COMPLETE} says {marker['rows']:,}: the parts changed after the ingest")
+    return marker
 
 
 def _tally(flag: pl.Expr, name: str) -> list[pl.Expr]:
@@ -174,8 +262,22 @@ def qa(counts: pl.LazyFrame, taxa: pl.DataFrame, grid: Grid) -> dict:
     }
 
 
+def resolution_of(out_dir: Path, stated: int | None = None) -> int:
+    """The resolution of the complete ingest in `out_dir`, from its marker (`read_complete`), so that a script knows it before it loads anything large.
+
+    `stated` is a resolution the caller was given, and it must be the marker's: a mismatch raises `ValueError`.
+    """
+    found = read_complete(out_dir)["resolution"]
+    if stated is not None and stated != found:
+        raise ValueError(f"{out_dir} is an ingest at resolution {found}, not {stated}")
+    return found
+
+
 def _select(out_dir: Path, split: pl.DataFrame, half: str, unsealed: bool, keep: tuple[str, ...]) -> pl.DataFrame:
-    """The counts of the species of `half`, summed over what `keep` doesn't name. A species that is not in `split` is left out."""
+    """The counts of the species of `half`, summed over what `keep` doesn't name. A species that is not in `split` is left out.
+
+    The seal is checked before anything is read, and then the marker of a complete ingest (`read_complete`), before any row is.
+    """
     if half not in HALVES:
         raise ValueError(f"half is one of {HALVES}, not {half!r}")
     if half != "A" and not unsealed:
@@ -185,6 +287,7 @@ def _select(out_dir: Path, split: pl.DataFrame, half: str, unsealed: bool, keep:
         )
     if split["species_id"].n_unique() != split.height:
         raise ValueError("the split has a species_id more than once")
+    read_complete(out_dir)
     species = split if half == "all" else split.filter(pl.col("half") == half)
     sums = [pl.col(c).sum() for c in SUMMED]
     # the distinct counts of the countries in one part overlap, so the sum would overcount and the maximum is a lower bound
@@ -207,7 +310,8 @@ def load_presence(out_dir: Path, split: pl.DataFrame, half: Literal["A", "B", "a
 
     `n_datasets`, `n_years` and their `_open` forms take the maximum over the countries instead. A dataset or a year can count in
     two countries of a border cell, so the true number lies between the maximum and the sum, and the maximum is a lower bound.
-    `split` is `species_id, lineage, half`. Species it doesn't have are left out. "B" and "all" raise `SealedHalf` unless `unsealed`.
+    `split` is `species_id, lineage, half`. Species it doesn't have are left out. "B" and "all" raise `SealedHalf` unless `unsealed`, and a directory
+    without the marker of a complete ingest raises `IncompleteIngest`.
     """
     return _select(out_dir, split, half, unsealed, ("species_id",))
 

@@ -15,7 +15,8 @@ establishment means. The report has what the lists say (`griis_lists`: entries, 
 
 References are loaded once and need about 16 GB at the peak (`load_taxa`), so the modes share them. The counts are a download:
 `uv run python -I scripts/clean_counts.py --counts data/gbif/<key> [--modes native_only introduced off] [--griis-without-status skip|apply]`.
-Run it once for each setting with its own `--results` to have both.
+Run it once for each setting with its own `--results` to have both. The resolution is the ingest's, read from its marker (`_COMPLETE`) before anything is
+loaded; `--resolution`, if given, must agree with it.
 """
 
 import argparse
@@ -33,7 +34,7 @@ from realms.clean import GRIIS_WITHOUT_STATUS, LAYERS, WCVP_MODES, Settings, cle
 from realms.clean_report import provisional_twin_records, provisional_twins, removal_summary
 from realms.grid import KINDS, ZERO_KM2, cell_of, load_grid, parts
 from realms.natives import load_references, name_index
-from realms.occurrences import load_country_counts
+from realms.occurrences import IncompleteIngest, load_country_counts, resolution_of
 from realms.outliers import suspect_cells
 from realms.split import load_split
 
@@ -153,7 +154,7 @@ def zero_area(grid, cleaned) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--counts", type=Path, required=True, help="the Parquet parts of an ingested download, data/gbif/<key>")
-    parser.add_argument("--resolution", type=int, default=6, help="the ISEA3H resolution of the counts, default 6")
+    parser.add_argument("--resolution", type=int, help="the ISEA3H resolution of the counts, if stated: it must be that of the ingest's marker, which is used")
     parser.add_argument("--modes", nargs="+", choices=WCVP_MODES, default=list(WCVP_MODES), help="the WCVP modes to run, default all three")
     parser.add_argument(
         "--griis-without-status", choices=GRIIS_WITHOUT_STATUS, default="skip", help="a GRIIS list with no distribution table: `skip` it (default) or `apply` it name-only"
@@ -163,24 +164,30 @@ def main() -> None:
     parser.add_argument("--results", type=Path, default=Path("results/clean"), help="where res<r>/ goes, default results/clean")
     args = parser.parse_args()
 
+    try:
+        resolution = resolution_of(args.counts, args.resolution)  # before the references, which take a minute and 16 GB
+    except (IncompleteIngest, ValueError) as error:
+        raise SystemExit(f"FAILED {error}") from error
     reference = args.reference
-    gpkg = reference / "grids" / f"ISEA3H-{args.resolution}.gpkg"
+    gpkg = reference / "grids" / f"ISEA3H-{resolution}.gpkg"
     land = reference / "natural_earth" / "ne_10m_land.zip"
     col = reference / "exports" / "extended" / "col.zip"
     missing = [str(p) for p in (args.counts, args.split, gpkg, land, col) if not p.exists()]
     if missing:
         raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
-    directory = args.results / f"res{args.resolution}"
+    directory = args.results / f"res{resolution}"
     directory.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[logging.StreamHandler(), logging.FileHandler(directory / "clean.log", mode="w")])
     say = logging.getLogger("clean_counts").info
 
-    report: dict = {"half": "A", "resolution": args.resolution, "counts": str(args.counts), "layers": list(LAYERS), "griis_without_status": args.griis_without_status, "modes": {}}
+    report: dict = {"half": "A", "resolution": resolution, "counts": str(args.counts), "layers": list(LAYERS), "griis_without_status": args.griis_without_status, "modes": {}}
     started = time.perf_counter()
 
     twins = twins_of(col)
     say(f"provisional twins: {twins.height} provisionally accepted species share a name with an accepted one (peak {peak_gb():.1f} GB)")
     grid = load_grid(gpkg, land)
+    if grid.resolution != resolution:
+        raise SystemExit(f"FAILED {gpkg.name} holds resolution {grid.resolution}, not {resolution}")
     say(f"grid: {grid.cells.height} cells at resolution {grid.resolution}")
     refs = load_references(grid, reference)
     gc.collect()

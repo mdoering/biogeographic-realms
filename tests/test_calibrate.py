@@ -56,7 +56,7 @@ from realms.calibrate import (
     within_limit,
 )
 from realms.clean import RULES, SWITCHABLE, Settings, clean, outlier_rows
-from realms.occurrences import COLUMNS, COUNTS as COUNT_COLUMNS, SealedHalf, ingest, load_country_counts
+from realms.occurrences import COLUMNS, COUNTS as COUNT_COLUMNS, SealedHalf, ingest, load_country_counts, mark_complete
 
 ROOT = Path(__file__).parent.parent
 FAR, ISLAND = ("100", "102", "103"), "101"
@@ -767,8 +767,27 @@ def load_script():
     return module
 
 
-def run_script(script, tmp_path, monkeypatch, *args):
-    monkeypatch.setattr("sys.argv", ["calibrate.py", "--counts", str(tmp_path / "none"), "--results", str(tmp_path), *args])
+def made_up_ingest(where: Path, frame: pl.DataFrame, resolution: int, extra: list[str] = ()) -> Path:
+    """An ingest of `frame` (country counts) and the `extra` lines of the download, with the marker of a complete ingest at `resolution`."""
+    lines = ["\t".join(COLUMNS)]
+    for x in frame.iter_rows(named=True):
+        cell, _, kind = x["part"].rpartition(":")
+        lines.append("\t".join(str(v) for v in (x["species_id"], x["countrycode"], cell, kind, *(x[c] for c in COUNT_COLUMNS))))
+    where.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(where / "d.zip", "w") as archive:
+        archive.writestr("d.csv", "\n".join([*lines, *extra]) + "\n")
+    out = where / "out"
+    mark_complete(out, where / "d.zip", resolution, ingest(where / "d.zip", out))
+    return out
+
+
+def run_script(script, tmp_path, monkeypatch, *args, resolution=7):
+    """The script's `main` on a made-up ingest at `resolution`, outside the results directory `tmp_path`, with no reference data and no split, so that
+    a run that gets past its guards stops at the missing files and never loads the real ones."""
+    where = tmp_path.parent / f"{tmp_path.name}-counts-{resolution}"
+    counts_dir = made_up_ingest(where, COUNTS, resolution)
+    absent = ["--reference", str(where / "no-reference"), "--split", str(where / "no-split.parquet")]
+    monkeypatch.setattr("sys.argv", ["calibrate.py", "--counts", str(counts_dir), "--results", str(tmp_path), *absent, *args])
     script.main()
 
 
@@ -789,10 +808,13 @@ def test_score_half_b_refuses_if_any_resolution_has_a_scoring_started_or_done(tm
 
 
 def test_score_half_b_refuses_any_resolution_but_7_before_it_loads_anything(tmp_path, monkeypatch):
+    """The resolution is the ingest's, from its marker, so stating 7 for an ingest of another does not get past it."""
     script = load_script()
-    for resolution in ("5", "6", "8"):
+    for resolution in (5, 6, 8):
         with pytest.raises(SystemExit, match="resolution 7"):
-            run_script(script, tmp_path, monkeypatch, "--resolution", resolution, "--score-half-b")
+            run_script(script, tmp_path, monkeypatch, "--score-half-b", resolution=resolution)
+        with pytest.raises(SystemExit, match=f"resolution {resolution}, not 7"):
+            run_script(script, tmp_path, monkeypatch, "--resolution", "7", "--score-half-b", resolution=resolution)
     assert not list(tmp_path.iterdir())  # nothing was made
 
 
@@ -829,7 +851,7 @@ def test_the_guards_are_for_scoring_half_b_only(tmp_path, monkeypatch):
     (tmp_path / "res7").mkdir()
     (tmp_path / "res7" / "held_out.json").write_text("{}")
     with pytest.raises(SystemExit, match="missing"):
-        run_script(script, tmp_path, monkeypatch, "--resolution", "6")
+        run_script(script, tmp_path, monkeypatch, "--resolution", "6", resolution=6)
 
 
 def test_score_held_out_loads_the_calibration_species_of_half_b_group_mates_included_and_no_other_species(tmp_path, monkeypatch):
@@ -840,15 +862,7 @@ def test_score_held_out_loads_the_calibration_species_of_half_b_group_mates_incl
     alga = land("alga", {"5": 10})
     everything = counts(*COUNTS.iter_rows(named=True), *alga)
     r = refs([*TAXA, taxon("alga", "Chromista", "Phaeophyceae")], [*GROUPS, ("alga", "angiosperms")], WCVP, tdwg3=TDWG)
-    lines = ["\t".join(COLUMNS)]
-    for x in everything.iter_rows(named=True):
-        cell, _, kind = x["part"].rpartition(":")
-        lines.append("\t".join(str(v) for v in (x["species_id"], x["countrycode"], cell, kind, *(x[c] for c in COUNT_COLUMNS))))
-    lines.append("\t".join(str(v) for v in ("elsewhere", "AA", "1", "land", *([5] * len(COUNT_COLUMNS)))))
-    with zipfile.ZipFile(tmp_path / "d.zip", "w") as archive:
-        archive.writestr("d.csv", "\n".join(lines) + "\n")
-    out = tmp_path / "out"
-    ingest(tmp_path / "d.zip", out)
+    out = made_up_ingest(tmp_path, everything, 7, ["\t".join(str(v) for v in ("elsewhere", "AA", "1", "land", *([5] * len(COUNT_COLUMNS))))])
     split = pl.DataFrame({"species_id": [*PLANTS, "heavy", "alga", "bird", "elsewhere"], "lineage": ["f"] * 8, "half": ["B"] * 7 + ["A"]})
     calls = []
     marker = tmp_path / "held_out.started"
