@@ -6,12 +6,17 @@ Reads the ingested download (`data/gbif/<key>`), the frozen split and the refere
    those whose family is in half A are run and pass or fail, and the others are listed as waiting for step 9, with their family and half;
 2. the calibration: layers 1, 2 and 4 once and then layer 5 at each of the 81 settings (satellite record share 0.5, 1 and 2%, satellite
    cell share 2, 5 and 10%, under-reported rate factor 0.5, 1 and 2%, group minimum 300, 1,000 and 3,000 records), with layer 3 off, on the plants
-   WCVP gives a native region and the groups of those. Each setting is measured by the share of outside presences it removes and the share of native
-   presences it loses; the chosen one removes the most outside presences while losing at most 5% of the native ones;
-3. the native loss of the chosen setting per TDWG level 3 region (`regions.csv`), whose top 20 regions of at least 100 native presences show whether
-   islands lose more;
-4. with `--score-half-b`, the one setting chosen on A scored on half B's plants. That is the only call before the freeze that opens half B. It is
-   listed in `DECISIONS.md`, prints global numbers only, and refuses to run if `held_out.json` is already there.
+   WCVP gives a native region and the other species of their taxonomic groups (the group totals need them). Each setting is measured by the share of
+   outside presences it removes and the share of native presences it loses. The limit of 5% native loss is read over the whole run of layers 1, 2, 4
+   and 5 counting drops only (a presence a fold moved is moved, not lost), as the controller ruled, provisionally; the chosen setting removes the
+   most outside presences within it. The three readings (layer 5 alone, the whole run counting everything, the whole run counting drops only) are
+   reported for the chosen setting and the design's;
+3. the native loss of the chosen setting per TDWG level 3 region (`regions.csv`, layer 5's reading), whose top 20 regions of at least 100 native presences
+   show whether islands lose more;
+4. with `--score-half-b`, the one setting chosen on A scored on half B's calibration species: the plants and the other species of their groups, which
+   are not all plants (some are of other kingdoms or of none, as in the group `eukaryotes`). That is the only call before the freeze that opens half B. It is
+   listed in `DECISIONS.md`, prints and saves rates and counts only, and nothing per taxon. It runs at resolution 7 only, and refuses if any
+   `res*/held_out.json` is already there.
 
 Everything goes to `results/calibrate/res<r>/`: `settings.csv` (the 81 settings), `regions.csv`, `known_cases.json`, `report.json`, `calibrate.log`,
 and `held_out.json` after a scoring of half B. The binding calibration is at the analysis resolution (7), where the counts of that download are the
@@ -32,21 +37,23 @@ import polars as pl
 
 from realms.calibrate import (
     CASES,
-    EPS,
-    NATIVE_LOSS_LIMIT,
     GRID,
+    NATIVE_LOSS_LIMIT,
+    SCORE,
     baseline,
     calibrate,
     calibration_counts,
     calibration_species,
     choose,
+    kingdom_counts,
     known_cases,
-    pipeline_tally,
+    readings,
     region_loss,
     score,
     settings_grid,
     tdwg_regions,
     top_regions,
+    within_limit,
 )
 from realms.clean import LAYERS, Settings, clean, outlier_rows
 from realms.grid import load_grid
@@ -54,6 +61,7 @@ from realms.natives import load_references, name_index
 from realms.occurrences import load_country_counts
 from realms.split import load_split
 
+SCORE_RESOLUTION = 7  # the resolution at which half B is scored, once
 MIN_NATIVE = 100  # presences a region needs to be listed in the top of the native loss
 SMALL_PARTS = 5  # a region touching this many land parts or fewer is small: islands and island groups, but not only
 TOP = 20
@@ -67,18 +75,33 @@ def peak_gb() -> float:
 
 
 def score_held_out(counts_dir: Path, split: pl.DataFrame, refs, grid, setting: Settings) -> dict:
-    """Score `setting` on half B's plants. The only call before the freeze that opens half B, listed in DECISIONS.md.
+    """Score `setting` on half B's calibration species. The only call before the freeze that opens half B, listed in DECISIONS.md.
 
-    Only the plants are read: the split is cut to the calibration species before it goes to `load_country_counts`, so no other species of half B is
-    ever loaded. What comes back is counts and rates, and nothing per taxon.
+    The calibration species are the plants WCVP gives a native region **and every other species of their taxonomic groups**, which are not all plants:
+    `under_reported` needs the group's records per cell, so the score is like for like with half A's. The split is cut to those species before it goes
+    to `load_country_counts`, so no other species of half B is loaded. `species_loaded` says how many of them there are and how many are not Plantae,
+    counted from the split and the taxonomy alone. What comes back is that and the counts and rates of `score`: nothing per taxon, and nothing is
+    printed or saved by this function.
     """
-    plants = split.filter(pl.col("species_id").is_in(calibration_species(refs).implode()))
-    counts_b = load_country_counts(counts_dir, plants, "B", unsealed=True)
-    return score(counts_b, setting, refs, grid)
+    species = split.filter(pl.col("half") == "B", pl.col("species_id").is_in(calibration_species(refs).implode()))
+    loaded = kingdom_counts(species["species_id"], refs.taxa)
+    counts_b = load_country_counts(counts_dir, species, "B", unsealed=True)
+    return {**score(counts_b, setting, refs, grid), "species_loaded": loaded}
 
 
-def setting_row(row: dict) -> dict:
-    return {k: row[k] for k in ("setting", *GRID, "outside", "outside_removed", "native", "native_lost", "outside_rate", "native_loss")}
+def described(index: int, setting: Settings, start, refs, grid, met: bool | None = None) -> dict:
+    """A setting of the grid with its thresholds and its three readings (`readings`), and whether it met the limit if that is known."""
+    out = {"setting": index, **{k: getattr(setting, k) for k in GRID}, "readings": readings(start, refs, grid, setting)}
+    return out if met is None else {**out, "limit_met": met}
+
+
+def refuse_a_second_scoring(args: argparse.Namespace) -> None:
+    """`--score-half-b` is made once, at resolution 7: stop before anything is loaded if it is asked otherwise, or if any resolution has been scored."""
+    if args.resolution != SCORE_RESOLUTION:
+        raise SystemExit(f"FAILED --score-half-b runs at resolution {SCORE_RESOLUTION}, the analysis resolution, and not at {args.resolution}: the call that opens half B is made once")
+    done = sorted(args.results.glob("res*/held_out.json"))
+    if done:
+        raise SystemExit(f"FAILED half B was already scored, see {done[0]}: that call is made once before the freeze")
 
 
 def main() -> None:
@@ -88,12 +111,16 @@ def main() -> None:
     parser.add_argument("--reference", type=Path, default=Path("data/reference"), help="default data/reference")
     parser.add_argument("--split", type=Path, default=Path("data/split/halves-315557.parquet"))
     parser.add_argument("--results", type=Path, default=Path("results/calibrate"), help="where res<r>/ goes, default results/calibrate")
-    parser.add_argument("--score-half-b", action="store_true", help="also score the chosen setting on half B's plants: the one call before the freeze that opens half B, run once")
+    parser.add_argument(
+        "--score-half-b",
+        action="store_true",
+        help="also score the chosen setting on half B's calibration species (WCVP plants and the other species of their groups): the one call before the freeze that opens half B. Resolution 7 only, run once",
+    )
     args = parser.parse_args()
 
     directory = args.results / f"res{args.resolution}"
-    if args.score_half_b and (directory / "held_out.json").exists():
-        raise SystemExit(f"FAILED half B's plants were already scored, see {directory / 'held_out.json'}: that call is made once before the freeze")
+    if args.score_half_b:
+        refuse_a_second_scoring(args)
     reference = args.reference
     gpkg = reference / "grids" / f"ISEA3H-{args.resolution}.gpkg"
     land = reference / "natural_earth" / "ne_10m_land.zip"
@@ -157,31 +184,27 @@ def main() -> None:
     begun = time.perf_counter()
     table = calibrate(counts, grid_of_settings, refs, grid, start)
     lap("layer_5_per_setting", begun)
-    table = table.with_columns((pl.col("native_lost") <= NATIVE_LOSS_LIMIT * pl.col("native") + EPS).alias("within_limit"))
+    table = table.with_columns(within_limit(reading="run").alias("within_limit"), within_limit(reading="layer5").alias("within_limit_layer5"))
     table.write_csv(directory / "settings.csv")
-    index_chosen, met = choose(table)
+    index_chosen, met = choose(table)  # the whole run counting drops only
+    index_layer5, met_layer5 = choose(table, reading="layer5")
+    index_design = grid_of_settings.index(Settings())
     chosen = grid_of_settings[index_chosen]
-    row = setting_row(table.filter(pl.col("setting") == index_chosen).row(0, named=True))
-    design = setting_row(table.filter(pl.col("setting") == grid_of_settings.index(Settings())).row(0, named=True))
-    report["chosen"] = {**row, "limit_met": met}
-    report["design_setting"] = design
-    report["within_limit"] = int(table["within_limit"].sum())
-    ranked = table.sort(["within_limit", "outside_removed", "native_lost", "setting"], descending=[True, True, False, False]).head(LEADERS)
+    report["chosen"] = described(index_chosen, chosen, start, refs, grid, met)
+    report["design_setting"] = described(index_design, grid_of_settings[index_design], start, refs, grid)
+    report["chosen_by_layer5_reading"] = described(index_layer5, grid_of_settings[index_layer5], start, refs, grid, met_layer5)
+    report["within_limit"] = {"run": int(table["within_limit"].sum()), "layer5": int(table["within_limit_layer5"].sum())}
+    ranked = table.sort(["within_limit", "run_outside_removed", "run_native_lost", "setting"], descending=[True, True, False, False]).head(LEADERS)
     report["top_settings"] = ranked.to_dicts()
-    with pl.Config(tbl_rows=LEADERS + 5, tbl_cols=14, fmt_float="mixed"):
-        say(f"top {LEADERS} of the 81 settings (within the limit first, then most outside removed):\n{ranked}")
-    say(f"{report['within_limit']} of 81 settings lose at most {NATIVE_LOSS_LIMIT:.0%} of native presences; limit met by the chosen one: {met}")
-    say(f"chosen setting {index_chosen}: {row}")
-    say(f"design setting {grid_of_settings.index(Settings())}: {design}")
+    with pl.Config(tbl_rows=LEADERS + 5, tbl_cols=24, fmt_float="mixed"):
+        say(f"top {LEADERS} of the 81 settings (within the limit first, then most outside removed, whole run counting drops only):\n{ranked}")
+    say(f"settings that lose at most {NATIVE_LOSS_LIMIT:.0%} of native presences: {report['within_limit']['run']} of 81 counting the whole run's drops, {report['within_limit']['layer5']} by layer 5 alone")
+    for name in ("chosen", "design_setting", "chosen_by_layer5_reading"):
+        say(f"{name}: {report[name]}")
 
-    # ---- the chosen setting in detail
+    # ---- the chosen setting in detail: native loss per region, by layer 5's reading
     begun = time.perf_counter()
     removed = outlier_rows(start.presence, refs, grid, chosen)
-    final = start.presence.join(removed.select("species_id", "part"), on=["species_id", "part"], how="anti")
-    raw = plants.filter(pl.col("n_raw") > 0).select("species_id", "part")
-    report["whole_run"] = pipeline_tally(raw, final, refs.wcvp, refs.tdwg3_parts)
-    whole = report["whole_run"]
-    say(f"the whole run (layers 1, 2, 4 and 5) on the raw presences: {whole}, native lost {whole['native_lost'] / whole['native']:.3%}, outside removed {whole['outside_removed'] / whole['outside']:.3%}")
     losses = region_loss(start.status, removed, refs.wcvp, refs.tdwg3_parts, regions)
     losses.write_csv(directory / "regions.csv")
     eligible = losses.filter(pl.col("native") >= MIN_NATIVE)
@@ -206,11 +229,12 @@ def main() -> None:
     # ---- half B, once
     if args.score_half_b:
         begun = time.perf_counter()
-        say("scoring the chosen setting on half B's plants: the one unsealed call before the freeze")
+        say("scoring the chosen setting on half B's calibration species: the one unsealed call before the freeze")
         held = {"setting": index_chosen, **{k: getattr(chosen, k) for k in GRID}, **score_held_out(args.counts, split, refs, grid, chosen)}
+        assert set(held) == {"setting", *GRID, *SCORE, "species_loaded"}  # numbers only: nothing per taxon is printed or saved
         (directory / "held_out.json").write_text(json.dumps(held, indent=2) + "\n")
         report["held_out"] = held
-        say(f"half B's plants: {held}")
+        say(f"half B's calibration species, rates and counts: {held}")
         lap("held_out", begun)
 
     report["seconds"] = {**seconds, "total": round(time.perf_counter() - started, 1)}

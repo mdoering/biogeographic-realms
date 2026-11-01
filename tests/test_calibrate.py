@@ -6,7 +6,7 @@ the whole chain, and `p2` is native in `ISL` too. The cells off the chain are `F
 
 - `p1` has a satellite of 1 record in cell 100, outside its native regions.
 - `p2` has one in cell 101, where it is native: a native presence that the heuristic would lose.
-- `p3` has one of 8 records in cell 102, outside.
+- `p3` has one of 8 records in cell 102, outside, 5 of them of one country and 3 of another.
 - `p4` has 3 records in cell 103, outside, 400 km from the chain and so joined to its range, in a cell where `heavy` has 2,000 records of the same group.
 
 So, at the design's thresholds, layer 5 takes all four, and at other settings it takes some of them (see `test_the_settings_decide_what_is_taken`).
@@ -27,7 +27,9 @@ from clean_helpers import GRID, counts, make_grid, refs, row, taxon
 from realms.calibrate import (
     CASES,
     GRID as THRESHOLDS,
+    EARLY_RULES,
     NATIVE_LOSS_LIMIT,
+    SCORE,
     Baseline,
     Case,
     area_cells,
@@ -37,10 +39,11 @@ from realms.calibrate import (
     calibration_species,
     choose,
     evaluate_case,
+    kingdom_counts,
     known_cases,
     native_status,
-    pipeline_tally,
     rates,
+    readings,
     region_loss,
     resolve_species,
     score,
@@ -48,8 +51,9 @@ from realms.calibrate import (
     tally,
     tdwg_regions,
     top_regions,
+    within_limit,
 )
-from realms.clean import Settings, clean, outlier_rows
+from realms.clean import RULES, SWITCHABLE, Settings, clean, outlier_rows
 from realms.occurrences import COLUMNS, COUNTS as COUNT_COLUMNS, SealedHalf, ingest, load_country_counts
 
 ROOT = Path(__file__).parent.parent
@@ -77,7 +81,9 @@ def range_of(species, extra: dict):
 COUNTS = counts(
     *range_of("p1", {"100": 1}),
     *range_of("p2", {"101": 1}),
-    *range_of("p3", {"102": 8}),
+    row("p2", "7:land", "BB", n=2),  # a part of the range that has the rows of a second country
+    *range_of("p3", {"102": 5}),
+    row("p3", "102:land", "BB", n=3),  # the satellite's 8 records are of two countries, so the presence has two rows to take
     *range_of("p4", {"103": 3}),
     *land("heavy", {"103": 2000}),
     *land("bird", {"1": 500, "2": 500}),
@@ -195,10 +201,24 @@ def test_the_grid_keeps_the_other_settings_of_its_base():
 
 # ---- choosing a setting
 
-def table(*rows_, outside=100, native=1000) -> pl.DataFrame:
-    """Settings with (outside_removed, native_lost), in grid order."""
+def table(*rows_, outside=100, native=1000, run=None) -> pl.DataFrame:
+    """Settings with (outside_removed, native_lost) by layer 5's reading, and by the whole run's if `run` gives them, in grid order."""
+    run = rows_ if run is None else run
     return pl.DataFrame(
-        [{"setting": i, "outside": outside, "outside_removed": o, "native": native, "native_lost": n} for i, (o, n) in enumerate(rows_)]
+        [
+            {
+                "setting": i,
+                "outside": outside,
+                "outside_removed": o,
+                "native": native,
+                "native_lost": n,
+                "run_outside": outside,
+                "run_outside_removed": run_o,
+                "run_native": native,
+                "run_native_lost": run_n,
+            }
+            for i, ((o, n), (run_o, run_n)) in enumerate(zip(rows_, run, strict=True))
+        ]
     )
 
 
@@ -222,6 +242,22 @@ def test_a_native_loss_of_exactly_the_limit_is_within_it_whatever_the_float():
 def test_choose_reports_when_no_setting_is_within_the_limit_and_takes_the_lowest_native_loss():
     assert choose(table((90, 70), (30, 60), (95, 60), (10, 80))) == (1, False)  # 60 twice: the lower index
     assert choose(table((90, 70), (30, 60), (95, 60), (10, 80)), limit=0.07) == (2, True)  # 70 is within 7%, and 95 is the most removed
+
+
+def test_choose_reads_the_whole_run_by_default_and_layer_5_alone_on_request():
+    # layer 5 alone would take setting 0 (49 of 1,000 lost), but over the whole run it loses 7% and is out, so setting 1 is chosen
+    t = table((90, 49), (60, 10), run=[(50, 70), (40, 20)])
+    assert choose(t) == (1, True)
+    assert choose(t, reading="run") == (1, True)
+    assert choose(t, reading="layer5") == (0, True)
+    assert t.filter(within_limit(reading="run"))["setting"].to_list() == [1]
+    assert t.filter(within_limit(reading="layer5"))["setting"].to_list() == [0, 1]
+    # and where no setting is within the limit of the whole run, the lowest whole-run native loss is taken
+    assert choose(table((90, 10), (60, 10), run=[(50, 90), (40, 70)])) == (1, False)
+    with pytest.raises(ValueError, match="reading"):
+        choose(t, reading="records")
+    with pytest.raises(ValueError, match="reading"):
+        within_limit(reading="records")
 
 
 def test_choose_refuses_an_empty_table():
@@ -254,14 +290,20 @@ def test_a_plant_with_no_group_is_calibrated_on_its_own():
 
 # ---- calibrate
 
-def reference(setting: Settings) -> tuple[dict, dict]:
-    """What `clean` itself says: the rates and counts from layers 1, 2 and 4, and layers 1, 2, 4 and 5 at `setting`, on the plants."""
+def reference(setting: Settings) -> dict:
+    """What `clean` itself says, on the plants: the counts of layer 5 alone and of the whole run counting drops only, from its own removal log."""
     plants = calibration_counts(COUNTS, REFS)
     before = clean(plants, REFS, WORLD, BEFORE_5, setting)
     after = clean(plants, REFS, WORLD, LAYERS_WITHOUT_3, setting)
     removed = before.presence.join(after.presence, on=["species_id", "part"], how="anti")
     status = native_status(before.presence, REFS.wcvp, REFS.tdwg3_parts)
-    return tally(status, removed), dict(zip(("outside_rate", "native_loss"), rates(status, removed), strict=True))
+    raw = plants.filter(pl.col("n_raw") > 0).select("species_id", "part").unique()
+    moved = after.removed.filter(pl.col("to_part").is_not_null()).select("species_id", "part").unique()
+    lost = raw.join(after.presence.select("species_id", "part"), on=["species_id", "part"], how="anti").join(moved, on=["species_id", "part"], how="anti")
+    return {
+        **tally(status, removed),
+        **{f"run_{k}": v for k, v in tally(native_status(raw, REFS.wcvp, REFS.tdwg3_parts), lost).items()},
+    }
 
 
 def test_calibrate_gives_one_row_per_setting_with_the_four_thresholds_and_the_counts():
@@ -271,19 +313,24 @@ def test_calibrate_gives_one_row_per_setting_with_the_four_thresholds_and_the_co
     assert out.columns == [
         "setting", "satellite_record_share", "satellite_cell_share", "under_rate_factor", "group_min_records",
         "outside", "outside_removed", "native", "native_lost", "outside_rate", "native_loss",
+        "run_outside", "run_outside_removed", "run_native", "run_native_lost", "run_outside_rate", "run_native_loss",
     ]  # fmt: skip
     assert out["setting"].to_list() == [0, 1, 2, 3, 4]
     assert out["group_min_records"].to_list() == [s.group_min_records for s in grid]
 
 
 def test_calibrate_equals_cleaning_with_every_setting_of_the_grid():
+    """Including the rows of two countries for one part of a plant, a satellite's and a range's: `clean` judges rows by country, `calibrate` presences."""
     grid = settings_grid()
     out = calibrate(COUNTS, grid, REFS, WORLD)
     assert out.height == 81
     for setting, got in zip(grid, out.iter_rows(named=True), strict=True):
-        counted, shares = reference(setting)
+        counted = reference(setting)
         assert {k: got[k] for k in counted} == counted
-        assert got["outside_rate"] == shares["outside_rate"] and got["native_loss"] == shares["native_loss"]
+        assert got["outside_rate"] == counted["outside_removed"] / counted["outside"]
+        assert got["native_loss"] == counted["native_lost"] / counted["native"]
+        assert got["run_outside_rate"] == counted["run_outside_removed"] / counted["run_outside"]
+        assert got["run_native_loss"] == counted["run_native_lost"] / counted["run_native"]
 
 
 def test_the_settings_decide_what_is_taken():
@@ -302,6 +349,8 @@ def test_the_settings_decide_what_is_taken():
     # a rate of 0.15% is not under 0.5% of p4's core rate of 25%
     assert by[(0.01, 0.02, 0.005, 1000)]["outside_removed"] == 0
     assert design["outside_rate"] == 1.0 and design["native_loss"] == pytest.approx(1 / 181)
+    # no layer takes or folds anything else here, so the whole run (over the raw presences) says the same
+    assert {k: design[f"run_{k}"] for k in ("outside", "outside_removed", "native", "native_lost")} == {k: design[k] for k in ("outside", "outside_removed", "native", "native_lost")}
 
 
 def test_calibrate_can_take_the_baseline_a_caller_made():
@@ -311,13 +360,61 @@ def test_calibrate_can_take_the_baseline_a_caller_made():
     assert calibrate(COUNTS, grid, REFS, WORLD, start).equals(calibrate(COUNTS, grid, REFS, WORLD))
 
 
-def test_the_pipeline_tally_counts_what_every_layer_took():
-    raw = pairs(("p1", "1:land"), ("p1", "100:land"), ("p1", "2:land"), ("p1", "2:sea"), ("zoo", "1:land"))
-    final = pairs(("p1", "1:land"))
-    # p1 was native at 1 and 2 and outside at 100, and had a sea part with no status: the whole run took one native and one outside presence
-    wcvp = pl.DataFrame([("p1", "NAT", True)], schema={"species_id": pl.String, "tdwg3": pl.String, "native": pl.Boolean}, orient="row")
-    parts_ = pl.DataFrame([("1:land", "NAT"), ("2:land", "NAT"), ("100:land", "FAR")], schema={"part": pl.String, "tdwg3": pl.String}, orient="row")
-    assert pipeline_tally(raw, final, wcvp, parts_) == {"outside": 1, "outside_removed": 1, "native": 2, "native_lost": 1}
+def test_a_baseline_records_its_settings_and_calibrate_refuses_one_that_does_not_match_the_grid():
+    start = baseline(COUNTS, REFS, WORLD, Settings(land_share=0.9))
+    assert start.settings == Settings(land_share=0.9)
+    with pytest.raises(ValueError, match="baseline"):
+        calibrate(COUNTS, [Settings()], REFS, WORLD, start)
+    with pytest.raises(ValueError, match="baseline"):
+        calibrate(COUNTS, [Settings()], REFS, WORLD, baseline(COUNTS, REFS, WORLD, Settings(rules_off={"extinct"})))
+    # what layer 5 reads is not in the baseline, so a different threshold or a layer 5 rule off does not matter
+    other = baseline(COUNTS, REFS, WORLD, Settings(satellite_cell_share=0.1, rules_off={"thin_long_range"}))
+    assert calibrate(COUNTS, [Settings()], REFS, WORLD, other).equals(calibrate(COUNTS, [Settings()], REFS, WORLD))
+
+
+def test_the_rules_layers_1_2_and_4_read_come_from_rules():
+    assert EARLY_RULES == {"extinct", "no_wild_range"}
+    assert EARLY_RULES == {rule for rule in SWITCHABLE if RULES[rule] in (1, 2, 4)}
+    assert {RULES[rule] for rule in SWITCHABLE} <= {2, 3, 5}  # so that no switchable rule of another layer goes unchecked
+    calibrate(COUNTS, [Settings(), Settings(rules_off={"thin_long_range", "under_reported"})], REFS, WORLD)  # layer 5 rules may differ
+    for rule in EARLY_RULES:
+        with pytest.raises(ValueError, match="rules_off"):
+            calibrate(COUNTS, [Settings(), Settings(rules_off={rule})], REFS, WORLD)
+
+
+KELP_COUNTS = counts(*COUNTS.iter_rows(named=True), *land("kelp", {"1": 30, "2": 30}), row("kelp", "3:land", n=0, n_raw=5))
+KELP_REFS = refs(
+    [*TAXA, taxon("kelp", "Plantae", "Phaeophyceae", "marine")], [*GROUPS, ("kelp", "angiosperms")], [*WCVP, ("kelp", "NAT", True)], tdwg3=TDWG
+)
+
+
+def test_in_the_drops_only_reading_a_presence_a_fold_moved_is_moved_and_not_lost():
+    """`kelp` is a marine species native in NAT, with records on land parts. Layer 4 folds its land parts 1 and 2 into the sea parts of their cells, and layer 1
+    drops its land part 3, whose records are all flagged. Both ways the land parts are gone, and only the dropped one is lost."""
+    start = baseline(KELP_COUNTS, KELP_REFS, WORLD)
+    assert set(start.moved.iter_rows()) == {("kelp", "1:land"), ("kelp", "2:land")}
+    assert set(start.absent.iter_rows()) == {("kelp", "1:land"), ("kelp", "2:land"), ("kelp", "3:land")}
+    got = readings(start, KELP_REFS, WORLD, Settings())
+    assert set(got) == {"layer5", "run_all", "run_drops"}
+    # layer 5 judges what layers 1, 2 and 4 leave, and the kelp has no land presence then: the 181 native presences of the plants, one of them lost
+    assert (got["layer5"]["native"], got["layer5"]["native_lost"], got["layer5"]["outside"], got["layer5"]["outside_removed"]) == (181, 1, 3, 3)
+    # the raw presences hold the kelp's 3 land parts as well: 184 native ones
+    assert got["run_all"]["native"] == got["run_drops"]["native"] == 184
+    assert got["run_all"]["native_lost"] == 4  # p2's satellite, the part layer 1 dropped, and the two the fold moved
+    assert got["run_drops"]["native_lost"] == 2  # p2's satellite and the dropped part: the moved ones are moved, not lost
+    assert got["run_drops"]["native_loss"] == pytest.approx(2 / 184) and got["run_all"]["native_loss"] == pytest.approx(4 / 184)
+    assert got["run_all"]["outside_removed"] == got["run_drops"]["outside_removed"] == 3
+    assert got["run_drops"]["outside_rate"] == 1.0
+    out = calibrate(KELP_COUNTS, [Settings()], KELP_REFS, WORLD).row(0, named=True)
+    assert (out["run_native"], out["run_native_lost"], out["run_outside"], out["run_outside_removed"]) == (184, 2, 3, 3)
+    assert (out["native"], out["native_lost"]) == (181, 1)
+
+
+def test_a_part_that_only_received_a_fold_is_no_raw_presence_and_is_not_counted():
+    """The sea parts the kelp's rows moved into are in what layers 1, 2 and 4 leave, but they are not raw presences, so no reading counts them."""
+    start = baseline(KELP_COUNTS, KELP_REFS, WORLD)
+    assert ("kelp", "1:sea") not in set(start.raw_status.iter_rows()) and ("kelp", "1:sea") not in set(start.absent.iter_rows())
+    assert ("kelp", "1:sea") in set(start.presence.select("species_id", "part").iter_rows())
 
 
 def test_calibrate_leaves_layer_3_off():
@@ -347,7 +444,8 @@ def test_outlier_rows_are_what_clean_logs_for_layer_5():
     assert {"species_id", "part", "rule", "records"} <= set(rows_.columns)
     logged = after.removed.filter(pl.col("layer") == 5)
     assert set(rows_.select("species_id", "part", "rule").iter_rows()) == set(logged.select("species_id", "part", "rule").iter_rows())
-    assert rows_.height == 4
+    assert rows_.height == 4  # a presence each
+    assert logged.height == 5  # and `clean` logs the rows: the satellite of two countries has two, which go with the one presence
 
 
 # ---- scoring one setting (the hold-out)
@@ -356,13 +454,19 @@ def test_score_is_the_calibration_of_one_setting_as_a_dict():
     setting = Settings()
     got = score(COUNTS, setting, REFS, WORLD)
     row_ = calibrate(COUNTS, [setting], REFS, WORLD).row(0, named=True)
-    assert got == {k: row_[k] for k in ("outside", "outside_removed", "native", "native_lost", "outside_rate", "native_loss")}
-    assert got["outside_removed"] == 3 and got["native_lost"] == 1
+    assert got == {k: row_[k] for k in SCORE}
+    assert got["outside_removed"] == 3 and got["native_lost"] == 1 and got["run_native_lost"] == 1
 
 
 def test_scoring_names_no_species():
     got = score(COUNTS, Settings(), REFS, WORLD)
-    assert all(isinstance(v, int | float) for v in got.values())
+    assert set(got) == set(SCORE) and all(isinstance(v, int | float) for v in got.values())
+
+
+def test_kingdom_counts_say_how_many_species_are_not_plants_from_the_taxonomy_alone():
+    taxa = pl.DataFrame({"species_id": ["a", "b", "c", "e"], "kingdom": ["Plantae", "Fungi", None, "Plantae"]})
+    assert kingdom_counts(["a", "b", "c", "d", "a"], taxa) == {"species": 4, "plantae": 1, "not_plantae": 3}  # no kingdom, and not in taxa, are not Plantae
+    assert kingdom_counts([], taxa) == {"species": 0, "plantae": 0, "not_plantae": 0}
 
 
 def test_the_one_unsealed_call_is_in_the_calibration_script_and_nowhere_else():
@@ -610,29 +714,63 @@ def load_script():
     return module
 
 
-def test_the_script_refuses_a_second_scoring_of_half_b(tmp_path, monkeypatch):
-    script = load_script()
-    done = tmp_path / "res7"
-    done.mkdir()
-    (done / "held_out.json").write_text("{}")
-    monkeypatch.setattr("sys.argv", ["calibrate.py", "--counts", str(tmp_path / "none"), "--resolution", "7", "--results", str(tmp_path), "--score-half-b"])
-    with pytest.raises(SystemExit, match="already"):
-        script.main()
+def run_script(script, tmp_path, monkeypatch, *args):
+    monkeypatch.setattr("sys.argv", ["calibrate.py", "--counts", str(tmp_path / "none"), "--results", str(tmp_path), *args])
+    script.main()
 
 
-def test_score_held_out_reads_the_plants_of_half_b_and_no_other_species(tmp_path, monkeypatch):
-    """On a made-up download, with every species in half B but one: only the calibration plants of B are asked for, and the score is `score`'s."""
+def test_score_half_b_refuses_if_any_resolution_has_been_scored(tmp_path, monkeypatch):
     script = load_script()
+    for resolution in (6, 7):  # the file of any resolution stops it, and so does the one of its own
+        done = tmp_path / f"res{resolution}"
+        done.mkdir()
+        (done / "held_out.json").write_text("{}")
+        with pytest.raises(SystemExit, match="already scored"):
+            run_script(script, tmp_path, monkeypatch, "--resolution", "7", "--score-half-b")
+        (done / "held_out.json").unlink()
+        done.rmdir()
+    elsewhere = tmp_path / "res6"
+    elsewhere.mkdir()
+    (elsewhere / "held_out.json").write_text("{}")
+    with pytest.raises(SystemExit, match=r"res6.held_out\.json"):
+        run_script(script, tmp_path, monkeypatch, "--resolution", "7", "--score-half-b")  # a file of resolution 6 names itself
+
+
+def test_score_half_b_refuses_any_resolution_but_7_before_it_loads_anything(tmp_path, monkeypatch):
+    script = load_script()
+    for resolution in ("5", "6", "8"):
+        with pytest.raises(SystemExit, match="resolution 7"):
+            run_script(script, tmp_path, monkeypatch, "--resolution", resolution, "--score-half-b")
+    assert not list(tmp_path.iterdir())  # nothing was made
+
+
+def test_the_guards_are_for_scoring_half_b_only(tmp_path, monkeypatch):
+    """A dry run at resolution 6 is not stopped by a held_out.json, and gets as far as the missing counts."""
+    script = load_script()
+    (tmp_path / "res7").mkdir()
+    (tmp_path / "res7" / "held_out.json").write_text("{}")
+    with pytest.raises(SystemExit, match="missing"):
+        run_script(script, tmp_path, monkeypatch, "--resolution", "6")
+
+
+def test_score_held_out_loads_the_calibration_species_of_half_b_group_mates_included_and_no_other_species(tmp_path, monkeypatch):
+    """On a made-up download with every species in half B but one. The calibration species are the plants and the other species of their groups, so
+    the alga that shares the plants' group is loaded with them, and the bird of another group is not. The result is numbers: the score, and how many
+    species were loaded and how many of those are not Plantae."""
+    script = load_script()
+    alga = land("alga", {"5": 10})
+    everything = counts(*COUNTS.iter_rows(named=True), *alga)
+    r = refs([*TAXA, taxon("alga", "Chromista", "Phaeophyceae")], [*GROUPS, ("alga", "angiosperms")], WCVP, tdwg3=TDWG)
     lines = ["\t".join(COLUMNS)]
-    for r in COUNTS.iter_rows(named=True):
-        cell, _, kind = r["part"].rpartition(":")
-        lines.append("\t".join(str(v) for v in (r["species_id"], r["countrycode"], cell, kind, *(r[c] for c in COUNT_COLUMNS))))
+    for x in everything.iter_rows(named=True):
+        cell, _, kind = x["part"].rpartition(":")
+        lines.append("\t".join(str(v) for v in (x["species_id"], x["countrycode"], cell, kind, *(x[c] for c in COUNT_COLUMNS))))
     lines.append("\t".join(str(v) for v in ("elsewhere", "AA", "1", "land", *([5] * len(COUNT_COLUMNS)))))
     with zipfile.ZipFile(tmp_path / "d.zip", "w") as archive:
         archive.writestr("d.csv", "\n".join(lines) + "\n")
     out = tmp_path / "out"
     ingest(tmp_path / "d.zip", out)
-    split = pl.DataFrame({"species_id": [*PLANTS, "heavy", "bird", "elsewhere"], "lineage": ["f"] * 7, "half": ["B"] * 6 + ["A"]})
+    split = pl.DataFrame({"species_id": [*PLANTS, "heavy", "alga", "bird", "elsewhere"], "lineage": ["f"] * 8, "half": ["B"] * 7 + ["A"]})
     calls = []
 
     def spy(out_dir, split_, half, **kwargs):
@@ -640,9 +778,12 @@ def test_score_held_out_reads_the_plants_of_half_b_and_no_other_species(tmp_path
         return load_country_counts(out_dir, split_, half, **kwargs)
 
     monkeypatch.setattr(script, "load_country_counts", spy)
-    got = script.score_held_out(out, split, REFS, WORLD, Settings())
-    assert calls == [(["heavy", "p1", "p2", "p3", "p4"], "B", {"unsealed": True})]  # the bird of half B is never loaded
-    assert got == score(COUNTS, Settings(), REFS, WORLD)
+    got = script.score_held_out(out, split, r, WORLD, Settings())
+    assert calls == [(["alga", "heavy", "p1", "p2", "p3", "p4"], "B", {"unsealed": True})]  # the alga is loaded, the bird of half B never is
+    assert got == {**score(everything, Settings(), r, WORLD), "species_loaded": {"species": 6, "plantae": 5, "not_plantae": 1}}
+    assert set(got) == {*SCORE, "species_loaded"}
+    assert all(isinstance(v, int | float) for k, v in got.items() if k != "species_loaded")
+    assert set(got["species_loaded"]) == {"species", "plantae", "not_plantae"}  # no species, no cell: numbers only
     with pytest.raises(SealedHalf):
         load_country_counts(out, split, "B")  # and the seal itself is as it was
 

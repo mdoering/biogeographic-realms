@@ -394,9 +394,12 @@ unless the three pass marks hold. Run it as `uv run python -I`, since it reads a
   is read, and a species that is not in the split is left out of every half. `qa` and the script print and write global numbers only: no species,
   lineage or per-taxon figure. The unaccepted-species check gives how many species and rows and names none, where `check_columns.py` lists
   examples, so no figure can be traced to a taxon. Unknown cells are listed (up to 10 codes), since a cell is not a taxon.
-  - **`unsealed=True` call sites so far:** one, implemented and not yet run. `score_held_out` in `scripts/calibrate.py` (behind `--score-half-b`) scores the setting chosen on half A's plants on half B's plants:
-    it is the only call planned before the freeze and **runs once, at resolution 7**. It cuts the split to the calibration plants before it loads, so no other species of half B is read, and it refuses to run
-    if `results/calibrate/res<r>/held_out.json` exists. `tests/test_calibrate.py` fails if any other file under `src/` or `scripts/` (but `occurrences.py`) has an `unsealed=True` call, or this one is not there once.
+  - **`unsealed=True` call sites so far:** one, implemented and not yet run. `score_held_out` in `scripts/calibrate.py` (behind `--score-half-b`) scores the setting chosen on half A on half B's
+    **calibration species**: the plants WCVP gives a native region **and every other species of their taxonomic groups**, which are not all plants (`under_reported` needs the group's records per cell, so
+    the score is like for like with A's). Of the 197,567 species of half B that it asks for, 2,586 are not Plantae in COL (see the calibration section for the breakdown, counted from the split and the taxonomy alone).
+    It is the only call planned before the freeze and **runs once, at resolution 7**: the flag refuses any other resolution, and refuses if any `results/calibrate/res*/held_out.json` exists.
+    The split is cut to those species before it loads, so no other species of half B is read. **Only counts and rates are printed or saved** (the score, and how many species were loaded and how many are not Plantae):
+    nothing per taxon. `tests/test_calibrate.py` fails if any other file under `src/` or `scripts/` (but `occurrences.py`) has an `unsealed=True` call, or this one is not there once.
   - **`scan_counts` reads, which are not sealed:** `scan_counts` is public and returns every species, half B included, so the seal doesn't cover it.
     It has two readers, and both touch all species: `qa`, called from `scripts/ingest.py`, which produces global numbers only, and
     `_select` in `realms/occurrences.py`, which checks the seal before it reads and returns half A, or half B only when `unsealed=True`.
@@ -996,21 +999,31 @@ in both other modes.
 
 ### Calibration of layer 5 on WCVP plants, and the known cases (2026-11-01)
 
-`src/realms/calibrate.py` (`native_status`, `tally`, `rates`, `settings_grid`, `baseline`, `calibrate`, `choose`, `score`, `region_loss`, `top_regions`, the known cases `CASES`, `evaluate_case`, `known_cases`) and `scripts/calibrate.py`. **No threshold
-changed:** the `Settings` defaults are the design's, and the setting chosen below is a dry run at resolution 6. The binding calibration is repeated at resolution 7, where it is also the one scoring of half B's plants. Rulings, with the reason for each:
+`src/realms/calibrate.py` (`native_status`, `tally`, `rates`, `settings_grid`, `baseline`, `calibrate`, `readings`, `choose`, `score`, `kingdom_counts`, `region_loss`, `top_regions`, the known cases `CASES`, `evaluate_case`, `known_cases`) and `scripts/calibrate.py`. **No threshold
+changed:** the `Settings` defaults are the design's, and the setting chosen below is a dry run at resolution 6. The binding calibration is repeated at resolution 7, where it is also the one scoring of half B. Rulings, with the reason for each:
 
 - **What the calibration measures.** With layer 3 off, layer 5 has to catch the plant presences outside WCVP's native regions by its own evidence. `native_status` marks each plant presence (species, part) `native` where the land part touches
   one of the species' native TDWG level 3 regions and `outside` where it touches none, as layer 3's `native_only` does (a part touching a native and an introduced region is native). Only plants with a native region and only land parts with a TDWG region get a status.
   `rates` are the share of outside presences removed and the share of native presences lost, **counted in presences** (species, part), which is what the network is built from. A test checks that `outside` is exactly what layer 3 takes in `native_only`.
-- **The baseline is what layers 1, 2 and 4 leave.** They do not depend on the four thresholds, so they run once, and a presence they take (a flagged record, an extinct species, a fold to the other side of a cell) is not counted as lost to the thresholds. `clean.outlier_rows` is the new public seam:
-  `_layer_5` calls it, so the calibration runs layer 5 per setting with the same code and not a copy. **Checked on the real counts:** `calibrate`'s counts for settings 0, 40 and 80 are identical to `clean` with layers 1, 2, 4 and 5 at that setting
-  (and the synthetic test does it for all 81). The whole-run figure, from the raw presences, is reported next to it (below).
-- **The species** are the plants WCVP gives a native region and every other species of their taxonomic groups: `under_reported` compares a species with its group's records in a cell, and `algae` and `eukaryotes` hold several kingdoms, so the groups are kept whole. 161,145
-  species of half A. **Checked:** at the design's setting, `clean` on all of half A (all species, layers 1, 2, 4 and 5) gives the same 525,201 / 107,326 / 1,808,902 / 56,953 as the plants alone.
+- **Three readings of the 5% limit, and the one that chooses.** The thresholds only change layer 5, so layers 1, 2 and 4 run once and layer 5 runs per setting. What counts as lost can be read three ways, and `readings` gives all three:
+  `layer5` (the presences layer 5 takes of those layers 1, 2 and 4 leave: what the thresholds do and nothing else); `run_all` (the whole of layers 1, 2, 4 and 5, over the raw presences, `n_raw` above 0, counting every raw presence that is not in the result);
+  and `run_drops` (the same, but **only drops count**: a presence is lost if it is a raw presence, absent after cleaning, and none of its rows was moved by a fold, that is layer 0's zero-area fold or layer 4, a removal-log row with a `to_part`.
+  A moved presence is moved, not lost. The shares are over all the raw presences of the kind, outside removed counted the same way). **The plan words the limit over the whole run, so the controller ruled `run_drops` (provisional until Markus confirms it before the resolution 7 run).**
+  `choose` reads it by default, with the same ties (lower native loss, then the grid order) and the same fallback, and `calibrate` has its columns as `run_*`. The first version chose on `layer5`, and its choice is reported below for comparison.
+  A test builds a native presence that layer 4 folds and one that layer 1 drops, and checks that the first is not lost and the second is, and the columns of `calibrate` are checked against `clean`'s own removal log for all 81 settings.
+- **The seam.** `clean.outlier_rows` is the public seam: `_layer_5` calls it, so the calibration runs layer 5 per setting with the same code and not a copy. **Checked on the real counts:** `calibrate`'s counts for settings 0, 40 and 80 are identical to `clean` with layers 1, 2, 4 and 5 at that
+  setting, and the synthetic test does it for all 81, with the rows of two countries for one satellite part and one part of a range (`clean` judges rows by country, `calibrate` presences). `Baseline` records the settings it was made with, and `calibrate(..., start)` refuses a `start` whose `land_share`,
+  `side_conflict` or layer 2 rules differ from the grid's. **Those rules are derived from `RULES`** (`EARLY_RULES`: the switchable rules of layers 1, 2 and 4, which is `extinct` and `no_wild_range`), and not from a hand-written set, so a new switchable rule of those layers is covered.
+- **The species** are the plants WCVP gives a native region and **every other species of their taxonomic groups**: `under_reported` compares a species with its group's records in a cell, so the groups are kept whole and the group totals are those of the real run. **Not all of those are plants.**
+  Counted from the split, `refs.taxa`, `refs.groups` and `refs.wcvp` alone (no occurrences were read), the calibration set has 197,509 species in half A (194,975 Plantae, 2,534 not) and **197,567 in half B (194,981 Plantae, 2,586 not Plantae)**, 395,076 in all (5,120 not).
+  All the species that are not Plantae are in the group `eukaryotes`; half B's are 1,411 Protozoa, 504 Animalia, 599 with no kingdom in COL (two of them WCVP plants), 67 Chromista and 5 Fungi. The group `algae`, which holds Chromista and Protozoa too, is not in the set, as no WCVP plant is in it.
+  These are species that the split and the taxonomy give, whether they have records or not. In the dry run, 161,145 species of half A have records. **Checked:** at the design's setting, `clean` on all of half A (all species, layers 1, 2, 4 and 5) gives the same 525,201 / 107,326 / 1,808,902 / 56,953 as the calibration set alone.
 - **The grid of 81 settings** is as the brief has it: satellite record share 0.5, 1 and 2%, satellite cell share 2, 5 and 10%, under-reported rate factor 0.5, 1 and 2%, group minimum 300, 1,000 and 3,000, in that order (the first varies slowest), with the design's setting in the middle (index 40).
-- **The choice** is the setting that removes the most outside presences while losing at most 5% of the native ones (`choose`, a tolerance of 1e-9 on the share against the count). A tie goes to the lower native loss, then to the grid order. With no setting within 5%, the lowest native loss is taken and the run says so.
-- **Half B is scored behind `--score-half-b`, and was not scored.** `score_held_out` is implemented and tested on hand-made tables only (`score`). It is listed in the call-site list of the seal above. **No unsealed call was run in this task, and nothing of half B was loaded,
-  counted or looked at**: the script loads `load_country_counts(..., "A")` only, and the halves of the known cases come from the split file, which has taxonomy and no occurrences.
+- **The choice** is the setting that removes the most outside presences while losing at most 5% of the native ones (`choose`, a tolerance of 1e-9 on the share against the count), by the reading above. With no setting within 5%, the lowest native loss is taken and the run says so.
+- **Half B is scored behind `--score-half-b`, and was not scored.** `score_held_out` is implemented and tested on a made-up download and hand-made tables only. It is listed in the call-site list of the seal above. It scores half B's **calibration species, which are the plants and the other species of their groups**
+  (the species that are not Plantae are kept because the reporting rate needs the group totals, so that the score is like for like with A's; the numbers are above). The flag refuses to run at any resolution but 7, and refuses if any `results/calibrate/res*/held_out.json` exists (both tested, before anything is loaded).
+  It **prints and saves counts and rates only, and how many species were loaded and how many are not Plantae: nothing per taxon** (the function returns exactly that, and a test and an assertion in the script check the keys). **No unsealed call was run in this task, and nothing of half B was loaded, counted or looked at:** the script loads
+  `load_country_counts(..., "A")` only, and the halves of the known cases and the counts of calibration species come from the split file and the taxonomy, which have no occurrences.
 - **The animal cross-check against GRIIS is pending, until Task 11a.** The GRIIS lists are name-only for now and include species that are native where listed (5.8% of the entries that can be checked), so a check against them would count native presences as errors.
 - **Known cases** (`CASES`) run on half A fully cleaned (all five layers, `wcvp_mode="native_only"`, the design's thresholds). **Areas are TDWG level 3 regions, and not country codes:** an area is the set of cells whose land touches a region (or the regions of a level 1 region), and
   both parts of such a cell are in it. The criteria were set before the run and are not tuned: tiger, *Panthera tigris*, no presence in Europe (level 1 region 1) and some left elsewhere; potato, *Solanum tuberosum*, no presence outside its WCVP native regions and some inside;
@@ -1021,67 +1034,76 @@ changed:** the `Settings` defaults are the design's, and the setting chosen belo
 ### Calibration dry run and known cases on half A at resolution 6 (2026-11-01)
 
 `scripts/calibrate.py --counts data/gbif/0019721-261023074918325 --resolution 6`, half A, outputs in `results/calibrate/res6/` (`settings.csv`, `regions.csv`, `known_cases.json`, `report.json`, `calibrate.log`). **This is a dry run: the binding calibration is
-repeated at resolution 7 (`--resolution 7 --score-half-b`), and nothing below is a threshold decision.** 228 s in all and 15.5 GB at the peak (the references decide the peak): load 21 s, the known cases 17 s (a full clean of half A), layers 1, 2 and 4 on the plants 2 s,
-and layer 5 at 81 settings 185 s (2.3 s a setting), against the 30 minutes allowed. At resolution 7 the patch search grows about 5 times (see layer 5), so the 81 settings may take around 15 minutes (an estimate, not a measurement).
+repeated at resolution 7 (`--resolution 7 --score-half-b`), and nothing below is a threshold decision.** 242 s in all and 19.0 GB at the peak (the references decide the peak, and it has varied from 15.5 to 19.0 GB between runs of this and the cleaning code): load 21 s, the known cases 19 s (a full clean of half A),
+layers 1, 2 and 4 on the plants 3 s, and layer 5 at 81 settings 191 s (2.4 s a setting, with both readings), against the 30 minutes allowed. At resolution 7 the patch search grows about 5 times (see layer 5), so the 81 settings may take around 15 minutes (an estimate, not a measurement).
 
-**The plants:** 2,557,367 presences after layers 1, 2 and 4, 2,334,103 with a status: 1,808,902 native and 525,201 outside (22.5%).
+**The plants:** 2,557,367 presences after layers 1, 2 and 4, 2,334,103 with a status: 1,808,902 native and 525,201 outside (22.5%). The raw presences (`n_raw` above 0) with a status are 1,820,925 native and 565,525 outside.
 
-**The 81 settings.** Outside presences removed run from 14.7% to 25.7%, and native presences lost from 1.9% to 5.0%. **79 of 81 settings lose at most 5%**, and only the two most aggressive (0.02, 10%, 2%, group minimum 300 and 1,000: 5.02% and 5.01%) do not. The top 10 within the limit:
+**The 81 settings, by the whole run counting drops only.** Outside presences removed run from 21.8% to 31.8% and native presences lost from 3.1% to 6.2%. **54 of 81 settings lose at most 5%** (by layer 5 alone, 79 do). The 27 that do not are exactly those with a rate factor of 2%.
+**The chosen setting is 75:** record share 2%, cell share 10%, rate factor 1%, group minimum 300. The top 10 within the limit (the last column is layer 5's reading of the same setting):
 
-| Setting | Record share | Cell share | Rate factor | Group min | Outside removed | Rate | Native lost | Loss |
-|---|---|---|---|---|---|---|---|---|
-| **80 (chosen)** | 2% | 10% | 2% | 3,000 | 133,954 | 25.5% | 90,006 | 4.98% |
-| 51 | 1% | 10% | 2% | 300 | 131,880 | 25.1% | 89,072 | 4.92% |
-| 52 | 1% | 10% | 2% | 1,000 | 131,659 | 25.1% | 88,817 | 4.91% |
-| 53 | 1% | 10% | 2% | 3,000 | 131,018 | 24.9% | 88,230 | 4.88% |
-| 69 | 2% | 5% | 2% | 300 | 127,548 | 24.3% | 87,611 | 4.84% |
-| 70 | 2% | 5% | 2% | 1,000 | 127,311 | 24.2% | 87,355 | 4.83% |
-| 24 | 0.5% | 10% | 2% | 300 | 126,968 | 24.2% | 86,517 | 4.78% |
-| 42 | 1% | 5% | 2% | 300 | 126,857 | 24.2% | 87,154 | 4.82% |
-| 25 | 0.5% | 10% | 2% | 1,000 | 126,742 | 24.1% | 86,262 | 4.77% |
-| 71 | 2% | 5% | 2% | 3,000 | 126,627 | 24.1% | 86,766 | 4.80% |
-| *40 (the design's)* | 1% | 5% | 1% | 1,000 | 107,326 | 20.4% | 56,953 | 3.15% |
-| *0 (the mildest)* | 0.5% | 2% | 0.5% | 300 | 77,524 | 14.8% | 34,160 | 1.89% |
+| Setting | Record share | Cell share | Rate factor | Group min | Outside removed | Rate | Native lost | Loss | Layer 5 alone: outside / native |
+|---|---|---|---|---|---|---|---|---|---|
+| **75 (chosen)** | 2% | 10% | 1% | 300 | 161,436 | 28.5% | 83,468 | 4.58% | 22.2% / 3.37% |
+| 76 | 2% | 10% | 1% | 1,000 | 161,334 | 28.5% | 83,389 | 4.58% | 22.1% / 3.36% |
+| 77 | 2% | 10% | 1% | 3,000 | 160,937 | 28.5% | 83,139 | 4.57% | 22.1% / 3.35% |
+| 48 | 1% | 10% | 1% | 300 | 158,397 | 28.0% | 81,681 | 4.49% | 21.6% / 3.27% |
+| 49 | 1% | 10% | 1% | 1,000 | 158,295 | 28.0% | 81,602 | 4.48% | 21.5% / 3.26% |
+| 50 | 1% | 10% | 1% | 3,000 | 157,891 | 27.9% | 81,352 | 4.47% | 21.5% / 3.25% |
+| 66 | 2% | 5% | 1% | 300 | 153,422 | 27.1% | 80,154 | 4.40% | 20.6% / 3.18% |
+| 67 | 2% | 5% | 1% | 1,000 | 153,310 | 27.1% | 80,075 | 4.40% | 20.6% / 3.17% |
+| 21 | 0.5% | 10% | 1% | 300 | 153,201 | 27.1% | 79,092 | 4.34% | 20.6% / 3.12% |
+| 22 | 0.5% | 10% | 1% | 1,000 | 153,098 | 27.1% | 79,013 | 4.34% | 20.5% / 3.12% |
+| *40 (the design's)* | 1% | 5% | 1% | 1,000 | 152,607 | 27.0% | 79,622 | 4.37% | 20.4% / 3.15% |
+| *0 (the mildest)* | 0.5% | 2% | 0.5% | 300 | 123,558 | 21.8% | 57,332 | 3.15% | 14.8% / 1.89% |
+| *80 (the first version's choice, over the limit now)* | 2% | 10% | 2% | 3,000 | 178,738 | 31.6% | 112,062 | 6.15% | 25.5% / 4.98% |
 
-- **The chosen setting is at the edge of the grid.** It has the largest value of three of the four thresholds, and what stops the two settings above it is the 5% limit, which binds only there. **The grid does not bracket the optimum**: a larger record share, cell share or rate factor would remove more, at a cost
-  that the grid cannot show. Averaged over the other thresholds, the rate factor does most (0.5%, 1%, 2%: 16.9%, 19.9%, 23.6% of outside presences removed, at 2.1%, 3.1%, 4.7% of native lost), then the cell share (18.2%, 20.5%, 21.6%, at 3.1%, 3.3%, 3.5%), and the record share
-  and the group minimum hardly matter (a group minimum of 300 against 3,000 changes the outside rate by 0.1 percentage points).
-- **Layer 5 alone removes at most a quarter of the outside presences, and costs 3 to 5% of the native ones**, so it is no substitute for layer 3 where WCVP exists. `outside` is a lower bound on what is not native, as WCVP is coarse (TDWG level 3, cells of 265 km): a presence in a cell that touches a native region is
+**The three readings, for the chosen setting, the design's, and the first version's choice** (outside presences removed, native presences lost; the whole-run shares are over the raw presences):
+
+| Setting | Layer 5 alone | Whole run, counting everything | Whole run, counting drops only |
+|---|---|---|---|
+| **75 (chosen)** | 116,350 of 525,201 (22.15%); 60,890 of 1,808,902 (3.37%) | 161,450 of 565,525 (28.55%); 83,567 of 1,820,925 (4.59%) | 161,436 (28.55%); 83,468 (4.58%) |
+| 40 (the design's) | 107,326 (20.44%); 56,953 (3.15%) | 152,621 (26.99%); 79,721 (4.38%) | 152,607 (26.99%); 79,622 (4.37%) |
+| 80 (chosen by layer 5 alone before) | 133,954 (25.51%); 90,006 (4.98%) | 178,752 (31.61%); 112,161 (6.16%) | 178,738 (31.61%); 112,062 (6.15%) |
+
+- **A moved presence hardly matters:** counting folds as lost adds 99 native presences to setting 75's whole-run loss (83,567 against 83,468) and 14 outside ones. The whole run loses about 1.2 percentage points of native presences before layer 5 (to layers 1, 2 and 4).
+- **The choice moved from 80 to 75.** Under the whole-run reading the 5% limit binds on the rate factor: every setting with 2% is over it and every one with 1% or 0.5% is within it, so the rate factor is bracketed by the grid. **The record share and the cell share are not:** the chosen setting has the largest value of both, so a larger share would remove more, at a cost that the grid cannot show.
+  Averaged over the other thresholds, the rate factor does most (0.5%, 1%, 2%: 23.8%, 26.5%, 29.9% of outside presences removed, at 3.34%, 4.31%, 5.93% of native lost), then the cell share (2%, 5%, 10%: 25.0%, 27.1%, 28.1%, at 4.34%, 4.56%, 4.68%), and the record share (0.5%, 1%, 2%: 26.3%, 26.8%, 27.0%, at 4.46%, 4.54%, 4.58%)
+  and the group minimum (300, 1,000, 3,000: 26.7%, 26.7%, 26.6%) hardly matter.
+- **Layer 5 alone removes at most about a quarter of the outside presences, and with layers 1, 2 and 4 the whole run about 28%, and costs 3.4% (layer 5) or 4.6% (whole run) of the native ones**, so it is no substitute for layer 3 where WCVP exists. `outside` is a lower bound on what is not native, as WCVP is coarse (TDWG level 3, cells of 265 km): a presence in a cell that touches a native region is
   native here, however far from the species' real range, and a garden record inside the range cannot be told apart.
-- **Whole-run reading of the 5%.** The rates above are layer 5's, on what layers 1, 2 and 4 leave, as the thresholds have nothing to do with the rest. Counted from the raw presences (n_raw above 0) over the whole of layers 1, 2, 4 and 5, **the chosen setting loses 112,161 of 1,820,925
-  native presences (6.16%) and removes 178,752 of 565,525 outside ones (31.6%)**. That counts the flagged records layer 1 rightly drops and the presences layer 4 moves to the other part of a cell as lost, so it is not an error rate, but it is above 5%. Read that way, the limit would allow a layer 5
-  native loss of about 68,900 presences (3.8%), and the best of the 54 settings within it is 75 (2%, 10%, 1%, 300: 22.2% outside removed, 3.37% native lost). Which reading binds is for Markus to say before the resolution 7 run.
 
-**Native loss per TDWG level 3 region, at the chosen setting** (a native presence counts in each region its part touches where the species is native, so the rows do not add up to the total). 324 regions have at least 100 native presences, and the median loss is 3.2%. The 20 highest:
+**Native loss per TDWG level 3 region, at the chosen setting (75), by layer 5's reading** (a native presence counts in each region its part touches where the species is native, so the rows do not add up to the total; the whole run's loss per region was not made). 324 regions have at least 100 native presences, and the median loss is 2.2%. The 20 highest:
 
 | # | Region | Level 1 | Land parts | Native presences | Lost | Loss |
 |---|---|---|---|---|---|---|
-| 1 | Caroline Is. (CRL) | 6 | 12 | 570 | 107 | 18.8% |
-| 2 | Marianas (MRN) | 6 | 4 | 231 | 43 | 18.6% |
-| 3 | New South Wales (NSW) | 5 | 20 | 21,056 | 3,581 | 17.0% |
-| 4 | California (CAL) | 7 | 15 | 23,839 | 3,875 | 16.3% |
-| 5 | France (FRA) | 1 | 18 | 32,069 | 5,030 | 15.7% |
-| 6 | Victoria (VIC) | 5 | 10 | 8,767 | 1,305 | 14.9% |
-| 7 | Spain (SPA) | 1 | 18 | 33,466 | 4,640 | 13.9% |
-| 8 | Cape Verde (CVI) | 2 | 4 | 584 | 66 | 11.3% |
-| 9 | Germany (GER) | 1 | 11 | 15,351 | 1,715 | 11.2% |
-| 10 | Marquesas (MRQ) | 6 | 2 | 248 | 27 | 10.9% |
-| 11 | Texas (TEX) | 7 | 20 | 21,720 | 2,330 | 10.7% |
-| 12 | Italy (ITA) | 1 | 15 | 24,986 | 2,657 | 10.6% |
-| 13 | Arizona (ARI) | 7 | 11 | 13,451 | 1,403 | 10.4% |
-| 14 | Azores (AZO) | 2 | 3 | 732 | 76 | 10.4% |
-| 15 | New York (NWY) | 7 | 6 | 5,320 | 546 | 10.3% |
-| 16 | Washington (WAS) | 7 | 9 | 8,599 | 880 | 10.2% |
-| 17 | Finland (FIN) | 1 | 13 | 7,472 | 746 | 10.0% |
-| 18 | Seychelles (SEY) | 2 | 3 | 326 | 32 | 9.8% |
-| 19 | Nevada (NEV) | 7 | 10 | 11,408 | 1,101 | 9.7% |
-| 20 | Norway (NOR) | 1 | 16 | 9,485 | 886 | 9.3% |
+| 1 | Marianas (MRN) | 6 | 4 | 231 | 44 | 19.0% |
+| 2 | Caroline Is. (CRL) | 6 | 12 | 570 | 107 | 18.8% |
+| 3 | France (FRA) | 1 | 18 | 32,069 | 4,622 | 14.4% |
+| 4 | New South Wales (NSW) | 5 | 20 | 21,056 | 2,616 | 12.4% |
+| 5 | California (CAL) | 7 | 15 | 23,839 | 2,907 | 12.2% |
+| 6 | Victoria (VIC) | 5 | 10 | 8,767 | 964 | 11.0% |
+| 7 | Marquesas (MRQ) | 6 | 2 | 248 | 27 | 10.9% |
+| 8 | Cape Verde (CVI) | 2 | 4 | 584 | 63 | 10.8% |
+| 9 | Spain (SPA) | 1 | 18 | 33,466 | 3,559 | 10.6% |
+| 10 | Seychelles (SEY) | 2 | 3 | 326 | 32 | 9.8% |
+| 11 | Germany (GER) | 1 | 11 | 15,351 | 1,468 | 9.6% |
+| 12 | Azores (AZO) | 2 | 3 | 732 | 69 | 9.4% |
+| 13 | Sri Lanka (SRL) | 4 | 5 | 1,937 | 174 | 9.0% |
+| 14 | Maldives (MDV) | 4 | 6 | 129 | 11 | 8.5% |
+| 15 | Finland (FIN) | 1 | 13 | 7,472 | 605 | 8.1% |
+| 16 | Italy (ITA) | 1 | 15 | 24,986 | 1,992 | 8.0% |
+| 17 | Ogasawara-shoto (OGA) | 3 | 3 | 103 | 8 | 7.8% |
+| 18 | Sweden (SWE) | 1 | 15 | 14,092 | 1,084 | 7.7% |
+| 19 | New York (NWY) | 7 | 6 | 5,320 | 392 | 7.4% |
+| 20 | Portugal (POR) | 1 | 5 | 6,040 | 445 | 7.4% |
 
-**Islands do lose more natives in some places, but not as a rule.** Six of the 20 are island groups (Caroline Is., Marianas, Cape Verde, Marquesas, Azores, Seychelles, all with few natives, 231 to 732), and the other 14 are large, heavily sampled regions of Australia, western Europe and North America (New South Wales,
-California, France, Spain, Germany), which lose the most presences in number (3,581 to 5,030 each). Summed over the regions with at least 100 native presences, those touching at most 5 land parts (99 regions, a proxy for small regions that includes mainland states and not only islands) lose 4.0% (8,977 of 224,081), and the larger ones (225) 4.4% (117,649 of 2,662,995).
-The loss follows sampling density at least as much as isolation (presumably, as `under_reported` compares a species with the records of its group in the cell, and native species of a heavily sampled cell with few records look under-reported). Of the cells Task 12 found layer 5 emptying, Taiwan (6.7%) and Madeira (6.3%) lose about twice the median, Iceland (3.1%) and Svalbard (1.0%) lose no more than it, and Bermuda has the highest loss of all, 26 of 79 native presences (32.9%), but is under the 100 that a region needs to be listed.
+**Islands do lose more natives in some places, but not as a rule.** Nine of the 20 are island regions (Marianas, Caroline Is., Marquesas, Cape Verde, Seychelles, Azores, Sri Lanka, Maldives, Ogasawara-shoto, mostly with few natives, 103 to 732, but Sri Lanka has 1,937),
+and the other 11 are large, heavily sampled regions of Australia, western and northern Europe and North America, which lose the most presences in number: France 4,622, Spain 3,559, California 2,907, New South Wales 2,616, Italy 1,992 and Germany 1,468. Summed over the regions with at least 100 native presences, those touching at most 5 land parts
+(99 regions, a proxy for small regions that includes mainland states and not only islands) lose 2.7% (6,044 of 224,081), and the larger ones (225) 2.9% (77,462 of 2,662,995). The loss follows sampling density at least as much as isolation (presumably, as `under_reported` compares a species with the records of its group in the cell, and native species of a heavily sampled cell with few records look under-reported).
+Of the cells Task 12 found layer 5 emptying, Taiwan (4.9%) and Madeira (5.6%) lose about twice the median, Iceland (2.4%) and Svalbard (1.0%) lose no more than it, and Bermuda has the highest loss of all, 26 of 79 native presences (32.9%), but is under the 100 that a region needs to be listed.
 
-**Known cases, on half A fully cleaned (all five layers, `native_only`, the design's thresholds): 1 of the 4 run passes, 3 fail, and 1 waits.**
+**Known cases, on half A fully cleaned (all five layers, `native_only`, the design's thresholds; they do not depend on the calibration): 1 of the 4 run passes, 3 fail, and 1 waits.**
 
 | Case | Result | Numbers (presences, species and part) |
 |---|---|---|
@@ -1094,7 +1116,17 @@ The loss follows sampling density at least as much as isolation (presumably, as 
 - **Starling:** the 75 presences left are 30 sea parts and 45 land parts, and none of the land parts is in a cell of a sub-national GRIIS list. GRIIS lists the starling for the US only through two sub-national lists, Alaska and `United` (the lower 48, which `natives.py` places on the cells whose **centre** is in a state, 115 cells), and the country rule has no US entry.
   So a coastal cell whose centre is at sea is not covered (6 of the 15 cells that touch California are not, and California alone has 6 presences left with 639,344 records), and the starling's US rows there stay. The rows of a left part also include other countries' (a border cell with US rows is kept by them). This is layer 3's placement of sub-national lists and not a calibration question, and **nothing was
   changed to make the case pass.** GRIIS is name-only until Task 11a.
-- **Lemuridae:** the 9 left are records of the Comoros, where lemurs live as an introduced population (general knowledge, not checked here), and of three places in Europe and North America that look like captive animals (the Duke Lemur Center is in North Carolina; not checked). Layer 5 spares a species with under 20 records (all its cells are core) and a patch with at least 2 datasets and 3 years; which of the two applies to each was not looked at. Removing them would need knowledge of the range, which layer 3 has for plants and GRIIS for aliens, and not a heuristic. Reported as a failure.
+- **Lemuridae:** the 9 left are in two groups. **4 of the 9 are parts with no TDWG region**, sea parts, which no explanation here covers (a one-off look: two are the sea part of the cell of the Comoros presences, 58 records, and two are in a cell of the Mozambique Channel at 14.5 S, 43.4 E, 9 records). **The Comoros and captive explanation covers 5 of the 9**: the 2 Comoros land presences,
+  where lemurs live as an introduced population, and the 3 in Europe and North America, which look like captive animals (the Duke Lemur Center is in North Carolina); neither was checked in the data. Layer 5 spares a species with under 20 records (all its cells are core) and a patch with at least 2 datasets and 3 years; which of the two applies to each was not looked at.
+  Removing them would need knowledge of the range, which layer 3 has for plants and GRIIS for aliens, and not a heuristic. Reported as a failure.
 - **Hawaii** shows how little a presence-count criterion can say for a species of 9 presences: one single-record presence in the open sea is 11%. The range itself (the cells with 26,856, 1,391, 1,286 and 236 records) is kept. The criterion is as it was set, and the case fails by it.
 
-**Not done here:** the cross-check on A's animals against GRIIS (Task 11a); the scoring of half B's plants and the held-out rates as the remaining error (resolution 7, with `--score-half-b`); the cases of half B (step 9); a choice between the two readings of the 5% above.
+### Changes after the review of Task 13 (2026-11-01)
+
+- **The reading of the 5% limit** changed from layer 5 alone to the whole run of layers 1, 2, 4 and 5 counting drops only (see the rulings above), by the controller's ruling, provisional until Markus confirms it before the resolution 7 run. The chosen setting at resolution 6 moved from 80 to 75, and the island table is the one of setting 75.
+  The three readings are reported for the chosen and the design setting. The first version's numbers (setting 80, 25.5% outside removed at 4.98% native lost by layer 5 alone, 6.15% over the whole run) are in the readings table.
+- **The load of half B** was described as plants only, and it is the plants and every other species of their taxonomic groups; the code docstring, the call-site list, the ruling on half B, the README and the test name now say so, with the number of species that are not Plantae (2,586 of 197,567), counted from the taxonomy alone. The group mates stay in, so that the score is like for like with A's.
+- **The once guard:** `--score-half-b` refuses any resolution but 7 and refuses if any `res*/held_out.json` exists, and not only the one of its own resolution.
+- **`Baseline` records its settings** and `calibrate(..., start)` checks them against the grid's; the rules layers 1, 2 and 4 read are derived from `RULES`; the test world has the rows of two countries for one part, so that the seam is checked on rows by country.
+
+**Not done here:** the cross-check on A's animals against GRIIS (Task 11a); the scoring of half B's calibration species and the held-out rates as the remaining error (resolution 7, with `--score-half-b`); the cases of half B (step 9); Markus's confirmation of the reading of the 5% limit; a grid that brackets the record share and the cell share.

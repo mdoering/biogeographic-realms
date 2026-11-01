@@ -8,13 +8,21 @@ native region get a status, and only land parts with a TDWG region: a sea part, 
 `rates` are the two numbers that matter: the share of outside presences that the heuristics remove, and the share of native presences they
 lose. Both count presences, which is what the network is built from, and not records.
 
-**The baseline** is what layers 1, 2 and 4 leave. Those layers don't depend on the thresholds, so `calibrate` runs them once and then only layer 5
-for each setting (`clean.outlier_rows`, the same code that `clean` runs for layer 5). A presence that layer 1 or 2 took out, or that layer 4 moved, is
-not counted as lost to the heuristics, as the thresholds had nothing to do with it. `calibrate` therefore measures what the four thresholds do.
+**Three readings of the 5% limit.** The thresholds only change layer 5, so layers 1, 2 and 4 run once (`baseline`) and layer 5 runs for each setting
+(`clean.outlier_rows`, the same code that `clean` runs for layer 5). What counts as lost can be read three ways, and `readings` gives all three:
+
+- `layer5`: presences that layer 5 takes, out of those that layers 1, 2 and 4 leave. What the four thresholds do, and nothing else.
+- `run_all`: the whole of layers 1, 2, 4 and 5, from the raw presences (`n_raw` above 0), counting every raw presence that is not in the result.
+- `run_drops`: the same, but **only drops count**: a presence whose rows a fold moved to another part (layer 0's zero-area fold, or layer 4, a row of the
+  removal log with a `to_part`) is moved, not lost, even if it is gone from where it was. The shares are over all the raw presences of the kind.
+
+The plan words the limit over the whole run, and the controller's ruling (provisional until Markus confirms it before the resolution 7 run) is
+`run_drops`: `choose` reads it by default, and `calibrate` has its columns as `run_*`. The `layer5` columns keep the first reading.
 
 **The species** are the plants WCVP gives a native region and every other species of their taxonomic groups. Layer 5 judges a species against its
-group's records in a cell (`under_reported`), and some groups hold species of other kingdoms, so the whole group is kept and the group totals are
-what they are in the real run. Everything else in layers 1 to 5 is per species.
+group's records in a cell (`under_reported`), and a group can hold species of other kingdoms (in the data, `eukaryotes` does, and so those species are in the set), so the whole group is kept and the
+group totals are what they are in the real run, which also makes a score on half B like for like with half A's. Everything else in layers 1 to 5 is per
+species. `kingdom_counts` says how many of a set of species are not Plantae, from the taxonomy alone.
 
 **The setting** is chosen by `choose`: the one that removes the most outside presences while losing at most 5% of the native ones. A tie goes to
 the lower native loss, and then to the order of the grid. Where no setting loses so little, the one that loses least is taken, and the caller is told.
@@ -34,7 +42,7 @@ from typing import Literal
 
 import polars as pl
 
-from realms.clean import Settings, clean, outlier_rows
+from realms.clean import RULES, SWITCHABLE, Settings, clean, outlier_rows
 from realms.grid import Grid, cell_of
 from realms.natives import References, match_names
 
@@ -51,17 +59,17 @@ GRID = {
     "group_min_records": (300, 1000, 3000),
 }
 BEFORE_5 = frozenset({1, 2, 4})  # layer 3 is off in the calibration, and layer 5 is what is measured
+# the rules that layers 1, 2 and 4 read from `Settings.rules_off`, and that so have to agree across the grid: from `RULES`, which says each rule's layer
+EARLY_RULES = frozenset(rule for rule in SWITCHABLE if RULES[rule] in BEFORE_5)
 STATUS_SCHEMA = {"species_id": pl.String, "part": pl.String, "status": pl.String}
-SCORE = ("outside", "outside_removed", "native", "native_lost", "outside_rate", "native_loss")
+COUNT_KEYS = ("outside", "outside_removed", "native", "native_lost", "outside_rate", "native_loss")
+SCORE = (*COUNT_KEYS, *(f"run_{k}" for k in COUNT_KEYS))
+# the columns `choose` reads for each reading: the outside presences removed, the native presences lost and the native presences
+READINGS = {"layer5": ("outside_removed", "native_lost", "native"), "run": ("run_outside_removed", "run_native_lost", "run_native")}
 TABLE_SCHEMA = {
     "setting": pl.Int64,
     **{k: pl.Float64 if k.endswith(("share", "factor")) else pl.Int64 for k in GRID},
-    "outside": pl.Int64,
-    "outside_removed": pl.Int64,
-    "native": pl.Int64,
-    "native_lost": pl.Int64,
-    "outside_rate": pl.Float64,
-    "native_loss": pl.Float64,
+    **{k: pl.Float64 if k.endswith(("rate", "loss")) else pl.Int64 for k in SCORE},
 }
 REGION_SCHEMA = {"tdwg3": pl.String, "name": pl.String, "level2": pl.Int64, "level1": pl.Int64}
 
@@ -131,20 +139,32 @@ def settings_grid(base: Settings = Settings()) -> list[Settings]:
     return [replace(base, **dict(zip(GRID, values, strict=True))) for values in itertools.product(*GRID.values())]
 
 
-def choose(table: pl.DataFrame, limit: float = NATIVE_LOSS_LIMIT) -> tuple[int, bool]:
+def within_limit(limit: float = NATIVE_LOSS_LIMIT, reading: Literal["layer5", "run"] = "run") -> pl.Expr:
+    """Whether a row of `calibrate`'s table loses at most `limit` of the native presences, by `reading` (`layer5`, or the whole `run` counting drops only)."""
+    if reading not in READINGS:
+        raise ValueError(f"a reading is one of {sorted(READINGS)}, not {reading!r}")
+    _, lost, native = READINGS[reading]
+    return pl.col(lost) <= limit * pl.col(native) + EPS
+
+
+def choose(table: pl.DataFrame, limit: float = NATIVE_LOSS_LIMIT, reading: Literal["layer5", "run"] = "run") -> tuple[int, bool]:
     """The `setting` of `table` (from `calibrate`) that removes the most outside presences among those losing at most `limit` of the native ones.
 
-    A tie goes to the fewer native presences lost, and then to the lower setting, which is the order of the grid. Where no setting is within the limit,
-    the one that loses the fewest native presences is taken, the lower setting again winning a tie. Returns the setting and whether the limit was met.
-    The native presences are the same for every setting of one table, so counts are compared and not shares.
+    `reading` is which columns count: `run`, the whole of layers 1, 2, 4 and 5 counting drops only (the default), or `layer5`. A tie goes to the fewer
+    native presences lost, and then to the lower setting, which is the order of the grid. Where no setting is within the limit, the one that loses
+    the fewest native presences is taken, the lower setting again winning a tie. Returns the setting and whether the limit was met. The native presences
+    are the same for every setting of one table, so counts are compared and not shares.
     """
     if table.is_empty():
         raise ValueError("there are no settings to choose from")
-    within = table.filter(pl.col("native_lost") <= limit * pl.col("native") + EPS)
+    if reading not in READINGS:
+        raise ValueError(f"a reading is one of {sorted(READINGS)}, not {reading!r}")
+    removed, lost, _ = READINGS[reading]
+    within = table.filter(within_limit(limit, reading))
     if within.height:
-        best = within.sort(["outside_removed", "native_lost", "setting"], descending=[True, False, False]).row(0, named=True)
+        best = within.sort([removed, lost, "setting"], descending=[True, False, False]).row(0, named=True)
         return int(best["setting"]), True
-    return int(table.sort(["native_lost", "setting"]).row(0, named=True)["setting"]), False
+    return int(table.sort([lost, "setting"]).row(0, named=True)["setting"]), False
 
 
 # ---- the species and the calibration
@@ -164,32 +184,77 @@ def calibration_counts(counts: pl.DataFrame, refs: References) -> pl.DataFrame:
 
 
 def _early(settings: Settings) -> tuple:
-    """What layers 1, 2 and 4 take from the settings, which `calibrate` runs once."""
-    return settings.land_share, settings.side_conflict, settings.rules_off & {"extinct", "no_wild_range"}
+    """What layers 1, 2 and 4 take from the settings, which `calibrate` runs once: `land_share`, `side_conflict` and the rules of `EARLY_RULES` that are off."""
+    return settings.land_share, settings.side_conflict, settings.rules_off & EARLY_RULES
 
 
 @dataclass(frozen=True)
 class Baseline:
-    """What layers 1, 2 and 4 leave of the calibration species (`presence`, rows by species and part) and the `native_status` of those presences."""
+    """Layers 1, 2 and 4 run on the calibration species with `settings`, and what the readings need of them.
 
+    `presence`: what they leave, rows by species and part. `status`: the `native_status` of those presences, for the `layer5` reading.
+    `raw_status`: the status of the raw presences (`n_raw` above 0), the base of the whole-run readings. `absent`: the raw presences (`species_id`, `part`)
+    that `presence` does not have, moved ones included. `moved`: the (`species_id`, `part`) whose rows a fold moved to another part (a removal-log row with
+    a `to_part`, from layer 0 or 4).
+    """
+
+    settings: Settings
     presence: pl.DataFrame
     status: pl.DataFrame
+    raw_status: pl.DataFrame
+    absent: pl.DataFrame
+    moved: pl.DataFrame
 
 
 def baseline(counts: pl.DataFrame, refs: References, grid: Grid, settings: Settings = Settings()) -> Baseline:
-    """Run layers 1, 2 and 4 on the `calibration_counts` of `counts` with `settings`, and mark the plant presences that are left."""
-    presence = clean(calibration_counts(counts, refs), refs, grid, BEFORE_5, settings).presence
-    return Baseline(presence, native_status(presence, refs.wcvp, refs.tdwg3_parts))
+    """Run layers 1, 2 and 4 on the `calibration_counts` of `counts` with `settings`, and mark the plant presences, raw and left."""
+    plants = calibration_counts(counts, refs)
+    cleaned = clean(plants, refs, grid, BEFORE_5, settings)
+    raw = plants.filter(pl.col("n_raw") > 0).select("species_id", "part").unique()
+    absent = raw.join(cleaned.presence.select("species_id", "part"), on=["species_id", "part"], how="anti")
+    moved = cleaned.removed.filter(pl.col("to_part").is_not_null()).select("species_id", "part").unique()
+    return Baseline(
+        settings,
+        cleaned.presence,
+        native_status(cleaned.presence, refs.wcvp, refs.tdwg3_parts),
+        native_status(raw, refs.wcvp, refs.tdwg3_parts),
+        absent,
+        moved,
+    )
+
+
+def _with_rates(t: dict[str, int]) -> dict:
+    return {**t, "outside_rate": _share(t["outside_removed"], t["outside"]), "native_loss": _share(t["native_lost"], t["native"])}
+
+
+def _run_lost(start: Baseline, removed: pl.DataFrame, drops_only: bool) -> pl.DataFrame:
+    """The raw presences that the whole run loses: those layers 1, 2 and 4 left no presence of, and those layer 5 takes (`removed`, rows by species and part).
+
+    With `drops_only`, a presence whose rows a fold moved is not lost. The result is a table with `species_id` and `part`, to be counted with `tally`.
+    """
+    lost = pl.concat([start.absent, removed.select("species_id", "part")]).unique()
+    return lost.join(start.moved, on=["species_id", "part"], how="anti") if drops_only else lost
+
+
+def readings(start: Baseline, refs: References, grid: Grid, setting: Settings) -> dict[str, dict]:
+    """The three readings of what `setting` costs, each the counts of `tally` and the two rates: `layer5`, `run_all` and `run_drops` (see the module)."""
+    removed = outlier_rows(start.presence, refs, grid, setting)
+    return {
+        "layer5": _with_rates(tally(start.status, removed)),
+        "run_all": _with_rates(tally(start.raw_status, _run_lost(start, removed, False))),
+        "run_drops": _with_rates(tally(start.raw_status, _run_lost(start, removed, True))),
+    }
 
 
 def calibrate(counts: pl.DataFrame, settings_grid: Sequence[Settings], refs: References, grid: Grid, start: Baseline | None = None) -> pl.DataFrame:
-    """One row per setting of `settings_grid`: its thresholds, and what layer 5 does to the plants' native and outside presences.
+    """One row per setting of `settings_grid`: its thresholds, and what it does to the plants' native and outside presences.
 
     Runs on the `calibration_species` of `counts` (country counts, `load_country_counts`), with layer 3 off: layers 1, 2 and 4 once, and layer 5
     at each setting. `setting` is the index in `settings_grid`. `outside` and `native` are the presences of each kind that layer 5 judges, the same in
-    every row, `outside_removed` and `native_lost` those it takes, and `outside_rate` and `native_loss` the shares. The settings must agree on
-    what layers 1, 2 and 4 use (`land_share`, `side_conflict` and the layer 2 rules of `rules_off`), as those run once. `start` is that run, if the
-    caller has it (`baseline`, made with the first setting).
+    every row, `outside_removed` and `native_lost` those it takes, and `outside_rate` and `native_loss` the shares (the `layer5` reading). The `run_*`
+    columns are the same for the whole run counting drops only (`run_drops`), over the raw presences. The settings must agree on what layers 1, 2 and 4
+    use (`land_share`, `side_conflict` and the rules of `EARLY_RULES`), as those run once. `start` is that run, if the caller has it (`baseline`):
+    it must have been made with settings that agree with the grid's on those.
     """
     if not len(settings_grid):
         raise ValueError("there are no settings to calibrate")
@@ -197,41 +262,43 @@ def calibrate(counts: pl.DataFrame, settings_grid: Sequence[Settings], refs: Ref
     for setting in settings_grid[1:]:
         if _early(setting) != _early(first):
             raise ValueError("the settings differ in land_share, side_conflict or the layer 2 rules of rules_off, which layers 1, 2 and 4 use and which run once")
-    start = start or baseline(counts, refs, grid, first)
-    present = tally(start.status, start.presence.head(0))
-    if not present["outside"] or not present["native"]:
-        raise ValueError(f"the calibration needs outside and native presences, and has {present['outside']} outside and {present['native']} native")
+    if start is None:
+        start = baseline(counts, refs, grid, first)
+    elif _early(start.settings) != _early(first):
+        raise ValueError("the baseline was made with other land_share, side_conflict or layer 2 rules of rules_off than the settings have, so it is not the layers 1, 2 and 4 of this grid")
+    first_tally = {"layer5": tally(start.status, start.presence.head(0)), "run": tally(start.raw_status, start.presence.head(0))}
+    for name, present in first_tally.items():
+        if not present["outside"] or not present["native"]:
+            raise ValueError(f"the calibration needs outside and native presences, and the {name} reading has {present['outside']} outside and {present['native']} native")
     table = []
     for i, setting in enumerate(settings_grid):
-        t = tally(start.status, outlier_rows(start.presence, refs, grid, setting))
-        table.append(
-            {
-                "setting": i,
-                **{k: getattr(setting, k) for k in GRID},
-                **t,
-                "outside_rate": _share(t["outside_removed"], t["outside"]),
-                "native_loss": _share(t["native_lost"], t["native"]),
-            }
-        )
+        removed = outlier_rows(start.presence, refs, grid, setting)
+        layer5 = _with_rates(tally(start.status, removed))
+        run = _with_rates(tally(start.raw_status, _run_lost(start, removed, True)))
+        table.append({"setting": i, **{k: getattr(setting, k) for k in GRID}, **layer5, **{f"run_{k}": v for k, v in run.items()}})
         if (i + 1) % 9 == 0:
             log.info("setting %d of %d", i + 1, len(settings_grid))
     return pl.DataFrame(table, schema=TABLE_SCHEMA)
 
 
-def pipeline_tally(raw: pl.DataFrame, final: pl.DataFrame, wcvp: pl.DataFrame, tdwg3_parts: pl.DataFrame) -> dict[str, int]:
-    """The tally of the whole of cleaning: the plant presences of `raw` (before any layer) that `final` (after them) no longer has, as `tally` counts.
-
-    Unlike `calibrate` this counts what layers 1, 2 and 4 take as well, the records layer 1 rightly drops and the presences layer 4 moves to the other
-    side of a cell included, so the native loss it gives is the whole run's and not the thresholds'.
-    """
-    lost = raw.select("species_id", "part").unique().join(final.select("species_id", "part"), on=["species_id", "part"], how="anti")
-    return tally(native_status(raw, wcvp, tdwg3_parts), lost)
-
-
 def score(counts: pl.DataFrame, setting: Settings, refs: References, grid: Grid) -> dict:
-    """What one `setting` does to the plants of `counts`: the counts and rates of `calibrate`, for a setting chosen on other plants."""
+    """What one `setting` does to the calibration species of `counts` (the plants and the other species of their groups): the counts and rates of
+    `calibrate`, for a setting chosen on other species.
+
+    Only numbers come back, no species and no cell: the keys of `SCORE`.
+    """
     row = calibrate(counts, [setting], refs, grid).row(0, named=True)
     return {k: row[k] for k in SCORE}
+
+
+def kingdom_counts(species: Collection[str], taxa: pl.DataFrame) -> dict[str, int]:
+    """How many of `species` there are, and how many of them are Plantae and not, by `taxa` (`species_id`, `kingdom`). A species `taxa` lacks is not Plantae.
+
+    From the taxonomy alone: it reads no occurrences, so it is safe on the species of half B.
+    """
+    mine = pl.DataFrame({"species_id": list(species)}, schema={"species_id": pl.String}).unique()
+    plantae = mine.join(taxa.filter(pl.col("kingdom") == "Plantae").select("species_id").unique(), on="species_id", how="semi").height
+    return {"species": mine.height, "plantae": plantae, "not_plantae": mine.height - plantae}
 
 
 # ---- regions
