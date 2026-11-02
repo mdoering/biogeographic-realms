@@ -1,12 +1,16 @@
 import math
+from dataclasses import fields, replace
 
 import infomap
 import polars as pl
 import pytest
 
 import reference_impl as ref
-from realms.cluster import Partition, run_infomap
-from realms.network import build_network, information_weight
+from realms import cluster
+from realms.candidates import candidate_maps
+from realms.cluster import InfomapOptions, Partition, run_infomap
+from realms.matrix import cell_taxa
+from realms.network import build_network, information_weight, network_from
 from realms.synth import planted_network
 
 
@@ -162,12 +166,24 @@ def leaf_modules(partition):
     return len(set(partition.leaf_labels().values()))
 
 
-def test_markov_time_below_one_gives_more_modules():
-    net = planted_net(ranks=("species",))
-    assert leaf_modules(run_infomap(net, markov_time=0.5)) > leaf_modules(run_infomap(net, markov_time=1.0))
+DEFAULT_LINE = "--flow-model undirected --seed 1 --num-trials 10 --silent"
+
+# the value to set for each option and the flags it adds to the command line, which are those of infomap 2.16
+EACH_OPTION = {
+    "markov_time": (0.5, "--markov-time 0.5"),
+    "variable_markov_time": (True, "--variable-markov-time"),
+    "variable_markov_damping": (0.5, "--variable-markov-damping 0.5"),
+    "regularized": (True, "--regularized"),
+    "regularization_strength": (2.0, "--regularization-strength 2.0"),
+    "entropy_corrected": (True, "--entropy-corrected"),
+    "entropy_correction_strength": (2.0, "--entropy-correction-strength 2.0"),
+    "recurse_share": (0.5, ""),  # the recursion is ours: Infomap is not told about it
+}
 
 
-def test_default_markov_time_leaves_the_command_line_alone(monkeypatch):
+@pytest.fixture
+def command_lines(monkeypatch):
+    """The option strings `infomap.Infomap` is constructed with, in order."""
     flags = []
     real = infomap.Infomap
 
@@ -176,9 +192,136 @@ def test_default_markov_time_leaves_the_command_line_alone(monkeypatch):
         return real(options)
 
     monkeypatch.setattr(infomap, "Infomap", spy)
+    return flags
+
+
+def test_default_options_give_todays_command_line(command_lines):
+    assert InfomapOptions().args() == ""
     net = planted_net()
     run_infomap(net)
-    run_infomap(net, markov_time=1.0)
-    run_infomap(net, markov_time=0.5)
-    assert flags[0] == flags[1] == "--flow-model undirected --seed 1 --num-trials 10 --silent"
-    assert flags[2] == flags[0] + " --markov-time 0.5"
+    run_infomap(net, options=InfomapOptions())
+    run_infomap(net, options=InfomapOptions(markov_time=1.0))
+    run_infomap(net, seed=4, trials=2)
+    assert command_lines[:3] == [DEFAULT_LINE] * 3
+    assert command_lines[3] == "--flow-model undirected --seed 4 --num-trials 2 --silent"
+    assert len(command_lines) == 4
+
+
+def test_every_option_has_a_case_below():
+    assert set(EACH_OPTION) == {f.name for f in fields(InfomapOptions)}
+
+
+@pytest.mark.parametrize("field", list(EACH_OPTION))
+def test_each_option_adds_exactly_its_flag(field, command_lines):
+    value, flag = EACH_OPTION[field]
+    options = InfomapOptions(**{field: value})
+    assert options.args() == flag
+    run_infomap(planted_net(), options=options)  # Infomap accepts it
+    assert set(command_lines) == {DEFAULT_LINE + (f" {flag}" if flag else "")}
+
+
+def test_the_options_together_keep_the_order_of_their_flags():
+    options = InfomapOptions(*(EACH_OPTION[f.name][0] for f in fields(InfomapOptions)))
+    assert options.args() == " ".join(flag for _, flag in EACH_OPTION.values() if flag)
+
+
+def test_markov_time_below_one_gives_more_modules():
+    net = planted_net(ranks=("species",))
+    assert leaf_modules(run_infomap(net, options=InfomapOptions(markov_time=0.5))) > leaf_modules(run_infomap(net, options=InfomapOptions(markov_time=1.0)))
+
+
+def groups(labels, cells):
+    """The cells of `labels` that are in `cells`, grouped by label."""
+    found = {}
+    for cell in cells:
+        found.setdefault(labels[cell], set()).add(cell)
+    return {frozenset(g) for g in found.values()}
+
+
+@pytest.fixture
+def giant_module():
+    """Eight planted realms of ten cells. At Markov time 3 Infomap makes two of them modules of their own and merges the other six."""
+    presence, taxa, _ = planted_network(n_realms=8, cells_per_realm=10, endemic_species=50, widespread_species=8)
+    ct = cell_taxa(presence, taxa)
+    options = InfomapOptions(markov_time=3.0)
+    plain = run_infomap(network_from(ct), options=options)
+    return ct, options, plain
+
+
+def the_giant(top):
+    """The cells of the largest top module."""
+    biggest = max(set(top.values()), key=list(top.values()).count)
+    return {c for c, t in top.items() if t == biggest}
+
+
+def test_recursion_splits_a_planted_giant_module_and_leaves_the_rest(giant_module):
+    ct, options, plain = giant_module
+    top = plain.top_labels()
+    giant = the_giant(top)
+    rest = set(top) - giant
+    assert (len(giant), len(top)) == (60, 80)  # 75% of the units in one module, which is a single leaf
+    before = plain.leaf_labels()
+    assert len(groups(before, giant)) == 1 and len(groups(before, rest)) == 2
+
+    recursed = run_infomap(network_from(ct), options=replace(options, recurse_share=0.5))
+    after = recursed.leaf_labels()
+    assert len(groups(after, giant)) > 1  # the giant module is split
+    assert groups(after, rest) == groups(before, rest)  # and the other two stay as they were
+    assert {after[c] for c in giant}.isdisjoint({after[c] for c in rest})  # labels stay unique
+    assert len(set(after.values())) == len(groups(after, giant)) + 2
+    assert recursed.top_labels() == top  # the top modules are what they were: the sub-run goes inside them
+    assert recursed.unassigned == plain.unassigned
+    assert set(recursed.paths) == set(plain.paths)
+
+
+def test_recursion_runs_a_sub_network_of_the_module_with_the_original_weights(giant_module, monkeypatch):
+    ct, options, plain = giant_module
+    net = network_from(ct)
+    asked = []
+    real = cluster.load_infomap
+
+    def spy(network, seed=1, trials=10, options=InfomapOptions()):
+        asked.append((network, seed, trials, options))
+        return real(network, seed, trials, options)
+
+    monkeypatch.setattr(cluster, "load_infomap", spy)
+    recursion = replace(options, recurse_share=0.5)
+    run_infomap(net, seed=5, trials=2, options=recursion)
+
+    assert len(asked) == 2  # the whole network, then the one giant module
+    assert asked[0][0] is net and asked[0][1:] == (5, 2, recursion)
+    sub, seed, trials, sub_options = asked[1]
+    assert (seed, trials, sub_options) == (5, 2, options)  # same seed and trials, same options with the recursion off
+    giant = the_giant(run_infomap(net, seed=5, trials=2, options=options).top_labels())
+    assert sub.cells == [c for c in net.cells if c in giant]  # its units, in the order of the network
+    whole = links(net)
+    assert links(sub) == {(c, t): w for (c, t), w in whole.items() if c in giant}  # every link of them, with the weight it had
+    assert set(sub.taxa) == {t for c, t in whole if c in giant}  # and the taxa that those links lead to, no more
+
+
+def test_recursion_keeps_a_module_that_the_sub_run_does_not_split():
+    net = planted_net()  # six realms, which Infomap finds at the first run
+    plain = run_infomap(net)
+    assert leaf_modules(plain) == 6
+    assert run_infomap(net, options=InfomapOptions(recurse_share=0.1)) == plain  # each holds 17%, each is run again and stays one module
+
+
+def test_recursion_leaves_every_module_alone_below_the_share(giant_module):
+    ct, options, plain = giant_module
+    assert run_infomap(network_from(ct), options=replace(options, recurse_share=0.75)) == plain  # the giant has exactly 75%, not more
+
+
+def test_a_recursed_partition_goes_through_candidate_maps(giant_module):
+    ct, options, plain = giant_module
+    areas = {c: 1e6 for c in ct.cells}
+    adjacency = {c: set() for c in ct.cells}
+    recursed = run_infomap(network_from(ct), options=replace(options, recurse_share=0.5))
+    found = candidate_maps(recursed, ct, areas, adjacency, k_min=2)
+    assert len(found.maps) > 0
+    assert len(set(found.units.values())) == leaf_modules(recursed)
+
+
+def test_recursion_on_a_network_without_links_is_still_an_empty_partition():
+    presence, _, _ = planted_network(n_realms=2, cells_per_realm=2, endemic_species=1, widespread_species=0)
+    empty = pl.DataFrame({"cell": ["b", "a"], "species_id": [None, None]}, schema=presence.schema)
+    assert run_infomap(build_network(empty), options=InfomapOptions(recurse_share=0.5)) == Partition(paths={}, unassigned=["a", "b"])

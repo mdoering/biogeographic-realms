@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 
 from realms.candidates import DegenerateClustering, candidate_maps
-from realms.cluster import run_infomap
+from realms.cluster import InfomapOptions, run_infomap
 from realms.endemism import Labels
 from realms.matrix import CellTaxa
 from realms.network import network_from
@@ -41,10 +41,10 @@ def _nearest(maps: dict[int, Labels], k: int) -> Labels:
 
 def _rerun(shared: tuple, task: tuple[int, np.ndarray]) -> dict[int, float]:
     """The V-measure of every map against the pipeline rerun on the species of one draw."""
-    ct, maps, areas, adjacency, seed, trials, floor_km2, k_max, markov_time = shared
+    ct, maps, areas, adjacency, seed, trials, floor_km2, k_max, options = shared
     b, draws = task
     resampled = ct.resample(draws)
-    partition = run_infomap(network_from(resampled), seed=seed + b, trials=trials, markov_time=markov_time)
+    partition = run_infomap(network_from(resampled), seed=seed + b, trials=trials, options=options)
     try:
         candidates = candidate_maps(partition, resampled, areas, adjacency, k_max=k_max, k_min=2, floor_km2=floor_km2).maps
     except DegenerateClustering:
@@ -62,13 +62,13 @@ def bootstrap_stability(
     trials: int = 3,
     floor_km2: float = 1_000_000,
     k_max: int = 60,
-    markov_time: float = 1.0,
+    options: InfomapOptions = InfomapOptions(),
     workers: int = 1,
 ) -> dict[int, float]:
     """Median V-measure per realm count between each map and the same pipeline rerun on resampled species.
 
     Each bootstrap draws species with replacement from those of `ct`, each draw its own species so that one drawn twice counts
-    twice. The ranks are those of `ct`, and they, `floor_km2`, `k_max` and `markov_time` have to be the ones that produced `maps`,
+    twice. The ranks are those of `ct`, and they, `floor_km2`, `k_max` and `options` have to be the ones that produced `maps`,
     or this measures some other pipeline. A bootstrap that lacks the exact count uses its nearest. One that collapses completely
     scores zero.
 
@@ -80,6 +80,6 @@ def bootstrap_stability(
     if not n_species:
         raise ValueError("bootstrap_stability resamples species, so the matrix needs the species rank")
     draws = [rng.integers(n_species, size=n_species) for _ in range(n_boot)]
-    shared = (ct, maps, areas, adjacency, seed, trials, floor_km2, k_max, markov_time)
+    shared = (ct, maps, areas, adjacency, seed, trials, floor_km2, k_max, options)
     scores = map_tasks(_rerun, list(enumerate(draws)), shared, workers)
     return {k: float(np.median([score[k] for score in scores])) for k in maps}

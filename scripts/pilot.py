@@ -43,7 +43,7 @@ import polars as pl
 
 from realms import candidates, cluster, nullmodel, parallel, select
 from realms.candidates import DegenerateClustering, candidate_maps
-from realms.cluster import Partition, run_infomap
+from realms.cluster import InfomapOptions, Partition, run_infomap
 from realms.grid import ZERO_KM2, load_grid, part_adjacency, parts
 from realms.matrix import cell_taxa
 from realms.network import Network, network_from
@@ -134,7 +134,7 @@ def _infomap(links_path: Path, cells: list[str], seed: int, trials: int, markov_
 
     started = time.perf_counter()
     with mock.patch.object(cluster, "load_infomap", timed_load):
-        partition = run_infomap(net, seed=seed, trials=trials, markov_time=markov_time)
+        partition = run_infomap(net, seed=seed, trials=trials, options=InfomapOptions(markov_time=markov_time))
     return {**loaded, "seconds": time.perf_counter() - started, "peak_gb": peak_gb(), "paths": partition.paths, "unassigned": partition.unassigned}
 
 
@@ -176,7 +176,7 @@ def _bootstrap(ct, maps: dict, areas: dict, adjacency: dict, markov_time: float)
     with worker_peaks(select, timed="candidate_maps") as seen:
         scores = bootstrap_stability(
             ct, maps, areas, adjacency, n_boot=BOOT_PROBE, seed=SEED, trials=BOOT_TRIALS, floor_km2=FLOOR_KM2, k_max=K_MAX,
-            markov_time=markov_time, workers=BOOT_PROBE,
+            options=InfomapOptions(markov_time=markov_time), workers=BOOT_PROBE,
         )
     return {"scores": scores, "workers": seen, "seconds": time.perf_counter() - started, "peak_gb": peak_gb()}
 

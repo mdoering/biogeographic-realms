@@ -3,7 +3,8 @@ import polars as pl
 import pytest
 
 import reference_impl as ref
-from realms.cluster import run_infomap
+from realms import select
+from realms.cluster import InfomapOptions, run_infomap
 from realms.candidates import DegenerateClustering, candidate_maps
 from realms.matrix import cell_taxa
 from realms.network import network_from
@@ -164,4 +165,22 @@ def test_bootstrap_workers_do_not_change_results():
 
 def test_bootstrap_markov_time_reaches_the_reruns():
     ct, maps, areas, adjacency = planted_maps()
-    assert bootstrap_stability(ct, maps, areas, adjacency, n_boot=3, markov_time=0.5) != bootstrap_stability(ct, maps, areas, adjacency, n_boot=3)
+    low = InfomapOptions(markov_time=0.5)
+    assert bootstrap_stability(ct, maps, areas, adjacency, n_boot=3, options=low) != bootstrap_stability(ct, maps, areas, adjacency, n_boot=3)
+
+
+def test_bootstrap_passes_the_options_to_every_draw(monkeypatch):
+    ct, maps, areas, adjacency = planted_maps()
+    options = InfomapOptions(markov_time=0.8, entropy_corrected=True, recurse_share=0.5)
+    asked = []
+
+    def spy(net, seed=1, trials=10, options=InfomapOptions()):
+        asked.append((seed, trials, options))
+        return run_infomap(net, seed=seed, trials=trials, options=options)
+
+    monkeypatch.setattr(select, "run_infomap", spy)
+    bootstrap_stability(ct, maps, areas, adjacency, n_boot=3, seed=7, trials=2, options=options)
+    assert asked == [(7, 2, options), (8, 2, options), (9, 2, options)]  # in this process, one per draw, each with the same options
+    asked.clear()
+    bootstrap_stability(ct, maps, areas, adjacency, n_boot=2, seed=7, trials=2)
+    assert asked == [(7, 2, InfomapOptions()), (8, 2, InfomapOptions())]  # and by default, the default options
