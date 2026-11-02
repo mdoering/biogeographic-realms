@@ -54,6 +54,7 @@ from realms.review import (
     part_neighbours,
     plot_boundary_change,
     plot_realm,
+    precise,
     realm_neighbours,
     realm_table,
     sub_realm_table,
@@ -210,6 +211,7 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
     log.info(f"check: the resolved modules, floored at {params['floor_km2']:,.0f} km2 and merged, give candidates.parquet at k={sorted(again)} and its {len(sub_of)} sub-realms")
     t = lap("floor check", t)
 
+    no_floor_parts: pl.DataFrame | None = None
     if no_floor:
         frames = _part_rows(no_floor, units, read_light_grid(run_dir), None)
         no_floor_parts = pl.concat(frames).drop("selected")
@@ -230,12 +232,17 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
             .sort(["k", "area_km2"], descending=[False, True])
         )
         no_floor_realms.write_csv(out / "no_floor_realms.csv")
+        # colours carried on from the finest map drawn, so the large realms keep theirs; the rest only differ from their neighbours
+        previous, previous_colours = labels[ks[-1]], colours[ks[-1]]
         for k in sorted(no_floor):
             rows = at(no_floor_parts, k)
             part_labels = dict(rows.select("part", "realm").iter_rows())
+            colours[k] = match_colours(previous, previous_colours, part_labels, areas, realm_neighbours(part_labels, adjacency))
+            previous, previous_colours = part_labels, colours[k]
+            log.info(f"k={k} without the floor, colours: " + ", ".join(f"{r} {c}" for r, c in sorted(colours[k].items())))
             title = f"{args.run}, {args.config}, k = {k} WITHOUT THE SIZE FLOOR (for M4, never used to choose), resolution {resolution}: imputed parts hatched"
             plot_parts(geoms[geoms["part"].isin(list(part_labels))], part_labels, out / f"k{k}-no-floor", title,
-                       imputed=set(rows.filter(pl.col("imputed"))["part"]), adjacency=adjacency)
+                       imputed=set(rows.filter(pl.col("imputed"))["part"]), adjacency=adjacency, colours=colours[k])
             t = lap(f"map k={k} without the floor", t)
 
     # ---- the per-realm tables at the selected k
@@ -252,18 +259,27 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
         log.info(f"realm {r['realm']}: {r['area_km2'] / 1e6:.2f}M km2 ({r['area_share']:.1%}), {r['units']} units, {r['imputed_parts']} of {r['parts']} parts imputed, "
                  f"{r['endemic_species']:,} of {r['species']:,} species endemic, {r['sub_realms']} sub-realms ({r['sub_realm_km2'] / 1e6:.2f}M km2)")
 
+    def sizes_of(part_rows: pl.DataFrame, unit_realm: dict[str, int]) -> dict:
+        """The smallest realm by its parts (imputed included), and the largest realm's share of the map by parts and by units alone."""
+        by_part = part_rows.with_columns(pl.col("part").replace_strict(areas, return_dtype=pl.Float64).alias("km2")).group_by("realm").agg(pl.col("km2").sum())["km2"]
+        by_unit: dict[int, float] = {}
+        for unit, realm in unit_realm.items():
+            by_unit[realm] = by_unit.get(realm, 0.0) + scored.areas[unit]
+        return {"smallest_realm_km2": by_part.min(), "largest_realm_share": by_part.max() / by_part.sum(),
+                "largest_realm_unit_share": max(by_unit.values()) / sum(by_unit.values())}
+
     summary = []
     for k in ks:
         row = at(head["selection"], k).row(0, named=True)
-        sizes = at(head["parts"], k).with_columns(pl.col("part").replace_strict(areas, return_dtype=pl.Float64).alias("km2")).group_by("realm").agg(pl.col("km2").sum())["km2"]
         summary.append({"k": k, "floor": "with the size floor", "realms": len(set(labels[k].values())), "stability": row["stability"], "excess": row["excess"],
-                        "selected": k == k_sel, "smallest_realm_km2": sizes.min(), "largest_realm_share": sizes.max() / sizes.sum()})
-    for k in sorted(no_floor):
-        sizes = at(no_floor_parts, k).with_columns(pl.col("part").replace_strict(areas, return_dtype=pl.Float64).alias("km2")).group_by("realm").agg(pl.col("km2").sum())["km2"]
-        summary.append({"k": k, "floor": "without the size floor", "realms": len(set(no_floor[k].values())), "stability": None, "excess": None,
-                        "selected": False, "smallest_realm_km2": sizes.min(), "largest_realm_share": sizes.max() / sizes.sum()})
+                        "selected": k == k_sel, **sizes_of(at(head["parts"], k), dict(at(head["candidates"], k).select("unit", "realm").iter_rows()))})
+    if no_floor_parts is not None:
+        for k in sorted(no_floor):
+            summary.append({"k": k, "floor": "without the size floor", "realms": len(set(no_floor[k].values())), "stability": None, "excess": None,
+                            "selected": False, **sizes_of(at(no_floor_parts, k), no_floor[k])})
     summary_table = pl.DataFrame(summary, schema={"k": pl.Int64, "floor": pl.String, "realms": pl.Int64, "stability": pl.Float64, "excess": pl.Float64,
-                                                  "selected": pl.Boolean, "smallest_realm_km2": pl.Float64, "largest_realm_share": pl.Float64})
+                                                  "selected": pl.Boolean, "smallest_realm_km2": pl.Float64, "largest_realm_share": pl.Float64,
+                                                  "largest_realm_unit_share": pl.Float64})
     summary_table.write_csv(out / "summary.csv")
 
     # ---- each realm of the selected map, its sub-realms and imputed parts
@@ -271,8 +287,8 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
     above = dict(at(head["candidates"], top).select("unit", "realm").iter_rows())
     for r in realms["realm"].to_list():
         row = realms.filter(pl.col("realm") == r).row(0, named=True)
-        title = (f"Realm {r} of k = {k_sel} ({args.run}, {args.config}): {row['area_km2'] / 1e6:.1f}M km2, {row['units']:,} units, "
-                 f"{row['sub_realms']} sub-realms, {row['imputed_parts']:,} imputed parts")
+        title = (f"Realm {r} of k = {k_sel} ({args.run}, {args.config}): {row['area_km2'] / 1e6:.1f}M km2 of parts, imputed included "
+                 f"({row['unit_km2'] / 1e6:.1f}M km2 of units), {row['units']:,} units, {row['sub_realms']} sub-realms, {row['imputed_parts']:,} imputed parts")
         drawn = plot_realm(geoms, at(head["parts"], k_sel), at(head["candidates"], k_sel), r, colours[k_sel][r], out / f"realm-{r}-k{k_sel}", title, floored=above)
         log.info(f"realm {r} panel: {drawn}")
     t = lap("realm panels", t)
@@ -303,29 +319,37 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
     # ---- the markdown
     shown = realms.with_columns(
         (pl.col("area_km2") / 1e6).alias("area Mkm2"), (pl.col("land_km2") / 1e6).alias("land Mkm2"), (pl.col("sea_km2") / 1e6).alias("sea Mkm2"),
-        (pl.col("area_share") * 100).alias("share %"), (pl.col("sub_realm_km2") / 1e3).alias("sub-realm thousand km2"),
-    ).select("realm", "area Mkm2", "land Mkm2", "sea Mkm2", "share %", "units", "land_units", "sea_units", "parts", "imputed_parts",
-             "species", "endemic_species", "sub_realms", "sub_realm_units", "sub-realm thousand km2")
-    two = {c: ".2f" for c in ("area Mkm2", "land Mkm2", "sea Mkm2")} | {"share %": ".1f", "sub-realm thousand km2": ",.1f"} | {
-        c: "," for c in ("units", "land_units", "sea_units", "parts", "imputed_parts", "species", "endemic_species", "sub_realm_units")
-    }
+        (pl.col("area_share") * 100).alias("share %"), (pl.col("unit_km2") / 1e6).alias("unit Mkm2"), (pl.col("unit_share") * 100).alias("unit share %"),
+        (pl.col("imputed_km2") / 1e6).alias("imputed Mkm2"), (pl.col("sub_realm_km2") / 1e3).alias("sub-realm thousand km2"),
+    ).select("realm", "area Mkm2", "land Mkm2", "sea Mkm2", "share %", "unit Mkm2", "unit share %", "imputed Mkm2", "units", "land_units", "sea_units",
+             "parts", "imputed_parts", "species", "endemic_species", "sub_realms", "sub_realm_units", "sub-realm thousand km2")
+    two = {c: precise(".2f") for c in ("area Mkm2", "land Mkm2", "sea Mkm2", "unit Mkm2", "imputed Mkm2")} | {
+        "share %": ".1f", "unit share %": ".1f", "sub-realm thousand km2": precise(",.1f"),
+    } | {c: "," for c in ("units", "land_units", "sea_units", "parts", "imputed_parts", "species", "endemic_species", "sub_realm_units")}
+    unit_total, part_total, imputed_total = realms["unit_km2"].sum(), realms["area_km2"].sum(), realms["imputed_km2"].sum()
     lines_md = [
         f"## Realms of the selected map, {args.run} {args.config} k = {k_sel} (resolution {resolution})\n",
         f"Area is the sum of the realm's land and sea parts (imputed ones included). Endemic species: at least {args.tolerance:.0%} of the species' units "
         f"in the realm, species columns of the matrix the select stage scored. Sub-realms are modules the {params['floor_km2'] / 1e6:g}M km2 size floor merged into the realm.\n",
         markdown(shown, two),
+        f"\nTwo bases of area: the parts, imputed ones included ({part_total / 1e6:.2f}M km2, `area` and `share`), and the units alone ({unit_total / 1e6:.2f}M km2, "
+        f"`unit` and `unit share`; the largest realm {realms['unit_share'].max():.1%}), which is the basis of the select stage's scores and of the table in DECISIONS "
+        f"(\"Infomap's scale on half A\"). "
+        f"The difference is the imputed parts, {imputed_total / 1e6:.2f}M km2, as a part that is not imputed has its unit's area.\n",
         "\n### Sub-realms, the five largest of each realm\n",
     ]
     largest = subs.group_by("realm", maintain_order=True).head(5).select("realm", "sub_realm", "units", "area_km2")
     counts = subs.group_by("realm").agg(pl.len().alias("n"), pl.col("area_km2").median().alias("median"))
-    lines_md.append(markdown(largest, {"area_km2": ",.1f"}))
+    lines_md.append(markdown(largest, {"area_km2": precise(",.1f")}))
     lines_md.append("\nAll sub-realms, by realm (count, median area in km2): "
-                    + "; ".join(f"realm {r} {n} ({m:,.1f})" for r, n, m in counts.sort("realm").iter_rows()) + f". Every one is in `sub_realms-k{k_sel}.csv`.\n")
+                    + "; ".join(f"realm {r} {n} ({precise(',.1f')(m)})" for r, n, m in counts.sort("realm").iter_rows()) + f". Every one is in `sub_realms-k{k_sel}.csv`.\n")
     lines_md.append("\nOn the maps, the pale globe shows where no part is mapped: parts with no record left after cleaning, which are neither in a unit nor imputed.\n")
     lines_md.append("\n## The maps drawn\n")
-    lines_md.append(markdown(summary_table.with_columns((pl.col("smallest_realm_km2") / 1e3).alias("smallest realm, thousand km2"), (pl.col("largest_realm_share") * 100).alias("largest realm %"))
-                             .select("k", "floor", "realms", "stability", "excess", "selected", "smallest realm, thousand km2", "largest realm %"),
-                             {"stability": ".3f", "excess": ".4f", "smallest realm, thousand km2": ",.1f", "largest realm %": ".1f"}))
+    lines_md.append(markdown(summary_table.with_columns(
+        (pl.col("smallest_realm_km2") / 1e3).alias("smallest realm, thousand km2 of parts"), (pl.col("largest_realm_share") * 100).alias("largest realm, % of parts"),
+        (pl.col("largest_realm_unit_share") * 100).alias("largest realm, % of units"),
+    ).select("k", "floor", "realms", "stability", "excess", "selected", "smallest realm, thousand km2 of parts", "largest realm, % of parts", "largest realm, % of units"),
+        {"stability": ".3f", "excess": ".4f", "smallest realm, thousand km2 of parts": precise(",.1f"), "largest realm, % of parts": ".1f", "largest realm, % of units": ".1f"}))
     lines_md.append(f"\nThe maps without the size floor are `candidates.merge_sequence` on Infomap's {len(set(resolved.values()))} modules (separate pieces resolved), "
                     "with no floor. They were not bootstrapped or scored, are kept for M4's comparison and are never used to choose.\n")
     by_change = here.group_by("change").agg(pl.col("km").sum(), pl.len().alias("edges")).sort("change")

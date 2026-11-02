@@ -16,6 +16,7 @@ from realms.hexmaps import part_geometries
 from realms.maps import HUES
 from realms.matrix import cell_taxa
 from realms.review import (
+    _label,
     distinct_colours,
     edge_changes,
     edge_lines,
@@ -27,6 +28,7 @@ from realms.review import (
     part_neighbours,
     plot_boundary_change,
     plot_realm,
+    precise,
     realm_neighbours,
     realm_table,
     sub_realm_table,
@@ -130,11 +132,15 @@ def test_the_realm_table_adds_up_parts_units_endemics_and_sub_realms():
     rows = {r["realm"]: r for r in table.iter_rows(named=True)}
     assert table["realm"].to_list() == [0, 1]  # largest first
     assert rows[0] | {} == {
-        "realm": 0, "area_km2": 19.0, "land_km2": 19.0, "sea_km2": 0.0, "area_share": pytest.approx(19 / 30), "units": 2, "land_units": 2,
+        "realm": 0, "area_km2": 19.0, "land_km2": 19.0, "sea_km2": 0.0, "area_share": pytest.approx(19 / 30), "unit_km2": 19.0,
+        "unit_share": pytest.approx(19 / 25), "imputed_km2": 0.0, "units": 2, "land_units": 2,
         "sea_units": 0, "parts": 2, "imputed_parts": 0, "species": 10, "endemic_species": 3, "sub_realms": 1, "sub_realm_units": 1, "sub_realm_km2": 15.0,
     }
     assert rows[1]["sea_km2"] == 11.0 and rows[1]["imputed_parts"] == 1 and rows[1]["units"] == 1 and rows[1]["sub_realms"] == 0
     assert rows[1]["sub_realm_km2"] == 0.0
+    # the parts' area is the units' area plus the imputed parts'
+    assert rows[1]["unit_km2"] == 6.0 and rows[1]["imputed_km2"] == 5.0 and rows[1]["area_km2"] == 11.0
+    assert rows[1]["unit_share"] == pytest.approx(6 / 25)
     assert sub_realm_table(candidates, {"u1:land": 4.0, "u2:land": 15.0, "u3:sea": 6.0}).to_dicts() == [
         {"realm": 0, "sub_realm": 40, "units": 1, "area_km2": 15.0}
     ]
@@ -152,6 +158,9 @@ def test_the_realm_table_refuses_parts_and_candidates_that_disagree():
 def test_markdown_formats_columns_and_leaves_nulls_empty():
     table = pl.DataFrame({"k": [6, 7], "x": [0.12345, None], "note": ["a", "b"]})
     assert markdown(table, {"x": ".2f"}) == "| k | x | note |\n|---|---|---|\n| 6 | 0.12 | a |\n| 7 |  | b |\n"
+    # a value that would show as 0 keeps three significant figures, and 0 itself stays 0
+    assert [precise(",.1f")(v) for v in (6571.62, 0.0421, 0.0, 1234567.0, 4.31e-07)] == ["6,571.6", "0.0421", "0.0", "1,234,567.0", "0.000000431"]
+    assert markdown(pl.DataFrame({"a": [0.0421]}), {"a": precise(",.1f")}) == "| a |\n|---|\n| 0.0421 |\n"
 
 
 # ------------------------------------------------------------------------------------------------ without the floor
@@ -220,7 +229,7 @@ def test_the_realm_and_boundary_figures_are_drawn(coastal, tmp_path):
         pl.when(pl.col("unit") == part_id(A, "sea")).then(77).otherwise(None).cast(pl.Int64).alias("sub_realm"), pl.lit(None, dtype=pl.Int64).alias("sub_realm_of")
     )
     drawn = plot_realm(geoms, parts, candidates, 2, HUES[0], tmp_path / "realm", "Realm 2", floored={u: r for u, r in units.select("unit", "realm").iter_rows()})
-    assert drawn == {"realm": 2, "parts": 3, "sub_realms": 1, "imputed": 0, "units_above_floor": [2], "outside_view": 0}
+    assert drawn == {"realm": 2, "parts": 3, "no_area": 0, "sub_realms": 1, "labelled": [77], "imputed": 0, "units_above_floor": [2], "outside_view": 0}
     assert (tmp_path / "realm.png").stat().st_size > 5000
     with pytest.raises(ValueError, match="no parts"):
         plot_realm(geoms, parts, candidates, 5, HUES[0], tmp_path / "none", "Realm 5")
@@ -240,3 +249,26 @@ def test_the_view_holds_most_of_the_area_and_leaves_a_far_speck_out():
     flat = gpd.GeoDataFrame({"part": [str(i) for i in range(len(squares))]}, geometry=squares, crs="EPSG:8857")
     assert view(flat) == (0.0, 0.0, 10.0, 10.0)
     assert view(flat, share=1.0) == (0.0, 0.0, 500.1, 500.1)
+
+
+def test_a_label_that_would_overlap_one_drawn_is_moved_or_left_out():
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+    square = shapely.box(40, 40, 60, 60)
+    placed: list = []
+    drawn = [_label(ax, square, str(n), placed=placed) for n in range(4)]
+    # the second goes below the first, the third above it, and the fourth has nowhere to go
+    assert drawn == [True, True, True, False]
+    assert len(ax.texts) == 3
+    ys = sorted(t.get_position()[1] for t in ax.texts)
+    assert ys[0] < 50 == ys[1] < ys[2]
+    assert not any(a.overlaps(b) for i, a in enumerate(placed) for b in placed[i + 1 :])
+    # a label whose spot is outside the axes is left out, and one reaching over a side is pulled in
+    assert not _label(ax, shapely.box(200, 40, 210, 60), "out", placed=placed)
+    assert _label(ax, shapely.box(99.5, 10, 100, 12), "side", placed=placed)
+    frame = ax.get_window_extent()
+    assert frame.x0 <= placed[-1].x0 and placed[-1].x1 <= frame.x1 and ax.texts[-1].get_position()[0] < 99.75
+    plt.close(fig)

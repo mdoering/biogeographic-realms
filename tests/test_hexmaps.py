@@ -278,3 +278,40 @@ def test_the_repair_of_a_projected_part_drops_its_slivers_and_keeps_small_island
     strip = Polygon([(0, 0), (20_000, 0), (20_000, 20), (10_000, -20), (0, 20)])  # invalid, two thin triangles
     kept = list(shapely.get_parts(_repaired(strip)))
     assert len(kept) == 1 and kept[0].area == pytest.approx(max(p.area for p in shapely.get_parts(shapely.make_valid(strip))))
+
+
+def test_a_part_left_empty_by_the_cut_is_logged(coastal, monkeypatch, caplog):
+    import logging
+
+    import realms.hexmaps as hexmaps
+
+    grid_file, land = coastal
+    target = part_id(A, "sea")
+    real = hexmaps._without_slivers
+    seen = []
+
+    def emptying(shape):
+        seen.append(shape)
+        return shapely.MultiPolygon() if len(seen) == sorted(LABELS).index(target) + 1 else real(shape)
+
+    monkeypatch.setattr(hexmaps, "_without_slivers", emptying)
+    with caplog.at_level(logging.WARNING, logger="realms.hexmaps"):
+        geoms = part_geometries(grid_file, land, list(LABELS))
+    assert dict(zip(geoms["part"], geoms.geometry.is_empty, strict=True))[target]
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == [
+        f"1 parts have area as the grid measures them but none once cut at the antimeridian and rid of slivers, so they are empty on the map: {target}"
+    ]
+
+
+RES7 = ROOT / "data/reference/grids/ISEA3H-7.gpkg"
+
+
+@pytest.mark.skipif(not (RES7.exists() and LAND.exists()), reason="needs data/reference/grids/ISEA3H-7.gpkg and the Natural Earth land")
+def test_the_polar_sea_sliver_at_resolution_7_is_logged(caplog):
+    import logging
+
+    phantom = "7386387456168750000:sea"  # an inland Antarctic cell whose 100.8 km2 of sea is a sliver measured beyond 180 degrees
+    with caplog.at_level(logging.WARNING, logger="realms.hexmaps"):
+        geoms = part_geometries(RES7, LAND, [phantom, "7386387456168750000:land"])
+    assert geoms.geometry.is_empty.tolist() == [False, True]
+    assert any(phantom in r.getMessage() for r in caplog.records)

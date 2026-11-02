@@ -6,7 +6,7 @@ whether it was imputed. The units and their sub-realms are `candidates.parquet` 
 """
 
 from collections import defaultdict
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 
 import geopandas as gpd
@@ -35,11 +35,13 @@ from realms.maps import HUES, SURFACE, TEXT  # noqa: E402
 from realms.matrix import RANKS, CellTaxa  # noqa: E402
 
 OTHER = "#b9b6ad"  # parts of other realms, for context; darker than the globe, which shows where no part is mapped
+MERGE_LINE = "#2b2b29"  # the dashed line between the units above the floor that a realm merges, on the map and in its legend
 MEET_M = 1.0  # metres on the map within which the outlines of two groups of parts are taken to be the line where they meet
 CHANGE_COLOURS = {"kept": "#3d3d3a", "added": "#d6332e", "removed": "#2a78d6"}
 CHANGES = ("kept", "added", "removed")
 REALM_TABLE_SCHEMA = {
     "realm": pl.Int64, "area_km2": pl.Float64, "land_km2": pl.Float64, "sea_km2": pl.Float64, "area_share": pl.Float64,
+    "unit_km2": pl.Float64, "unit_share": pl.Float64, "imputed_km2": pl.Float64,
     "units": pl.Int64, "land_units": pl.Int64, "sea_units": pl.Int64, "parts": pl.Int64, "imputed_parts": pl.Int64,
     "species": pl.Int64, "endemic_species": pl.Int64, "sub_realms": pl.Int64, "sub_realm_units": pl.Int64, "sub_realm_km2": pl.Float64,
 }
@@ -177,8 +179,10 @@ def realm_table(
     unit_areas: Mapping[str, float],
     endemic: Mapping[int, tuple[int, int]],
 ) -> pl.DataFrame:
-    """One row per realm of one k: its area from its parts (`area_km2`, `land_km2`, `sea_km2`, `area_share` of the map), its units (all,
-    land and sea), its parts and imputed parts, its species and endemic species (`endemic_species`), and its sub-realms with their units and area.
+    """One row per realm of one k: its area from its parts, imputed ones included (`area_km2`, `land_km2`, `sea_km2`, `area_share` of the
+    map), the area of its units alone (`unit_km2`, `unit_share`, the basis the select stage and DECISIONS use) and of its imputed parts
+    (`imputed_km2`), its units (all, land and sea), its parts and imputed parts, its species and endemic species (`endemic_species`), and its
+    sub-realms with their units and area.
 
     `parts` is `parts.parquet` and `candidates` `candidates.parquet`, both at that k. Largest realm first.
     """
@@ -200,9 +204,11 @@ def realm_table(
         pl.col("km2").filter(~pl.col("land")).sum().alias("sea_km2"),
         pl.len().cast(pl.Int64).alias("parts"),
         pl.col("imputed").sum().cast(pl.Int64).alias("imputed_parts"),
+        pl.col("km2").filter(pl.col("imputed")).sum().alias("imputed_km2"),
     )
     by_unit = candidates.with_columns(pl.col("unit").str.ends_with(":land").alias("land")).group_by("realm").agg(
         pl.len().cast(pl.Int64).alias("units"),
+        pl.col("unit").replace_strict(dict(unit_areas), return_dtype=pl.Float64).sum().alias("unit_km2"),
         pl.col("land").sum().cast(pl.Int64).alias("land_units"),
         (~pl.col("land")).sum().cast(pl.Int64).alias("sea_units"),
     )
@@ -218,6 +224,7 @@ def realm_table(
         .join(subs, on="realm", how="left")
         .with_columns(
             (pl.col("area_km2") / pl.col("area_km2").sum()).alias("area_share"),
+            (pl.col("unit_km2") / pl.col("unit_km2").sum()).alias("unit_share"),
             pl.col("units", "land_units", "sea_units", "species", "endemic_species", "sub_realms", "sub_realm_units").fill_null(0),
             pl.col("sub_realm_km2").fill_null(0.0),
         )
@@ -225,14 +232,30 @@ def realm_table(
     return table.select(list(REALM_TABLE_SCHEMA)).cast(REALM_TABLE_SCHEMA).sort(["area_km2", "realm"], descending=[True, False])
 
 
-def markdown(table: pl.DataFrame, formats: Mapping[str, str] | None = None) -> str:
-    """A pipe table of `table`, each column formatted with `formats[column]` (a format spec) if given, an empty cell for a null."""
+def precise(spec: str) -> Callable[[float], str]:
+    """`spec` for a number, or three significant figures, written out without an exponent, where `spec` would round a value that is not
+    zero to zero."""
+
+    def text(value: float) -> str:
+        shown = format(value, spec)
+        if value and not any(c in "123456789" for c in shown):
+            return np.format_float_positional(value, precision=3, unique=False, fractional=False, trim="-")
+        return shown
+
+    return text
+
+
+def markdown(table: pl.DataFrame, formats: Mapping[str, str | Callable] | None = None) -> str:
+    """A pipe table of `table`, each column formatted with `formats[column]` (a format spec, or a function of the value) if given, an
+    empty cell for a null."""
     formats = formats or {}
 
     def cell(column: str, value) -> str:
         if value is None:
             return ""
-        return format(value, formats[column]) if column in formats else str(value)
+        if column not in formats:
+            return str(value)
+        return formats[column](value) if callable(formats[column]) else format(value, formats[column])
 
     lines = ["| " + " | ".join(table.columns) + " |", "|" + "|".join("---" for _ in table.columns) + "|"]
     lines += ["| " + " | ".join(cell(c, v) for c, v in zip(table.columns, row, strict=True)) + " |" for row in table.iter_rows()]
@@ -279,11 +302,37 @@ def _to_crs(shape, crs: str):
     return flat if flat.is_valid else _repaired(flat)
 
 
-def _label(ax, shape, text: str, size: float = 9, clip: bool = False) -> None:
+def _label(ax, shape, text: str, size: float = 9, clip: bool = False, placed: list | None = None) -> bool:
+    """The text at the pole of inaccessibility of the shape's largest piece. With `placed` (the boxes of the labels drawn so far, in display
+    space, which the axes' limits must already fix), a label that reaches over a side of the axes is pulled in, one that would overlap a
+    label drawn is moved below or above it, and one that still overlaps, or reaches over the top or bottom, or whose spot is outside the
+    axes, is left out; returns whether it was drawn."""
     biggest = max(shapely.get_parts(shape), key=lambda p: p.area)
     spot = polylabel(biggest, tolerance=max(1.0, biggest.length / 2000))
-    ax.text(spot.x, spot.y, text, ha="center", va="center", fontsize=size, fontweight="bold", color=TEXT, zorder=6, clip_on=clip,
-            path_effects=[withStroke(linewidth=2.5, foreground=SURFACE)])
+    label = ax.text(spot.x, spot.y, text, ha="center", va="center", fontsize=size, fontweight="bold", color=TEXT, zorder=6, clip_on=clip,
+                    path_effects=[withStroke(linewidth=2.5, foreground=SURFACE)])
+    if placed is None:
+        return True
+    ax.apply_aspect()  # an equal aspect moves the axes when drawn, which would move the labels after their boxes were compared
+    renderer = ax.figure.canvas.get_renderer()
+    box = label.get_window_extent(renderer=renderer).expanded(1.1, 1.2)
+    frame = ax.get_window_extent(renderer=renderer)
+    if not frame.contains((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2):
+        label.remove()
+        return False
+    # pulled in from an edge of the axes that it reaches over, then tried where it is, below and above
+    inward = max(0.0, frame.x0 - box.x0) - max(0.0, box.x1 - frame.x1)
+    for shift in (0.0, -1.05 * box.height, 1.05 * box.height):
+        moved = box.translated(inward, shift)
+        inside = frame.x0 <= moved.x0 and moved.x1 <= frame.x1 and frame.y0 <= moved.y0 and moved.y1 <= frame.y1
+        if inside and not any(moved.overlaps(other) for other in placed):
+            if shift or inward:
+                x, y = ax.transData.inverted().transform((moved.x0 + moved.width / 2, moved.y0 + moved.height / 2))
+                label.set_position((x, y))
+            placed.append(moved)
+            return True
+    label.remove()
+    return False
 
 
 def view(flat: gpd.GeoDataFrame, share: float = 0.98) -> tuple[float, float, float, float]:
@@ -330,6 +379,7 @@ def plot_realm(
     frame = geoms[geoms["part"].isin(list(info))].reset_index(drop=True)
     if len(frame) != len(info):
         raise ValueError(f"{len(info) - len(frame)} parts of the map have no geometry")
+    info_count = sum(1 for r, _, _ in info.values() if r == realm)
     frame = frame[~frame.geometry.is_empty].reset_index(drop=True)
     frame["realm"] = [info[p][0] for p in frame["part"]]
     frame["unit"] = [info[p][1] for p in frame["part"]]
@@ -366,8 +416,6 @@ def plot_realm(
     if sub_shapes:
         gpd.GeoSeries(list(sub_shapes.values()), crs=EQUAL_EARTH).boundary.plot(ax=ax, color=TEXT, linewidth=0.35, aspect=None, zorder=4)
     sizes = dict(subs.assign(a=subs.geometry.area).groupby("sub_realm")["a"].sum())
-    for s in sorted(sizes, key=lambda s: (-sizes[s], s))[:label_sub_realms]:
-        _label(ax, sub_shapes[int(s)], str(int(s)), size=7, clip=True)  # a zoomed view can leave a sub-realm outside it
     merged_units = []
     if floored:
         with_unit = mine[mine["unit"].notna()]
@@ -380,27 +428,43 @@ def plot_realm(
                 shapely.intersection(a, shapely.buffer(b, MEET_M))
                 for i, a in enumerate(outlines) for b in outlines[i + 1 :]
             ]
-            gpd.GeoSeries(lines, crs=EQUAL_EARTH).plot(ax=ax, color="#ffffff", linewidth=1.4, linestyle=(0, (3, 2)), aspect=None, zorder=4.5)
+            gpd.GeoSeries(lines, crs=EQUAL_EARTH).plot(ax=ax, color=MERGE_LINE, linewidth=1.4, linestyle=(0, (3, 2)), aspect=None, zorder=4.5)
 
     west, south, east, north = view(mine, share=view_share)
     centres = mine.geometry.representative_point()
     outside = int((~centres.x.between(west, east) | ~centres.y.between(south, north)).sum())
     gw, gs, ge, gn = globe.bounds
     pad_x, pad_y = 0.06 * (east - west) + 2e5, 0.06 * (north - south) + 2e5
-    ax.set_xlim(max(gw, west - pad_x), min(ge, east + pad_x))
-    ax.set_ylim(max(gs, south - pad_y), min(gn, north + pad_y))
+    x0, x1 = max(gw, west - pad_x), min(ge, east + pad_x)
+    y0, y1 = max(gs, south - pad_y), min(gn, north + pad_y)
+    # no flatter than the globe itself, so that a realm along a parallel (or across the antimeridian) is not drawn as a strip
+    flattest = (gn - gs) / (ge - gw)
+    if (y1 - y0) < flattest * (x1 - x0):
+        middle, half = (y0 + y1) / 2, flattest * (x1 - x0) / 2
+        y0, y1 = max(gs, middle - half), min(gn, middle + half)
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_title(title, loc="left", color=TEXT, fontsize=12)
+    placed: list = []
+    labelled = [
+        int(s) for s in sorted(sizes, key=lambda s: (-sizes[s], s))[:label_sub_realms]
+        # clipped: a zoomed view can leave a sub-realm outside it
+        if _label(ax, sub_shapes[int(s)], str(int(s)), size=7, clip=True, placed=placed)
+    ]
+    realm_imputed = sum(1 for r, _, i in info.values() if r == realm and i)
+    no_area = info_count - len(mine)
+    imputed_label = f"imputed parts ({realm_imputed:,}" + (f"; {no_area} with no area on the map" if no_area else "") + ")"
     keys = [
         Patch(facecolor=colour, edgecolor="none", label=f"realm {realm}, units above the floor"),
         Patch(facecolor=tint(colour, 0.55), edgecolor=TEXT, linewidth=0.35, label=f"sub-realms ({len(sub_shapes)}), outlined; the largest numbered"),
-        Patch(facecolor="none", edgecolor="#0b0b0bb0", hatch="//////", label=f"imputed parts ({len(imputed)})"),
+        Patch(facecolor="none", edgecolor="#0b0b0bb0", hatch="//////", label=imputed_label),
         Patch(facecolor=OTHER, edgecolor="none", label="other realms"),
         Patch(facecolor=GLOBE, edgecolor=OUTLINE, linewidth=0.3, label="not in the map (no records)"),
     ]
     if len(merged_units) > 1:
-        keys.append(Line2D([], [], color="#7a7a7a", linewidth=1.4, linestyle=(0, (3, 2)), label=f"between the units above the floor ({', '.join(map(str, merged_units))})"))
+        keys.append(Line2D([], [], color=MERGE_LINE, linewidth=1.4, linestyle=(0, (3, 2)), label=f"between the units above the floor ({', '.join(map(str, merged_units))})"))
     if outside:
         keys.append(Patch(facecolor="none", edgecolor="none", label=f"zoomed to {view_share:.1%} of its area: {outside:,} parts lie outside the view"))
     ax.legend(handles=keys, loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=False, fontsize=8, labelcolor=TEXT)
@@ -408,7 +472,8 @@ def plot_realm(
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out.parent / f"{out.name}.png", dpi=DPI, bbox_inches="tight", facecolor=SURFACE)
     plt.close(fig)
-    return {"realm": realm, "parts": len(mine), "sub_realms": len(sub_shapes), "imputed": len(imputed), "units_above_floor": merged_units, "outside_view": outside}
+    return {"realm": realm, "parts": len(mine), "no_area": no_area, "sub_realms": len(sub_shapes), "labelled": labelled, "imputed": realm_imputed,
+            "units_above_floor": merged_units, "outside_view": outside}
 
 
 def edge_changes(base: pl.DataFrame, other: pl.DataFrame) -> pl.DataFrame:

@@ -6,6 +6,7 @@ antimeridian reaches past 180 degrees in that drawing, so for the map it is cut 
 is already whole to the pole (`_planar` closes it there), so it draws as a cap. The map is Equal Earth (EPSG:8857).
 """
 
+import logging
 from collections import defaultdict
 from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
@@ -27,6 +28,7 @@ from shapely.ops import polylabel  # noqa: E402
 from realms.grid import SNAP, ZERO_KM2, _km2, _land_overlaps, _neighbours, _planar, part_id  # noqa: E402
 from realms.maps import SURFACE, TEXT, _separating_colours  # noqa: E402
 
+log = logging.getLogger(__name__)
 WGS84 = "EPSG:4326"
 EQUAL_EARTH = "EPSG:8857"
 # Degrees. Edges are straight in longitude and latitude, which are curves on the map, so they are cut into short ones before projecting.
@@ -91,7 +93,9 @@ def part_geometries(gpkg: Path, land_zip: Path, parts: Iterable[str]) -> gpd.Geo
     """`part` and `geometry` (EPSG:4326) of the given parts, sorted by id, each a MultiPolygon that no edge of runs round the globe.
 
     A land part is its cell where it meets Natural Earth land and a sea part is the cell without that land. A part with less than
-    `ZERO_KM2` of area, such as the sea part of a cell wholly on land, is empty, and so is any polygon of a part with less than that.
+    `ZERO_KM2` of area, such as the sea part of a cell wholly on land, is empty, and so is any polygon of a part with less than that. A part
+    that has area as drawn around its cell but none once cut at the antimeridian (a sliver measured beyond 180 degrees) is empty too, and
+    logged as a warning.
     """
     wanted = {}
     for part in sorted(set(parts)):
@@ -119,9 +123,14 @@ def part_geometries(gpkg: Path, land_zip: Path, parts: Iterable[str]) -> gpd.Geo
         rows[part_id(cell, "land")] = _part_of(_polygons(land))
         rows[part_id(cell, "sea")] = _part_of(_polygons(shapely.difference(shape, land)))
     chosen = sorted(part for group in wanted.values() for part in group)
-    return gpd.GeoDataFrame(
-        {"part": chosen}, geometry=[_without_slivers(_cut_at_antimeridian(rows[part])) for part in chosen], crs=WGS84
-    )
+    drawn = [_without_slivers(_cut_at_antimeridian(rows[part])) for part in chosen]
+    lost = [part for part, shape in zip(chosen, drawn, strict=True) if shape.is_empty and not rows[part].is_empty]
+    if lost:
+        log.warning(
+            f"{len(lost)} parts have area as the grid measures them but none once cut at the antimeridian and rid of slivers, so they are "
+            f"empty on the map: {', '.join(lost)}"
+        )
+    return gpd.GeoDataFrame({"part": chosen}, geometry=drawn, crs=WGS84)
 
 
 def _realm_neighbours(realm_of: Mapping[str, int], adjacency: Mapping[str, Collection[str]]) -> dict[int, set[int]]:
