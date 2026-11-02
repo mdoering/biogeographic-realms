@@ -444,3 +444,96 @@ def test_the_pipeline_runs_the_stages_up_to_the_one_asked_for_and_skips_the_curr
     # the rules switched off make a run of their own
     other = explore.run_pipeline(plan, UNITS)
     assert other["directory"].name == "native_only-no-detached_satellite-no-thin_long_range-no-under_reported" and not other["clean"]["skipped"]
+
+
+# ------------------------------------------------------------------ duplicate genus and family names merged as a run option
+
+CODES = pl.DataFrame(schema={"country": pl.String, "subdivision": pl.String, "code": pl.String})
+# the hashes of these inputs before the option existed: the default must keep them, so that every run made since stays current
+DEFAULT_CLEAN_HASH = "4a21d1f2381bc75a829816f4c136e453c6bda6c040fcead003b09960b1da0009"
+DEFAULT_SELECT_HASH = "92587114b47877aecdd749bb5dd9bb72b26a2a45b77d8ea082f22fec3ea75e96"
+
+
+def test_merging_duplicate_names_enters_the_hashes_only_when_it_is_on():
+    settings, marker = Settings(wcvp_mode="native_only"), {"rows": 1, "resolution": 7}
+    plain = explore.clean_inputs(settings, explore.LAYERS, CODES, marker, "m")
+    assert "merge_duplicate_names" not in plain and explore.digest(plain) == DEFAULT_CLEAN_HASH
+    assert explore.digest(explore.clean_inputs(settings, explore.LAYERS, CODES, marker, "m", merge_duplicate_names=False)) == DEFAULT_CLEAN_HASH
+    merged = explore.clean_inputs(settings, explore.LAYERS, CODES, marker, "m", merge_duplicate_names=True)
+    assert merged["merge_duplicate_names"] is True and explore.digest(merged) != DEFAULT_CLEAN_HASH
+
+    options = InfomapOptions(markov_time=0.8)
+    assert explore.digest(explore.config_inputs("parent", options, Params(), "select")) == DEFAULT_SELECT_HASH
+    assert explore.digest(explore.config_inputs("parent", options, Params(), "select", merge_duplicate_names=False)) == DEFAULT_SELECT_HASH
+    assert explore.digest(explore.config_inputs("parent", options, Params(), "select", merge_duplicate_names=True)) != DEFAULT_SELECT_HASH
+
+
+def test_a_run_that_merges_duplicate_names_is_named_for_it():
+    assert explore.run_name("native_only", [], merge_duplicate_names=True) == "native_only-merged-names"
+    assert explore.run_name("native_only", ["griis"], merge_duplicate_names=True) == "native_only-no-griis-merged-names"
+    assert explore.run_name("native_only", ["griis"], merge_duplicate_names=False) == "native_only-no-griis"
+
+
+def named(world: World) -> World:
+    """The world, with the names of each species' genus, family, order and kingdom: genus ids G<r>-0 and G<r>-1 of each realm share one name in one family, and
+    so do G<r>-2 and G<r>-3, which merging takes for duplicates."""
+    taxa = world.refs.taxa.with_columns(
+        pl.col("genus_id").str.replace(r"-(\d+)$", "").alias("_stem"),
+        (pl.col("genus_id").str.extract(r"-(\d+)$").cast(pl.Int64) // 2).cast(pl.String).alias("_pair"),
+    ).with_columns(
+        (pl.lit("Genus") + pl.col("_stem") + pl.lit("-") + pl.col("_pair")).alias("genus"),
+        (pl.lit("Family") + pl.col("family_id")).alias("family"),
+        pl.lit("Coleoptera").alias("order"),
+    ).drop("_stem", "_pair")
+    return replace(world, refs=replace(world.refs, taxa=taxa))
+
+
+def patch_loaders(monkeypatch, world: World) -> None:
+    monkeypatch.setattr(explore, "load_country_counts", lambda out_dir, split, half, **kw: world.counts)
+    monkeypatch.setattr(explore, "resolution_of", lambda path, stated=None: 7)
+    monkeypatch.setattr(explore, "read_complete", lambda path: world.marker)
+    monkeypatch.setattr(explore, "frozen_list_codes", lambda resolution, directory: world.list_codes)
+    monkeypatch.setattr(explore, "load_grid", lambda gpkg, land: world.coarse if "ISEA3H-5" in str(gpkg) else world.grid)
+    monkeypatch.setattr(explore, "_manifest_path", lambda reference, item: world.coarse_gpkg if item.endswith("5") else Path(f"{item}.gpkg"))
+    monkeypatch.setattr(explore, "part_regions", lambda grid, path: world.regions)
+    monkeypatch.setattr(explore, "load_references", lambda grid, directory: world.refs)
+    monkeypatch.setattr(explore, "load_split", lambda path: pl.DataFrame({"species_id": ["x"], "half": ["A"]}))
+    monkeypatch.setattr(explore, "load_configs", lambda path: ({"default": InfomapOptions()}, FAST))
+
+
+def test_merge_duplicate_names_reaches_the_matrix_and_makes_a_run_of_its_own(world, tmp_path, monkeypatch):
+    world = named(world)
+    patch_loaders(monkeypatch, world)
+    asked = []
+    real = explore.cell_taxa
+    monkeypatch.setattr(explore, "cell_taxa", lambda presence, taxa, *args, **kw: asked.append(kw.get("merge_duplicate_names", False)) or real(presence, taxa, *args, **kw))
+    plan = explore.Plan(
+        counts=tmp_path / "counts", reference=tmp_path / "reference", split=tmp_path / "split", frozen_dir=tmp_path / "frozen", results=tmp_path / "results",
+        configs=tmp_path / "configs.toml", mode="native_only", rules_off=tuple(LAYER_5), stage="select", isolate=False,
+    )
+    plain = explore.run_pipeline(plan, UNITS)
+    assert asked == [False]  # the screen and the select of a run share one matrix
+    merged = explore.run_pipeline(replace(plan, merge_duplicate_names=True), UNITS)
+    assert asked == [False, True]
+    assert merged["directory"].name == plain["directory"].name + "-merged-names"
+    for stage in ("clean", "units"):
+        assert not merged[stage]["skipped"] and merged[stage]["hash"] != plain[stage]["hash"]
+    for stage in ("screen", "select"):
+        assert not merged["default"][stage]["skipped"] and merged["default"][stage]["hash"] != plain["default"][stage]["hash"]
+    stamp = explore.read_stamp(merged["directory"] / "default", "stage-select")["inputs"]
+    assert stamp["merge_duplicate_names"] is True and "merge_duplicate_names" not in explore.read_stamp(plain["directory"] / "default", "stage-select")["inputs"]
+
+    # the cleaned taxa carry the names that merging needs only in the run that merges, and the presence is the same
+    assert pl.read_parquet(plain["directory"] / "cleaned" / "taxa.parquet").columns == ["species_id", "genus_id", "family_id"]
+    names = pl.read_parquet(merged["directory"] / "cleaned" / "taxa.parquet")
+    assert {"kingdom", "order", "family", "genus"} <= set(names.columns)
+    assert pl.read_parquet(merged["directory"] / "cleaned" / "presence.parquet").equals(pl.read_parquet(plain["directory"] / "cleaned" / "presence.parquet"))
+    genera = {d: sum(t.startswith("genus:") for t in explore.network_matrix(d, merge_duplicate_names=m).taxa) for d, m in ((plain["directory"], False), (merged["directory"], True))}
+    assert genera[merged["directory"]] < genera[plain["directory"]]
+    # a matrix that merges needs the names, and says so
+    with pytest.raises(ValueError, match="--merge-duplicate-names"):
+        explore.network_matrix(plain["directory"], merge_duplicate_names=True)
+
+    # the run on ids is untouched: run again, every stage is current
+    again = explore.run_pipeline(plan, UNITS)
+    assert again["clean"]["skipped"] and again["units"]["skipped"] and again["default"] == {"screen": {"skipped": True}, "select": {"skipped": True}}

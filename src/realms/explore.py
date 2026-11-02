@@ -1,10 +1,11 @@
 """The exploration pipeline: cleaned counts to network units, to Infomap, to candidate maps, to a screen, to a selected map. Every stage is cached.
 
-A run is one WCVP mode and the cleaning rules switched off, at the resolution of the counts: `<results>/res<r>/<run>/`.
+A run is one WCVP mode and the cleaning rules switched off, at the resolution of the counts: `<results>/res<r>/<run>/`. A run may also merge duplicate genus and family
+names (`matrix.duplicate_names`) in the cell-taxon matrix: it is a run of its own, named with `-merged-names`, whose cleaned taxa carry the names that merging needs.
 
 - `cleaned/`: `clean` on half A's counts (`presence.parquet`, `summary.csv` and `summary_by_group.csv`, the removals by layer and rule), and what the later
   stages need of the references, so that they never load them: `major.parquet` (the major group of each species, computed once here) and `taxa.parquet`
-  (genus and family ids).
+  (genus and family ids, and in a run that merges duplicate names also `kingdom`, `order`, `family` and `genus`).
 - `units/`: `network_units` (`members`, `presence`, `areas`, `adjacency`, `excluded` and `stats`), `removed_by_region.csv`, and `cells.parquet`, the centres
   and areas of the fine grid, which is all that imputing the excluded parts needs.
 - `<configuration>/`: Infomap with the options of one named configuration, then `candidate_maps`.
@@ -21,7 +22,8 @@ left out (`Units.excluded`) are in none of them. They get their realm from `unit
 **Caching.** A stage has a stamp (`stage.json`, `stage-screen.json`, `stage-select.json`) holding the hash of its inputs, and it is skipped when its outputs exist with
 the same hash. The hash of cleaning is that of the cleaning settings, the layers, the mode and the rules switched off (all in `Settings`), the frozen GRIIS code table,
 the `_COMPLETE` marker of the counts and the manifest of the references. Each later stage hashes the stage before it with its own settings (the unit settings, then the
-configuration and the parameters), so a change anywhere reruns what follows it.
+configuration and the parameters), so a change anywhere reruns what follows it. Merging duplicate names enters the hash of cleaning and of each configuration as
+`merge_duplicate_names` only when it is on, so that the hashes of the runs on ids are what they were before the option existed.
 
 **Units that Infomap puts in no module** (a unit with no link) leave the scores: `assigned_only` takes them out of the matrix, areas and adjacency that `candidate_maps`, the bootstrap and the null maps are given, so
 the scored cells are the mapped ones. `structure.json` lists them (`unassigned`, `unassigned_units`, and a `warning` above 1% of the units), and `parts.parquet` imputes them as it does the excluded parts.
@@ -76,6 +78,8 @@ STAGES = ("clean", "units", "screen", "select")
 CLEANED, UNITS = "cleaned", "units"
 CLEAN_FILES = ("presence.parquet", "summary.csv", "summary_by_group.csv", "major.parquet", "taxa.parquet")
 UNIT_FILES = ("members.parquet", "presence.parquet", "areas.parquet", "adjacency.parquet", "excluded.parquet", "stats.parquet", "removed_by_region.csv", "cells.parquet")
+NAME_COLUMNS = ("kingdom", "order", "family", "genus")  # what `matrix.duplicate_names` needs of the taxa
+MERGED_SUFFIX = "merged-names"
 MAP_FILES = ("partition.parquet", "structure.json", "candidates.parquet", "parts.parquet")
 SCREEN_FILES = (*MAP_FILES, "screen.csv")
 SELECT_FILES = (*MAP_FILES, "selection.csv", "selected.json")
@@ -123,14 +127,15 @@ def load_configs(path: Path) -> tuple[dict[str, InfomapOptions], Params]:
     return configs, Params(**screen)
 
 
-def run_name(mode: str, rules_off: Iterable[str] = ()) -> str:
-    """`native_only`, or `native_only-no-griis` with the rules switched off in sorted order: the directory of a run."""
+def run_name(mode: str, rules_off: Iterable[str] = (), merge_duplicate_names: bool = False) -> str:
+    """`native_only`, or `native_only-no-griis` with the rules switched off in sorted order, and `-merged-names` after them for a run that merges duplicate
+    genus and family names: the directory of a run."""
     if mode not in WCVP_MODES:
         raise ValueError(f"the WCVP mode is one of {WCVP_MODES}, not {mode!r}")
     unknown = sorted(set(rules_off) - set(SWITCHABLE))
     if unknown:
         raise ValueError(f"rules to switch off are of {SWITCHABLE}, not {unknown}")
-    return "-".join([mode, *(f"no-{rule}" for rule in sorted(set(rules_off)))])
+    return "-".join([mode, *(f"no-{rule}" for rule in sorted(set(rules_off))), *([MERGED_SUFFIX] if merge_duplicate_names else [])])
 
 
 def peak_gb() -> float:
@@ -170,16 +175,19 @@ def write_stamp(directory: Path, name: str, hash_: str, inputs: dict, log_entry:
     (Path(directory) / f"{name}.json").write_text(json.dumps(stamp, indent=2, default=str) + "\n")
 
 
-def clean_inputs(settings: Settings, layers: Iterable[int], list_codes: pl.DataFrame, marker: dict, manifest: str | None = None) -> dict:
+def clean_inputs(
+    settings: Settings, layers: Iterable[int], list_codes: pl.DataFrame, marker: dict, manifest: str | None = None, merge_duplicate_names: bool = False
+) -> dict:
     """What the cleaning stage's hash is of: the settings (the mode and the rules switched off are in them), the layers, the content of the frozen code table, the
-    counts' `_COMPLETE` marker and the references' manifest (as a digest)."""
-    return {
+    counts' `_COMPLETE` marker and the references' manifest (as a digest). `merge_duplicate_names` is in it only when it is on, as the taxa then carry names."""
+    inputs = {
         "settings": asdict(settings) | {"rules_off": sorted(settings.rules_off)},
         "layers": sorted(layers),
         "list_codes": digest(list_codes.sort(list_codes.columns).rows()),
         "counts": marker,
         "manifest": manifest,
     }
+    return inputs | ({"merge_duplicate_names": True} if merge_duplicate_names else {})
 
 
 def _elapsed(started: float) -> dict:
@@ -192,7 +200,10 @@ def _elapsed(started: float) -> dict:
 def clean_stage(
     out: Path, counts: pl.DataFrame, refs, grid: Grid, settings: Settings, layers: Iterable[int], list_codes: pl.DataFrame, inputs: dict, *, force: bool = False
 ) -> dict:
-    """`clean` on the counts, and the parts of the references that the later stages use, into `<out>/cleaned/`. Skipped if the hash of `inputs` is the stamp's."""
+    """`clean` on the counts, and the parts of the references that the later stages use, into `<out>/cleaned/`. Skipped if the hash of `inputs` is the stamp's.
+
+    When `inputs` merge duplicate names (`clean_inputs`), the taxa keep the `NAME_COLUMNS` as well, which `matrix.duplicate_names` needs.
+    """
     directory = Path(out) / CLEANED
     hash_ = digest(inputs)
     if not force and is_current(directory, "stage", hash_, CLEAN_FILES):
@@ -203,7 +214,8 @@ def clean_stage(
     cleaned = clean(counts, refs, grid, frozenset(layers), settings, list_codes)
     species = cleaned.presence.select("species_id").unique()
     major = major_groups(refs.taxa, refs.groups).join(species, on="species_id", how="semi").sort("species_id")
-    taxa = refs.taxa.select("species_id", "genus_id", "family_id").join(species, on="species_id", how="semi").sort("species_id")
+    kept = ("species_id", "genus_id", "family_id", *(NAME_COLUMNS if inputs.get("merge_duplicate_names") else ()))
+    taxa = refs.taxa.select(*kept).join(species, on="species_id", how="semi").sort("species_id")
     cleaned.presence.write_parquet(directory / "presence.parquet")
     removal_summary(cleaned, refs, by=()).write_csv(directory / "summary.csv")
     removal_summary(cleaned, refs, by=("tax_group",)).write_csv(directory / "summary_by_group.csv")
@@ -303,11 +315,18 @@ def read_light_grid(out: Path) -> Grid:
     return Grid(0, cells, {c: set() for c in cells["cell"]})
 
 
-def network_matrix(out: Path, units: Units | None = None) -> CellTaxa:
-    """The cell-taxon matrix of the units of the network (they are its cells), with the genus and family of each species from the cleaned stage."""
+def network_matrix(out: Path, units: Units | None = None, merge_duplicate_names: bool = False) -> CellTaxa:
+    """The cell-taxon matrix of the units of the network (they are its cells), with the genus and family of each species from the cleaned stage.
+
+    With `merge_duplicate_names`, the ids of a duplicate genus or family name are one column (`matrix.cell_taxa`), which needs the names that only the cleaning of
+    a run that merges keeps.
+    """
     units = units or read_units(out)
     taxa = pl.read_parquet(Path(out) / CLEANED / "taxa.parquet")
-    return cell_taxa(units.presence.select(pl.col("unit").alias("cell"), "species_id"), taxa)
+    missing = [c for c in NAME_COLUMNS if c not in taxa.columns]
+    if merge_duplicate_names and missing:
+        raise ValueError(f"{Path(out) / CLEANED / 'taxa.parquet'} has no {missing}, which merging duplicate names needs: clean with --merge-duplicate-names")
+    return cell_taxa(units.presence.select(pl.col("unit").alias("cell"), "species_id"), taxa, merge_duplicate_names=merge_duplicate_names)
 
 
 def labelled_units(units: Units, labelled: set[str]) -> Units:
@@ -568,19 +587,23 @@ def _table_rows(table: dict[int, float], name: str) -> pl.DataFrame:
     return pl.DataFrame({"k": list(table), name: list(table.values())}, schema={"k": pl.Int64, name: pl.Float64}).sort("k")
 
 
-def config_inputs(parent: str, options: InfomapOptions, params: Params, stage: str) -> dict:
-    """What a configuration's stamp is a hash of: the units stage, the options, the parameters and which stage it is."""
-    return {"units": parent, "options": asdict(options), "params": asdict(params), "stage": stage}
+def config_inputs(parent: str, options: InfomapOptions, params: Params, stage: str, merge_duplicate_names: bool = False) -> dict:
+    """What a configuration's stamp is a hash of: the units stage, the options, the parameters and which stage it is, and `merge_duplicate_names` only when it
+    is on, as the matrix then merges them."""
+    inputs = {"units": parent, "options": asdict(options), "params": asdict(params), "stage": stage}
+    return inputs | ({"merge_duplicate_names": True} if merge_duplicate_names else {})
 
 
 def screen_stage(
-    out: Path, name: str, units: Units, ct: CellTaxa, grid: Grid, options: InfomapOptions, params: Params, parent: str, *, workers: int = 1, force: bool = False
+    out: Path, name: str, units: Units, ct: CellTaxa, grid: Grid, options: InfomapOptions, params: Params, parent: str, *, workers: int = 1, force: bool = False,
+    merge_duplicate_names: bool = False,
 ) -> dict:
     """Infomap with `trials_screen` trials, `candidate_maps`, and the endemism excess of every k over `n_null_screen` null maps, into `<out>/<name>/`.
 
-    `parent` is the hash of the units stage. A degenerate clustering is written to `structure.json` and never raised.
+    `parent` is the hash of the units stage, and `merge_duplicate_names` says that `ct` merges them (`network_matrix`). A degenerate clustering is written to
+    `structure.json` and never raised.
     """
-    inputs = config_inputs(parent, options, params, "screen")
+    inputs = config_inputs(parent, options, params, "screen", merge_duplicate_names)
     hash_ = digest(inputs)
     directory = Path(out) / name
     if not force and is_current(directory, "stage-screen", hash_, SCREEN_FILES):
@@ -610,13 +633,15 @@ def screen_stage(
 
 
 def select_stage(
-    out: Path, name: str, units: Units, ct: CellTaxa, grid: Grid, options: InfomapOptions, params: Params, parent: str, *, workers: int = 1, force: bool = False
+    out: Path, name: str, units: Units, ct: CellTaxa, grid: Grid, options: InfomapOptions, params: Params, parent: str, *, workers: int = 1, force: bool = False,
+    merge_duplicate_names: bool = False,
 ) -> dict:
     """Infomap with `trials_select` trials, `candidate_maps`, `bootstrap_stability`, `excess_table` over `n_null_select` null maps, and `select_level`, into `<out>/<name>/`.
 
-    `parent` is the hash of the units stage. A degenerate clustering is written to `structure.json` and `selected.json` and never raised.
+    `parent` is the hash of the units stage, and `merge_duplicate_names` says that `ct` merges them (`network_matrix`). A degenerate clustering is written to
+    `structure.json` and `selected.json` and never raised.
     """
-    inputs = config_inputs(parent, options, params, "select")
+    inputs = config_inputs(parent, options, params, "select", merge_duplicate_names)
     hash_ = digest(inputs)
     directory = Path(out) / name
     if not force and is_current(directory, "stage-select", hash_, SELECT_FILES):
@@ -749,6 +774,7 @@ class Plan:
     workers: int = 1
     force: bool = False
     isolate: bool = True  # clean and units each in a child process of their own, so that the parent never holds their peak and each has one to report
+    merge_duplicate_names: bool = False  # a run of its own: `matrix.cell_taxa` merges the ids of a duplicate genus or family name
 
 
 def run_pipeline(plan: Plan, unit_settings: UnitSettings = UnitSettings()) -> dict:
@@ -767,10 +793,11 @@ def run_pipeline(plan: Plan, unit_settings: UnitSettings = UnitSettings()) -> di
         raise ValueError(f"--only names {missing}, and {plan.configs} has {sorted(configs)}")
     names = list(plan.only) or list(configs)
     settings = Settings(wcvp_mode=plan.mode, rules_off=frozenset(plan.rules_off))
-    out = Path(plan.results) / f"res{resolution}" / run_name(plan.mode, plan.rules_off)
+    merge = plan.merge_duplicate_names
+    out = Path(plan.results) / f"res{resolution}" / run_name(plan.mode, plan.rules_off, merge)
     out.mkdir(parents=True, exist_ok=True)
     manifest = plan.reference / "manifest.json"
-    inputs = clean_inputs(settings, LAYERS, list_codes, marker, hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.exists() else None)
+    inputs = clean_inputs(settings, LAYERS, list_codes, marker, hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.exists() else None, merge)
     wanted = STAGES.index(plan.stage)
     force = {stage: plan.force and stage == plan.stage for stage in STAGES}
     call = in_child if plan.isolate else (lambda function, spec: (function(spec), peak_gb()))
@@ -796,18 +823,22 @@ def run_pipeline(plan: Plan, unit_settings: UnitSettings = UnitSettings()) -> di
         files = {"screen": SCREEN_FILES, "select": SELECT_FILES}
 
         def current(name: str, stage: str) -> bool:
-            return is_current(out / name, f"stage-{stage}", digest(config_inputs(parent, configs[name], params, stage)), files[stage])
+            return is_current(out / name, f"stage-{stage}", digest(config_inputs(parent, configs[name], params, stage, merge)), files[stage])
 
         needed = [n for n in names if plan.force or not all(current(n, stage) for stage in stages)]
         units = read_units(out)
         grid = read_light_grid(out)
-        ct = network_matrix(out, units) if needed else None
+        ct = network_matrix(out, units, merge) if needed else None
         for name in names:
             done[name] = {}
             if name not in needed:
                 done[name] = {stage: {"skipped": True} for stage in stages}
                 continue
-            done[name]["screen"] = screen_stage(out, name, units, ct, grid, configs[name], params, parent, workers=plan.workers, force=force["screen"])
+            done[name]["screen"] = screen_stage(
+                out, name, units, ct, grid, configs[name], params, parent, workers=plan.workers, force=force["screen"], merge_duplicate_names=merge
+            )
             if wanted >= 3:
-                done[name]["select"] = select_stage(out, name, units, ct, grid, configs[name], params, parent, workers=plan.workers, force=force["select"])
+                done[name]["select"] = select_stage(
+                    out, name, units, ct, grid, configs[name], params, parent, workers=plan.workers, force=force["select"], merge_duplicate_names=merge
+                )
     return done

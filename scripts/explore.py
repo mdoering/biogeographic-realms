@@ -3,7 +3,8 @@
 `uv run python -I scripts/explore.py --counts data/gbif/<key> --wcvp-mode native_only --configs explore/configs.toml --stage units --workers 4`
 
 The stages run in order up to `--stage`, and a stage whose outputs are there with the same input hash is skipped (`--force` reruns the stage given). The outputs are
-`results/explore/res<r>/<run>/`, where `<run>` is the mode and the rules switched off, such as `native_only` or `native_only-no-griis`; `realms.explore` describes the files.
+`results/explore/res<r>/<run>/`, where `<run>` is the mode and the rules switched off, such as `native_only` or `native_only-no-griis`, with `-merged-names` after them
+under `--merge-duplicate-names`; `realms.explore` describes the files.
 
 - `clean`: layers 1 to 5 of `realms.clean` on half A's counts, the references' major groups and taxa. Loads the references and needs about 16 GB at the peak.
 - `units`: the network units (coarse units for sparse parts, the composition gate, the parts left out) and where the left-out parts are.
@@ -45,6 +46,10 @@ def main() -> None:
     parser.add_argument("--reference", type=Path, default=Path("data/reference"), help="default data/reference")
     parser.add_argument("--split", type=Path, default=Path("data/split/halves-315557.parquet"))
     parser.add_argument("--in-process", action="store_true", help="run cleaning and the units in this process, not in children (their peaks are then this process's)")
+    parser.add_argument(
+        "--merge-duplicate-names", action="store_true",
+        help="merge the ids of a duplicate genus or family name in the matrix (matrix.duplicate_names): a run of its own, <run>-merged-names",
+    )
     args = parser.parse_args()
     if args.workers < 1:
         raise SystemExit("FAILED --workers is at least 1")
@@ -56,6 +61,7 @@ def main() -> None:
     plan = Plan(
         counts=args.counts, reference=args.reference, split=args.split, frozen_dir=FROZEN_DIR, results=args.results, configs=args.configs, mode=args.wcvp_mode,
         rules_off=tuple(args.rules_off), stage=args.stage, only=tuple(args.only), workers=args.workers, force=args.force, isolate=not args.in_process,
+        merge_duplicate_names=args.merge_duplicate_names,
     )
     try:
         done = run_pipeline(plan)
