@@ -219,3 +219,32 @@ def part_adjacency(grid: Grid, present: Iterable[str]) -> dict[str, set[str]]:
         candidates = [part_id(cell, "sea" if kind == "land" else "land")] + [part_id(other, kind) for other in grid.adjacency[cell]]
         near[part].update(c for c in candidates if c in names)
     return near
+
+
+def locate(lon: np.ndarray, lat: np.ndarray, shapes: np.ndarray) -> np.ndarray:
+    """The index in `shapes` of the polygon that holds each point, or of the nearest one for a point that none holds.
+
+    The shapes are drawn as `load_grid` draws cells, in the 360 degrees around their own centre, so one that straddles the antimeridian
+    may lie 360 degrees from a point that is in it: each point is tried a turn of longitude to either side as well. A point on the edge
+    between shapes, or at a vertex shared by three, goes to the one with the lowest index, so sort the shapes by the key that settles
+    such a point. Where no shape holds a point the nearest is found in degrees, which is only meant for points a hair outside, or on a
+    coastline that another scheme draws elsewhere.
+    """
+    lon, lat = np.asarray(lon, dtype=float), np.asarray(lat, dtype=float)
+    if not len(shapes):
+        raise ValueError("there are no shapes to place a point in")
+    shapely.prepare(shapes)
+    tree = STRtree(shapes)
+    found = np.full(len(lon), len(shapes), dtype=np.int64)
+    for degrees in (-360.0, 0.0, 360.0):
+        i, j = tree.query(shapely.points(lon + degrees, lat), predicate="intersects")
+        np.minimum.at(found, i, j)
+    lost = np.flatnonzero(found == len(shapes))
+    if len(lost):
+        best = np.full(len(lost), np.inf)
+        for degrees in (-360.0, 0.0, 360.0):
+            (i, j), distance = tree.query_nearest(shapely.points(lon[lost] + degrees, lat[lost]), return_distance=True, all_matches=False)
+            closer = distance < best[i]
+            found[lost[i[closer]]] = j[closer]
+            best[i[closer]] = distance[closer]
+    return found
