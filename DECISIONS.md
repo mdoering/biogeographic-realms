@@ -2110,7 +2110,9 @@ A unit with no link (every species it holds is not accepted) is a row of the cel
 
 ### Infomap's scale on half A at resolution 7 (2026-11-02)
 
-**Chosen: `mt080` (Markov time 0.80, everything else Infomap's defaults) at k=7**, stability 0.806, excess 0.157, on `native_only` at resolution 7 (release 315557). It is the only one of the ten configurations with an eligible map. Half A only, on the 11,292 network units; nothing from B, and nothing compared with an existing scheme. Tasks 10 and 11 use `mt080`.
+**Chosen: `mt080` (Markov time 0.80, everything else Infomap's defaults) at k=7**, stability 0.806, excess 0.1568, on `native_only` at resolution 7 (release 315557). Seven distinct non-degenerate configurations were bootstrapped at 10 trials, and `mt080` is the only one with a map at or above stability 0.8 (k=7, 9 and 10). Half A only, on the 11,292 network units; nothing from B. Tasks 10 and 11 use `mt080`.
+
+**The 0.8 bar decides this, not excess.** Excess is flat: the maps of the six configurations other than `regularized` run from 0.125 to 0.188 in excess, `regularized` from 0.157 to 0.210, and the three stable `mt080` maps sit at 0.1535 to 0.1580. Many unstable maps beat them (for example `mt075` k=5 at 0.1875 and `regularized` k=11 at 0.2102). Stability is what separates `mt080` from the rest, and it clears the bar by 0.006 at k=7 (0.806), with k=8 at 0.793 just under it. See the caveats.
 
 **Screen** (3 trials, 19 null maps; `results/explore/res7/native_only/<config>/screen.csv`). Ten configurations: Markov time 1.0 (`default`) down to 0.75, and at 1.0 `variable_markov_time`, `regularized`, `entropy_corrected` and `recurse_share=0.5`. Units above the floor = the top of the k range.
 
@@ -2127,11 +2129,23 @@ A unit with no link (every species it holds is not accepted) is a row of the cel
 | entropy | 15 | 3 | 34.6% / 52.0% | 6 | 2 (5-6) | 0.1442 (5) |
 | recurse50 | 15 | 3 | 34.6% / 52.0% | 6 | 2 (5-6) | 0.1442 (5) |
 
-No unit was unassigned in any configuration. The structure: from 1.0 to 0.85 the map is one module of 52-57% of the area, a few large ones and dust, and only 0.80 and 0.75 break the giant module up; `regularized` has no giant module but 68.8% of its area in single-unit top modules; `variable` is one module. `default`, `entropy` and `recurse50` give the **same partition** (V-measure 1.0000, labels identical, top and leaf): `recurse50` never fires because the largest module holds 34.6% of the cells, under 50%, and `entropy_corrected` changes nothing on this network (not investigated further). The other pairs are all under 0.91 (mt095-mt090 0.904, mt090-mt085 0.905, mt080-mt075 0.803).
+No unit was unassigned in any configuration. The structure: from 1.0 to 0.85 the map is one module of 52-57% of the area, a few large ones and dust, and only 0.80 and 0.75 break the giant module up; `regularized` has no giant module but 68.7% of its area in single-unit top modules; `variable` is one module. `default`, `entropy` and `recurse50` give the **same partition** (V-measure 1.0000, labels identical, top and leaf): `recurse50` never fires because the largest module holds 34.6% of the cells, under 50%, and `entropy_corrected` changes nothing on this network (not investigated further). Of the other pairs on the screen partitions the closest are mt095-mt090 0.904, mt090-mt085 0.905 and mt080-mt075 0.803. So ten configurations give eight distinct partitions, and `variable` is degenerate: seven could be bootstrapped.
 
-**Shortlist (ruling R3).** Non-degenerate configurations ranked by their best screening excess over all k, ties by the smaller largest module, at most three, a copy of a listed partition skipped: `regularized` 0.2141 (k=10), `mt075` 0.1889 (k=5), `mt080` 0.1886 (k=5). `mt075` and `mt080` are 0.0003 apart, so their order is the tie-break (largest module 24.5% against 30.6% of units, 20.9% against 29.3% of the area); both were selected anyway. The next was `mt085` at 0.1660. `entropy` and `recurse50` were skipped as copies of `default`, which ranked sixth. No pair among the three is above V=0.80.
+**Shortlist (ruling R3), and why selection was widened.** R3 ranks non-degenerate configurations by their best screening excess over all k, orders ties by the smaller largest module, takes at most three and skips a copy of a listed partition: `regularized` 0.2141 (k=10), `mt075` 0.1889 (k=5), `mt080` 0.1886 (k=5). `mt075` and `mt080` are 0.0003 apart, so R3's smaller-largest-module clause orders them (24.5% against 30.6% of units, 20.9% against 29.3% of the area). The next was `mt085` at 0.1660. `entropy` and `recurse50` were skipped as copies of `default`, which ranked sixth. That shortlist rested on 3-trial partitions, and they did not all hold at 10 trials: `mt080` went from 1,118 modules with the largest at 29.3% of the area to 853 modules with the largest at 55.8% (816 single-unit modules, 37.5% of units), `mt095` from 21 to 47 modules and `mt090` from 109 to 122, while `default` (15), `mt085` (454), `mt075` (2,526) and `regularized` (8,261) did not change. The 10-trial `mt080` partition is close to `mt085`'s (V 0.881) and `mt090`'s (V 0.806; the review had 0.817), and further from `mt095` (0.797), `default` (0.684), `mt075` (0.658) and `regularized` (0.495), so the screen's order, and "mt080 breaks the giant module up", could not be trusted. A select costs 14 to 19 minutes, not the ~3 hours the plan assumed for "at most 3", so selection was run for `default`, `mt095`, `mt090` and `mt085` as well, which covers every distinct non-degenerate configuration. R3's shortlist stays on record as the screen ranking.
 
-**Select** (10 trials, 20 bootstraps of 3 trials, 99 null maps; `selection.csv`). Stability is the median bootstrap V-measure; "scr" is the screening excess at the same k. Eligible means stability at least 0.8.
+**Select** (10 trials, 20 bootstraps of 3 trials, 99 null maps; `selection.csv`). Stability is the median bootstrap V-measure; "scr" is the screening excess at the same k. Eligible means stability at least 0.8. The seven configurations, with their most stable map:
+
+| config | maps (k) | most stable k | stability | excess | `fell_short` |
+|---|---|---|---|---|---|
+| default | 2 (5-6) | 6 | 0.674 | 0.1253 | yes |
+| mt095 | 4 (5-8) | 8 | 0.759 | 0.1611 | yes |
+| mt090 | 3 (5-7) | 6 | 0.770 | 0.1451 | yes |
+| mt085 | 4 (5-8) | 8 | 0.730 | 0.1596 | yes |
+| **mt080** | 6 (5-10) | 9 (7, 9, 10 are at or above 0.8) | 0.814 | 0.1535 | **no, k=7 chosen** |
+| mt075 | 8 (5-12) | 12 | 0.723 | 0.1749 | yes |
+| regularized | 14 (5-18) | 10 | 0.682 | 0.2068 | yes |
+
+The three of the shortlist at every k:
 
 | config | k | stability | excess | scr |
 |---|---|---|---|---|
@@ -2143,36 +2157,36 @@ No unit was unassigned in any configuration. The structure: from 1.0 to 0.85 the
 | mt080 | 5 / 6 | 0.763 / 0.738 | 0.1722 / 0.1739 | 0.1886 / 0.1724 |
 | | **7** / 8 / 9 / 10 | **0.806** / 0.793 / 0.814 / 0.802 | **0.1568** / 0.1564 / 0.1535 / 0.1580 | 0.1374 / 0.1310 / 0.1324 / 0.1576 |
 
-`regularized` k=10 and `mt075` k=12 are the most stable of their configurations and fell short (`selected.json`: 0.682 and 0.723). `mt080` has three stable maps: k=7, 9 and 10.
-
-**The choice, by the design's rule across the shortlist.**
-1. Eligible (stability at least 0.8): only `mt080` k=7, 9 and 10. `regularized` and `mt075` have no eligible map. Their higher excess (`regularized` up to 0.2102, `mt075` 0.1875 at k=5) therefore does not count.
+**The choice, by the design's rule across the seven.**
+1. Eligible (stability at least 0.8): only `mt080` k=7, 9 and 10. The other six configurations have no eligible map. Their higher excess (`regularized` up to 0.2102, `mt075` 0.1875 at k=5) therefore does not count, and neither does `mt080`'s own k=5 and k=6, which have a higher excess (0.1722 and 0.1739) than k=7 and are out only by stability (0.763 and 0.738).
 2. Highest excess among the eligible: `mt080` k=10, 0.1580.
-3. Tie within 0.01 and the coarser map: k=7 (0.1568, 0.0012 below) and k=9 (0.1535, 0.0045 below) are both within 0.01; **k=7 is the coarser**.
-4. Not reached: something was eligible, so no map is declared as falling short, and the beta-sim fallback does not apply (no configuration degenerate, and the shortlist's units above the floor are 18, 12 and 10, all over 5).
+3. The rule takes the coarsest k within 0.01 of the top excess: k=7 (0.1568, 0.0012 below) and k=9 (0.1535, 0.0045 below) are both within 0.01, and **k=7 is the coarser**.
+4. Not reached: something was eligible, so no map falls short, and the beta-sim fallback does not apply (no bootstrapped configuration is degenerate; `variable` is, and was not bootstrapped).
 Result: `fell_short` is false for `mt080`.
 
 **The chosen map** (`mt080/candidates.parquet` and `parts.parquet`, k=7; 11,292 units, 303.0M km2: 125.2M km2 land, 177.9M km2 sea).
 
 | realm | units (land / sea) | land km2 | sea km2 | share of area | imputed parts | separate pieces (largest, others) |
 |---|---|---|---|---|---|---|
-| 1 | 4,805 (197 / 4,608) | 0.99M | 175.62M | 58.3% | 5,940 | 53 (4,568 units; 52 pieces of 1-49) |
-| 0 | 2,264 (2,182 / 82) | 44.45M | 0.97M | 15.0% | 489 | 33 (2,117; 32 of 1-33) |
-| 5 | 1,019 (1,004 / 15) | 22.70M | 0.24M | 7.6% | 103 | 11 (1,006) |
-| 3 | 1,061 (1,036 / 25) | 19.46M | 0.12M | 6.5% | 35 | 9 (1,046) |
-| 4 | 999 (928 / 71) | 15.24M | 0.92M | 5.3% | 81 | 19 (971) |
-| 2 | 722 (717 / 5) | 14.61M | 0.00M | 4.8% | 2 | 4 (719) |
-| 6 | 422 (415 / 7) | 7.72M | 0.00M | 2.5% | 10 | 4 (419) |
+| 1 | 4,805 (197 / 4,608) | 0.99M | 175.62M | 58.3% | 5,940 of 14,516 (41%) | 53 (4,568 units; 52 pieces of 1-49) |
+| 0 | 2,264 (2,182 / 82) | 44.45M | 0.97M | 15.0% | 489 of 3,027 (16%) | 33 (2,117; 32 of 1-33) |
+| 5 | 1,019 (1,004 / 15) | 22.70M | 0.24M | 7.6% | 103 of 1,215 (8%) | 11 (1,006) |
+| 3 | 1,061 (1,036 / 25) | 19.46M | 0.12M | 6.5% | 35 of 1,097 (3%) | 9 (1,046) |
+| 4 | 999 (928 / 71) | 15.24M | 0.92M | 5.3% | 81 of 1,133 (7%) | 19 (971) |
+| 2 | 722 (717 / 5) | 14.61M | 0.00M | 4.8% | 2 of 724 (0.3%) | 4 (719) |
+| 6 | 422 (415 / 7) | 7.72M | 0.00M | 2.5% | 10 of 435 (2%) | 4 (419) |
 
-The largest realm (1) holds 58.3% of the area and 42.6% of the units, and is almost all sea (4,608 of its 4,805 units). Every realm has one main piece holding 93.5% (realm 0) to 99.6% (realm 2) of its units (realm 1: 95.1%), plus small separate pieces (by adjacency of units, so an island is its own piece). 6,660 of the 22,147 parts are imputed (6,042 sparse, 618 failing the composition gate), 30% of the parts, spread by the nearest-network-cell rule; 5,940 of them fall in realm 1. 1,032 units were merged into a realm by the size floor from 843 sub-realms.
+The largest realm (1) holds 58.3% of the area and 42.6% of the units, and is almost all sea (4,608 of its 4,805 units). Every realm has one main piece holding 93.5% (realm 0) to 99.6% (realm 2) of its units (realm 1: 95.1%), plus small separate pieces (by adjacency of units, so an island is its own piece). 6,660 of the 22,147 parts are imputed (6,042 sparse, 618 failing the composition gate), 30% of the parts overall but **41% of the ocean realm's parts** (5,940 of its 14,516), so the ocean realm is the one most shaped by the imputation. 1,032 units were merged into a realm by the size floor from 843 sub-realms.
 
 **Caveats.**
-- **mt080's selection partition is not the one screened.** With 10 trials Infomap found 853 modules (816 single-unit, largest 37.5% of units, 55.8% of the area), against 1,118 modules (largest 29.3% of the area) at 3 trials. The "giant module breaks up at 0.80" reading of the screen therefore does not hold for the partition that was selected; the chosen map has a realm of 58% of the area. The same holds for k: the screen's range was 5-14, selection's is 5-10. `regularized` and `mt075` had the same partition in both stages (8,261 and 2,526 modules).
-- **Screening excess is a rough guide.** Where the partition is the same, select's 99 nulls differ from the screen's 19 by up to 0.015 (`regularized`, k=6; `mt075` 0.008): that is the noise of the screen, since `screen.csv` holds only k and excess and no null spread. `mt080`'s difference is up to 0.025, from the partition. The screen's order of `mt075` and `mt080` (0.0003) was noise; `regularized`'s lead of 0.025 was above that noise.
-- **The k=5 peaks of the screen** (`mt075` 0.1889, `mt080` 0.1886, at the smallest candidate) did not carry into stability: k=5 is 0.600 for `mt075` and 0.763 for `mt080`. Excess at the smallest k alone says little about the stable levels.
-- **`regularized`** has the highest excess (about 0.20 to 0.21 for k=9 to 18) but 68.8% of its area is in single-unit top modules, so its excess is that of the size floor's merging, and its stability is 0.60 to 0.68. Not a map to select.
-- **`mt080` is only just stable:** 0.806, 0.814 and 0.802 at k=7, 9 and 10, against 0.793 at k=8, and 0.763 and 0.738 at k=5 and 6. 20 bootstraps; the margin over 0.8 is within what another set of resamples could change. Its excess of 0.157 is the lowest of any selected map: a stable map was chosen over higher-excess unstable ones, as the rule says.
-- `default`, `entropy` and `recurse50` are one partition (above), so the sweep tried eight distinct maps, not ten.
+- **A single seed.** `Params.seed` is 1 in code, for Infomap, the bootstraps (seed plus the bootstrap number) and the null maps, and a second seed was not run. Nothing says how far another seed would move a stability, or the partition (Infomap at 10 trials changed three of the screen's partitions).
+- **The bootstraps use 3 trials against a 10-trial reference.** A bootstrap partition is the weaker clustering of a resample, which can lower V-measure by itself. Both bear on `mt080`'s stability, which is 0.806 at k=7, 0.006 over the bar, with 0.814 and 0.802 at k=9 and 10 and 0.793 at k=8. With 20 bootstraps a different seed could put k=7 under 0.8 and `mt080` among the configurations that fell short. The choice rests on a margin that is narrow, and on the bar rather than on excess (above).
+- **The screen's reading of `mt080` did not hold** (above): the giant module did not break up at 10 trials, and the chosen map has a realm of 58% of the area (the sea). The k range also changed, from 5-14 to 5-10.
+- **Screening excess is a rough guide.** Where the partition is the same in both stages (`regularized`, `mt075`), select's 99 nulls differ from the screen's 19 by up to 0.015 (`regularized`, k=6; `mt075` 0.008): that is the noise of the screen, as `screen.csv` holds only k and excess and no null spread. `mt080`'s difference is up to 0.025, from the partition. The screen's order of `mt075` and `mt080` (0.0003) was noise; `regularized`'s lead of 0.025 was above that noise.
+- **The k=5 peaks of the screen** (`mt075` 0.1889, `mt080` 0.1886, at the smallest candidate) did not carry into stability: k=5 is 0.600 for `mt075` and 0.763 for `mt080`.
+- **`regularized`** has the highest excess (about 0.20 to 0.21 for k=9 to 18) but 68.7% of its area is in single-unit top modules, so most of its units reach the realms through the size floor, and its stability is 0.60 to 0.68. Not a map to select.
+- **`mt080` k=7 has the lowest excess of any selected map but two** (0.157; `default` 0.125 and `mt090` 0.145 are lower): a stable map was chosen over higher-excess unstable ones, as the rule says.
+- `default`, `entropy` and `recurse50` are one partition (above).
 - Task 10 (the WCVP circularity gate) and Task 11 (the beta-sim cross-check) use `mt080`, the k=7 map; there were no unassigned units, so no `warning`.
 
-**Cost.** The screen took 109 to 143 s per configuration (30 s for `variable`, which was degenerate), 4 workers, mostly the Infomap trials. The `log.json` peak of 6.5 to 14.9 GB is a high-water mark of the one process across the run (it never falls), not the memory of a configuration. Select took 850 s (`regularized`), 949 s (`mt075`) and 1,036 s (`mt080`), 14 to 17 minutes, at a peak of 5.3 to 5.8 GB with 4 workers; the bootstraps are 495 to 692 s of that.
+**Cost.** The screen took 109 to 143 s per configuration (30 s for `variable`, which was degenerate), 4 workers, mostly the Infomap trials. The `log.json` peak of 6.5 to 14.9 GB is a high-water mark of the one process across the run (it never falls), not the memory of a configuration. Select took 850 s (`regularized`), 949 s (`mt075`) and 1,036 s (`mt080`) at a peak of 5.3 to 5.8 GB, and 1,056 to 1,149 s (`mt085`, `mt090`, `default`, `mt095`) at 7.1 GB: 14 to 19 minutes, 4 workers, of which the bootstraps are 495 to 724 s.
