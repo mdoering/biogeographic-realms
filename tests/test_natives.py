@@ -19,6 +19,7 @@ from realms.natives import (
     griis_names,
     griis_name_only_pairs,
     griis_pairs,
+    load_admin1_cells,
     load_references,
     marine_country,
     match_names,
@@ -765,6 +766,23 @@ def test_load_references_joins_everything_and_reports_what_is_missing(reference_
     assert refs.missing == ("griis/GRIIS-GQ", "wrims")
     assert "griis/GRIIS-GQ has no export" in caplog.text
     assert "1 GRIIS pairs of 1 sub-national lists have no admin-1 cells" in caplog.text
+
+
+def test_the_admin1_cells_load_without_the_rest_of_the_references_and_are_the_ones_load_references_has(reference_dir):
+    root, grid = reference_dir
+    cells = load_admin1_cells(grid, root)
+    assert cells.rows() == [("c1", "US", "Hawaii", "centre")]
+    assert cells.equals(load_references(grid, root).admin1_cells)
+    # a list the manifest has no export for names no place, and the polygons and the grid's file are needed
+    manifest = json.loads((root / "manifest.json").read_text())
+    manifest["griis/GRIIS-US-Hawaii"] = {"dataset": 2, "status": "missing"}
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    assert load_admin1_cells(grid, root).height == 0
+    for item in ("natural_earth_admin1", "isea3h_6"):
+        broken = {k: v for k, v in manifest.items() if k != item}
+        (root / "manifest.json").write_text(json.dumps(broken))
+        with pytest.raises(ValueError, match=item):
+            load_admin1_cells(grid, root)
 
 
 def test_load_references_applies_griis_by_its_own_means_and_reports_the_rest(reference_dir, caplog):

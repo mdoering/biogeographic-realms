@@ -3,7 +3,8 @@
 **The dry run** (without `--score-half-b`) reads the ingested download (`data/gbif/<key>`), the frozen split and the references, and does, for half A only (it never
 loads half B):
 
-1. the known cases of the design (`realms.calibrate.CASES`) on all five layers at the design's thresholds with `wcvp_mode` `native_only`:
+1. the known cases of the design (`realms.calibrate.CASES`) on all five layers at the design's thresholds (`realms.calibrate.DESIGN`: the dry run does not follow the defaults of
+   `Settings`, which are setting 132 since Markus chose it) with `wcvp_mode` `native_only`:
    those whose family is in half A are run and pass or fail, and the others are listed as waiting for step 9, with their family and half;
 2. the calibration: layers 1, 2 and 4 once and then layer 5 at each of the 144 settings (satellite record share 0.5, 1 and 2%, satellite
    cell share 2, 5, 10 and 20%, under-reported rate factor 0.5, 1, 1.5 and 2%, group minimum 300, 1,000 and 3,000 records), with layer 3 off, on the plants
@@ -23,7 +24,8 @@ loads half B):
    show whether islands lose more.
 
 It writes `results/calibrate/res<r>/`: `settings.csv` (the 144 settings), `regions.csv`, `known_cases.json`, `griis_cross_check.json`, `calibrate.log`, and `report.json` last,
-with the `chosen` setting and the ingest's marker. References are loaded once and need about 16 GB at the peak.
+with the `chosen` setting and the ingest's marker. References are loaded once and need about 16 GB at the peak. Layer 3 of the known cases and of the cross-check takes where GBIF uses
+a sub-national GRIIS list's country code from the frozen table of the resolution (`reference/griis_uses_code-res<r>.csv`, `scripts/griis_codes.py`), and the dry run refuses to start without it.
 
 **The scoring of half B** (`--score-half-b --setting N`) is the only call before the freeze that opens half B, listed in `DECISIONS.md`, and a run of its own, so that the
 setting is Markus's choice after he has seen the dry run, and half A's data is not in memory when half B is loaded. It scores setting `N` of the 144 on half B's calibration
@@ -54,6 +56,7 @@ import resource
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -61,6 +64,7 @@ import polars as pl
 
 from realms.calibrate import (
     CASES,
+    DESIGN,
     GRID,
     NATIVE_LOSS_LIMIT,
     SCORE,
@@ -81,7 +85,7 @@ from realms.calibrate import (
     top_regions,
     within_limit,
 )
-from realms.clean import GRIIS_WITHOUT_STATUS, LAYERS, Settings, clean, outlier_rows
+from realms.clean import FROZEN_DIR, GRIIS_WITHOUT_STATUS, LAYERS, Settings, clean, frozen_uses_code, outlier_rows
 from realms.grid import load_grid
 from realms.natives import load_references, name_index
 from realms.occurrences import IncompleteIngest, load_country_counts, read_complete, resolution_of
@@ -307,6 +311,10 @@ def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
     missing = [str(p) for p in (args.counts, args.split, gpkg, land, col, level3) if not p.exists()]
     if missing:
         raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
+    try:
+        uses_code = frozen_uses_code(resolution, FROZEN_DIR)  # the decision of where GBIF uses a sub-national list's code, frozen once, before anything is loaded or written
+    except (FileNotFoundError, ValueError) as error:
+        raise SystemExit(f"FAILED {error}") from error
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "report.json").unlink(missing_ok=True)  # written last, so that it is there only for a run that finished: the scoring of half B reads it
     logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[logging.StreamHandler(), logging.FileHandler(directory / "calibrate.log", mode="w")])
@@ -343,7 +351,8 @@ def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
     # ---- the known cases, on everything half A has, all five layers at the design's thresholds
     begun = time.perf_counter()
     index = name_index(col)
-    cleaned = clean(counts, refs, grid, frozenset(LAYERS), Settings(wcvp_mode="native_only", griis_without_status=args.griis_without_status))
+    known = replace(DESIGN, wcvp_mode="native_only", griis_without_status=args.griis_without_status)  # the design's thresholds, whatever the defaults of `Settings` are
+    cleaned = clean(counts, refs, grid, frozenset(LAYERS), known, uses_code)
     say(f"cleaned half A with all layers: {cleaned.presence.height} presences of {cleaned.presence['species_id'].n_unique()} species")
     cases = known_cases(CASES, index, split, counts, cleaned, refs, regions)
     del index, cleaned
@@ -379,7 +388,7 @@ def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
     index_chosen, met = found.setting, found.met
     index_layer5, met_layer5 = choose(table, reading="layer5")  # the knee rule again, by layer 5's reading
     index_old, met_old = choose(table, rule="most_removed")  # the rule of before the knee, to compare
-    index_design = grid_of_settings.index(Settings())
+    index_design = grid_of_settings.index(DESIGN)
     chosen = grid_of_settings[index_chosen]
     report["chosen"] = described(index_chosen, chosen, start, refs, grid, met)
     report["knee_rule"] = knee_report(found)
@@ -426,7 +435,7 @@ def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
     begun = time.perf_counter()
     cross = {}
     for name, setting in (("chosen", chosen), ("design", grid_of_settings[index_design])):
-        found = griis_cross_check(counts, refs, grid, setting)
+        found = griis_cross_check(counts, refs, grid, setting, uses_code)
         cross[name] = {"setting": index_chosen if name == "chosen" else index_design, **{k: getattr(setting, k) for k in GRID}, **found}
         say(
             f"GRIIS cross-check at the {name} setting: animal presences listed as introduced {found['listed']['presences_removed']} of {found['listed']['presences']} taken by layer 5 "

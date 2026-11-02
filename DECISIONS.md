@@ -1820,3 +1820,88 @@ zip_sha256 7f0bbb6e4d0d012387a26436d2962043a38f41c54bdcaede620438a420ab7003
 The setting holds on the held-out half. Native loss is 3.19% against A's 3.26%, within the 5% limit, and it removes slightly more of B's outside presences than A's. Nothing points to the thresholds being fitted to A's plants. These are the remaining error rates of the cleaning that the design asks to report.
 
 From now on half B stays sealed until M3. Both markers stop any second scoring. A retry would need Markus's explicit decision, and none is planned.
+
+## 2026-11-02
+
+### Setting 132 as the defaults, a frozen GRIIS country-code table, and the first cleaning at resolution 7 (2026-11-02)
+
+**The thresholds.** Markus chose setting 132 of the 144 on 2026-11-01 (the hull walk at break-even on half A at resolution 7, scored once on half B: 3.19% of B's native presences lost against A's 3.26%, see "Half B's held-out rates"). **The defaults of `Settings` are now setting 132**, so that every run of M1 uses the
+calibrated thresholds without having to say so, and a run that forgets to pass them does not fall back on values the calibration has since replaced:
+
+| Threshold | Was (the design's) | Is (setting 132) |
+|---|---|---|
+| `satellite_record_share` | 0.01 | **0.02** |
+| `satellite_cell_share` | 0.05 | **0.20** |
+| `under_rate_factor` | 0.01 | **0.005** |
+| `group_min_records` | 1000 | **300** |
+
+Nothing else changed: `land_share` 0.95, `satellite_gap_km` 500, `satellite_min_datasets` 2, `satellite_min_years` 3, `under_max_records` 5, `thin_max_records` 5, `thin_km` 1000, `core_share` 0.9 and `heuristic_min_records` 20 stay, as do `wcvp_mode` `native_only`, `griis_without_status` `skip` and `side_conflict` `environment`.
+The design's four are kept where they are wanted: `realms.calibrate.DESIGN` (setting 64 of the grid) and `tests/clean_helpers.DESIGN_5`, and every test that exercises what the design's values do (the layer 5 rules in `test_outliers`, the toy world of `test_calibrate`) passes it explicitly.
+A cleaning at resolution 6 with the new defaults would take more than the logged res 6 runs, which were at the design's thresholds (record share 1%, cell share 5%, rate factor 1%, group minimum 1,000); none was made here.
+
+**The calibration does not move with the defaults.** Checked, and tested where it can be:
+
+- The grid sets the four thresholds itself (`replace(base, **GRID)`), so `settings_grid()` is the same 144 settings for any base: the test gives it bases with the design's, the new defaults and arbitrary thresholds, and compares it setting by setting with the thresholds of the res 7 dry run's `settings.csv` (`tests/fixtures/res7_grid144_settings.csv`).
+  Setting 132 is the default and is also the grid's number 132; the design's is still number 64.
+- Everything else that took the defaults by the way now names its thresholds: `dry_run` took the design's setting by `grid.index(Settings())` (which would now have found 132 and mislabelled the design as the chosen setting), ran the known cases on `Settings(wcvp_mode=...)` (at the design's thresholds, as its report says), and `baseline` and `griis_cross_check` had `Settings()` as their default argument.
+  They use `DESIGN` now. A test reads the syntax trees of `src/realms/calibrate.py` and `scripts/calibrate.py`: every `Settings(...)` there names all four thresholds, every `clean(...)` passes its settings, and no default argument is a bare `Settings()`.
+- `--score-half-b` is untouched (it loads no layer 3 and scores a setting of the grid), and **`results/calibrate/` and `data/split/held_out-315557.started` were not touched, nor was the dry run run again.**
+
+**The frozen country-code table.** Layer 3 treats a sub-national GRIIS list in one of two ways, by where GBIF uses the list's country code (see "Sub-national GRIIS lists on the cells they overlap"): **by code**, where the code occurs among the rows in the list's cells, so that only rows with that code count (a CA row in a cell that overlaps a US state is spared), or **by cells alone**, where it does not
+(an overseas place carries the sovereign's code in its list, `FR`, and its own in the records: `RE`, `GP`). Until now `clean` read that off the counts it was given. That is a decision, not a measurement, and **it should not depend on which rows a run happens to hold**: the later run on all species, or a subset such as the calibration's plants, could find the code in one list's cells and not in another's and apply
+the list the other way, a change of method hidden in the data. So it is made once and frozen: `scripts/griis_codes.py --counts DIR` derives it with today's rule (`realms.clean.derive_uses_code`: the join of each list's cells with the codes GBIF uses in them) from **half A's counts**, and writes `reference/griis_uses_code-res<r>.csv` (`country`, `subdivision`, `uses_code`, sorted), which is tracked in git.
+It comes from half A because that is the half the exploration works on and the all-species run must not decide it: half B stays sealed until M3, and the decision has to exist before M1 starts.
+
+- **The table:** 24 places, **20 by code** (BQ, FM, KM, NO-Svalbard, PT-Azores and Madeira, SH-Ascension, TO, US-Alaska, Hawaii and "United") and **4 by cells alone**: FR/Guadeloupe, FR/Martinique, FR/Reunion and FR/Saint-Pierre. It is the same at resolution 6 and 7, and the res 7 table is what the inline rule of `_layer_3` before this change gives on half A (checked at both resolutions), so no cleaning of half A changes by it.
+- **`clean(..., uses_code=table)`** takes each sub-national list's decision from the table instead of from `counts`, in both passes of layer 3 (the second judges the rows layer 4 moved). It raises if the table has a place twice, a missing value or the wrong columns or types, and if it has no decision for a list that is applied. `uses_code=None` keeps the derivation from `counts`, for tests.
+- **Who passes it:** `scripts/clean_counts.py` and the dry run of `scripts/calibrate.py` (its known cases and its GRIIS cross-check) load the table of their resolution and **refuse to start, before they load or write anything, if it is missing**, saying to run `scripts/griis_codes.py`. `explore.py` (Task 4) is to do the same.
+  The script leaves a table that is there and the same alone, and refuses one that differs unless `--overwrite` says so: a different table changes what every later run removes, and would be logged here.
+- `natives.load_admin1_cells(grid, reference_dir)` is the admin-1 cells of `load_references` on their own (16 GB less), which `load_references` now calls; the script takes 15 s and 8 GB.
+
+**The first cleaning at resolution 7** (`uv run python -I scripts/clean_counts.py --counts data/gbif/0020744-261023074918325`, half A, layers 1 to 5 at setting 132, `skip`, the three WCVP modes, the frozen res 7 table): **155 s, peak 17.5 GB** (36, 31 and 30 s for the modes' `clean`). Outputs in `results/clean/res7/<mode>/` (git-ignored) and `res7/report.json`.
+Half A at resolution 7 is 14,645,575 rows of 647,350 species, **1,909,274,465 clean records** (`n - n_human_text`) in 13,506,700 species-and-part presences of 637,903 species. Records are conserved in every mode: what is left plus layers 2 to 5's removals is the 1,909,274,465.
+
+`native_only`, with the same rule in the first five columns of res 6 (`results/clean/res6/report.json`, **which is not like for like**: it was made on 2026-11-01 before the GRIIS manifest had every list with a table, 55 of 303 lists then and **305 now**, and at the design's layer 5 thresholds. Its layer 3 differs by the manifest and its layer 5 by the thresholds as well as by the resolution, so the two are for orientation only):
+
+| Layer | Rule | Rows | Presences | Records | Share of clean records | Res 6: rows | Res 6: records |
+|---|---|---|---|---|---|---|---|
+| 0 | `zero_area_part` (moved) | 339,515 | 326,012 | 1,648,535 | 0.09% | 216,241 | 1,255,754 |
+| 1 | `failed_flags` (`n_raw`) | 229,154 | 218,561 | 1,476,800 | | 166,251 | 1,188,700 |
+| 1 | `human_text` (`n_raw`) | 32,584 | 31,961 | 62,260 | | 26,852 | 52,328 |
+| 2 | `extinct` | 63,424 | 62,852 | 622,411 | 0.03% | 58,303 | 622,394 |
+| 2 | `no_wild_range` | 12,497 | 11,662 | 628,291 | 0.03% | 8,036 | 628,291 |
+| 3 | `griis` | 520,495 | 459,801 | 73,046,492 | 3.83% | 160,442 | 50,648,154 |
+| 3 | `griis_subnational` | 152,792 | 150,833 | 30,776,040 | 1.61% | 85,708 | 30,668,329 |
+| 3 | `wrims` | 5,789 | 4,329 | 318,067 | 0.02% | 5,604 | 392,634 |
+| 3 | `wcvp_outside_native` | 501,209 | 474,436 | 7,458,078 | 0.39% | 446,813 | 10,473,999 |
+| 4 | `land_sea_fold` (moved) | 948,001 | 916,397 | 9,690,086 | 0.51% | 803,805 | 10,064,176 |
+| 4 | `land_sea_neighbour` (moved) | 7,811 | 7,773 | 96,559 | 0.01% | 5,664 | 21,059 |
+| 4 | `land_sea_dropped` | 20,411 | 20,306 | 55,203 | 0.00% | 13,108 | 38,302 |
+| 5 | `detached_satellite` | 392,363 | 391,241 | 696,016 | 0.04% | 233,516 | 457,426 |
+| 5 | `under_reported` | 155,321 | 152,557 | 252,537 | 0.01% | 196,485 | 319,154 |
+| 5 | `thin_long_range` | 55,724 | 55,683 | 66,731 | 0.00% | 55,164 | 67,039 |
+
+The rows of layers 0 to 2, `griis`, `griis_subnational` and `wrims` are the same in all three modes, and what differs by mode is the WCVP rule, which layer 4 follows, and layer 5, which judges what layers 1 to 4 leave:
+
+| Rule | `native_only` | `introduced` | `off` |
+|---|---|---|---|
+| `wcvp_outside_native` / `wcvp_introduced` | 501,209 rows, 474,436 presences, 7,458,078 records | 162,935 rows, 145,837 presences, 5,081,303 records | none |
+| `land_sea_fold` (moved) | 948,001 rows, 9,690,086 records | 954,363 rows, 9,713,784 records | 962,182 rows, 9,759,039 records |
+| `land_sea_neighbour` (moved) | 7,811 rows, 96,559 records | 8,032 rows, 97,128 records | 8,256 rows, 97,947 records |
+| `land_sea_dropped` | 20,411 rows, 55,203 records | 20,370 rows, 55,033 records | 20,352 rows, 54,828 records |
+| `detached_satellite` | 392,363 rows, 391,241 presences, 696,016 records | 461,730 rows, 460,482 presences, 797,185 records | 467,636 rows, 466,337 presences, 808,963 records |
+| `under_reported` | 155,321 rows, 152,557 presences, 252,537 records | 170,050 rows, 167,094 presences, 274,480 records | 178,848 rows, 175,652 presences, 289,636 records |
+| `thin_long_range` | 55,724 rows, 55,683 presences, 66,731 records | 57,896 rows, 57,853 presences, 69,342 records | 57,878 rows, 57,835 presences, 69,322 records |
+| **Presences left** | **10,711,315** of 588,594 species | **10,948,639** of 589,412 | **11,073,388** of 589,460 |
+| **Records left** | **1,795,354,599** (94.0%) | 1,797,605,821 (94.2%) | 1,802,660,415 (94.4%) |
+
+- **Per layer, `native_only` lost** (net: the presences a rule left with nothing) 326,012 (0), 250,499 (1), 74,514 (2), 1,089,299 (3), 944,476 (4) and 599,481 (5) presences, of 13,506,700, and **left 10,711,315 (79.3%)**. Records removed by layer: 1,250,702 (2), 111,598,677 (3), 55,203 (4, dropped) and 1,015,284 (5); the folds of layers 0 and 4 move 1,648,535 and 9,786,645 and lose none.
+- **Layer 3 is again mostly records, and mostly GRIIS**: the two GRIIS rules take 103.8M records (5.44% of the clean records) in 673,287 rows, `wcvp_outside_native` 7.5M (0.39%), WRiMS 0.3M. The pairs that could not be placed on the grid (62 sub-national lists with no admin-1 cells, 6,569 pairs) name species with records in half A in 3,558 rows (`unplaced_griis`), and 1,137 for WRiMS (`unplaced_wrims`).
+- **Layer 4**, `native_only`: of 611,171 species 455,776 are land, 80,869 sea and 27,549 exempt; 6,232 are in the conflict (1,515 terrestrial with their records at sea, 4,717 marine with theirs on land). The zero-area fold takes 2,426 parts (2,334 sea, 92 land: 339,515 rows, 1,648,535 records), against 923 at resolution 6.
+- **Layer 5 at setting 132**, per mode: `native_only` 603,408 rows, **599,481 presences**, 1,015,284 records (0.05% of the clean records) of 113,885 species, 22,334 of which it leaves with no presence at all (`thin_long_range`); `introduced` 689,676 rows, 685,429 presences, 1,141,007 records, 128,272 species (23,215 lost); `off` 704,362 rows, 699,824 presences, 1,167,921 records, 128,434 species (23,207 lost).
+  Beside res 6, which was at the design's thresholds, setting 132 takes many more detached satellites (392,363 rows against 233,516) and fewer under-reported rows (155,321 against 196,485). That is the direction of the thresholds (a larger record share and cell share make more patches satellites, a lower rate factor flags fewer cells, a lower group minimum lets more cells be judged), but
+  the resolution differs too, so it is not a measurement of them. The **suspect cells** (cells where layer 5 took far more of the species than next door, listed in `suspect_cells.csv`, nothing removed) are 2,074 in `native_only` and 2,094 in the others, against 500 at res 6.
+- **The Caspian** at resolution 7: 27 cells with 1,000 km2 of sea or more; 1,625 of the 216,439 clean records in them are on the sea parts, and 390 after all layers (`native_only`); 68 records are folded by the zero-area rule.
+- **Provisionally accepted twins** in half A: 2,834 species, 84,499 rows, 2,728,896 `n`; none has several accepted twins. Nothing is changed for them.
+
+**Not done here:** no cleaning at resolution 6 (its logged results are of the design's thresholds and of the manifest before the 305 lists), no calibration, and no look at half B. `scripts/explore.py` (Task 4) is to pass the frozen table too. The suite has 1,073 tests, all passing (1,051 before: the new ones are the frozen table, the script, the grid's independence of the defaults and `load_admin1_cells`).

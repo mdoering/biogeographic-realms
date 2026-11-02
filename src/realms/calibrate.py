@@ -57,6 +57,10 @@ from realms.natives import WCVP_KINGDOM, References, match_names
 
 log = logging.getLogger(__name__)
 
+# The design's layer 5 thresholds (docs/design.md), the second value of every threshold of the grid (setting 64). They were the defaults of `Settings` until
+# Markus chose setting 132 of the grid (2026-11-01) and it became them. The calibration does not lean on those defaults, so that they can move without the calibration
+# moving: the grid sets all four thresholds itself, and what takes a setting by default here is this one.
+DESIGN = Settings(satellite_record_share=0.01, satellite_cell_share=0.05, under_rate_factor=0.01, group_min_records=1000)
 NATIVE_LOSS_LIMIT = 0.05
 # the knee rule's price: at most this many native presences lost for each extra outside presence removed, at each step along the hull: break-even, one for one
 MAX_MARGINAL = 1.0
@@ -148,8 +152,9 @@ def rates(status: pl.DataFrame, removed: pl.DataFrame) -> tuple[float, float]:
 
 # ---- the settings
 
-def settings_grid(base: Settings = Settings()) -> list[Settings]:
-    """The 144 settings of `GRID`, with `base` for everything else, in the order of the grid: the first threshold varies slowest."""
+def settings_grid(base: Settings = DESIGN) -> list[Settings]:
+    """The 144 settings of `GRID`, with `base` for everything else, in the order of the grid: the first threshold varies slowest. The four thresholds of the
+    grid are set for every setting, so `base`'s own do not matter."""
     return [replace(base, **dict(zip(GRID, values, strict=True))) for values in itertools.product(*GRID.values())]
 
 
@@ -356,7 +361,7 @@ class Baseline:
     moved: pl.DataFrame
 
 
-def baseline(counts: pl.DataFrame, refs: References, grid: Grid, settings: Settings = Settings()) -> Baseline:
+def baseline(counts: pl.DataFrame, refs: References, grid: Grid, settings: Settings = DESIGN) -> Baseline:
     """Run layers 1, 2 and 4 on the `calibration_counts` of `counts` with `settings`, and mark the plant presences, raw and left."""
     plants = calibration_counts(counts, refs)
     cleaned = clean(plants, refs, grid, BEFORE_5, settings)
@@ -527,7 +532,7 @@ def _unit_counts(frame: pl.DataFrame) -> dict:
     return {**out, **{f"{k}_share": _share(out[f"{k}_removed"], out[k]) for k in ("pairs", "presences", "records")}}
 
 
-def griis_cross_check(counts: pl.DataFrame, refs: References, grid: Grid, settings: Settings = Settings()) -> dict:
+def griis_cross_check(counts: pl.DataFrame, refs: References, grid: Grid, settings: Settings = DESIGN, uses_code: pl.DataFrame | None = None) -> dict:
     """What layer 5 takes of the animals that GRIIS lists as introduced, against what it takes of all the other animals, at the thresholds of `settings`.
 
     Layers 1, 2 and 4 run on everything `counts` holds, so that layer 5 sees the group totals of the real run, with layer 3 off, and layer 5 is
@@ -537,10 +542,11 @@ def griis_cross_check(counts: pl.DataFrame, refs: References, grid: Grid, settin
     listed species' border cell (a CA row in a cell that overlaps a US state) count as listed with it, though no GRIIS rule took them. The lists are those with a distribution table, whatever `settings.griis_without_status` says, and an entry applies as in `clean`:
     introduced, or with no value, but not native or uncertain. Layer 5 judges cells, so the units are the (species, cell) pairs it judges, the presences (species, part)
     and the records; the shares are those layer 5 takes. A listed presence is one the real run's layer 3 takes first, so the share is how much of
-    that the heuristics would find unaided. Reports only: nothing is changed, and nothing of half B is read (the caller passes half A's counts).
+    that the heuristics would find unaided. Reports only: nothing is changed, and nothing of half B is read (the caller passes half A's counts). `uses_code` is the
+    frozen table that layer 3 takes the countries' codes from (`clean`), or `None` for the counts' own.
     """
     listing = replace(settings, wcvp_mode="off", rules_off=frozenset({"wrims"}), griis_without_status="skip")
-    taken = clean(counts, refs, grid, frozenset({1, 2, 3}), listing).removed.filter(pl.col("rule").is_in(GRIIS_RULES))
+    taken = clean(counts, refs, grid, frozenset({1, 2, 3}), listing, uses_code).removed.filter(pl.col("rule").is_in(GRIIS_RULES))
     listed = taken.select("species_id", cell_of(pl.col("part")).alias("cell")).unique().with_columns(pl.lit(True).alias("listed"))
     early = clean(counts, refs, grid, BEFORE_5, settings)
     gone = outlier_rows(early.presence, refs, grid, settings).select("species_id", "part").unique().with_columns(pl.lit(True).alias("removed"))

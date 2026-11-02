@@ -25,9 +25,10 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from clean_helpers import GRID, counts, make_grid, refs, row, taxon
+from clean_helpers import DESIGN_5, GRID, counts, make_grid, refs, row, taxon
 from realms.calibrate import (
     CASES,
+    DESIGN,
     GRID as THRESHOLDS,
     EARLY_RULES,
     MAX_MARGINAL,
@@ -63,7 +64,7 @@ from realms.calibrate import (
     with_marginals,
     within_limit,
 )
-from realms.clean import RULES, SWITCHABLE, Settings, clean, outlier_rows
+from realms.clean import LAYERS, RULES, SWITCHABLE, USES_CODE_SCHEMA, Settings, clean, outlier_rows
 from realms.grid import Grid
 from realms.occurrences import COLUMNS, COUNTS as COUNT_COLUMNS, SealedHalf, ingest, load_country_counts, mark_complete
 
@@ -148,19 +149,19 @@ def test_the_cross_check_sets_what_layer_5_takes_of_listed_animals_against_the_o
 
 def test_the_cross_check_is_what_clean_does_with_layer_3_off():
     c, r = cross_check_world()
-    full = clean(c, r, WORLD, frozenset({1, 2, 4, 5}))
+    full = clean(c, r, WORLD, frozenset({1, 2, 4, 5}), DESIGN_5)
     taken = full.removed.filter(pl.col("layer") == 5, pl.col("species_id").is_in(["a1", "a2", "a3", "bird"]))
     found = griis_cross_check(c, r, WORLD)
     assert found["listed"]["presences_removed"] + found["other"]["presences_removed"] == taken.select("species_id", "part").unique().height
     # at a looser setting layer 5 takes fewer, and the cross-check follows the setting it is given
-    mild = replace(Settings(), satellite_record_share=0.0005)
+    mild = replace(DESIGN_5, satellite_record_share=0.0005)
     assert griis_cross_check(c, r, WORLD, mild)["listed"]["presences_removed"] <= found["listed"]["presences_removed"]
 
 
 def test_the_cross_check_lists_only_what_a_list_with_distributions_names_as_introduced():
     # a2 is on a list with no distribution table: it is not listed as introduced whatever `griis_without_status` says, and so stays among the others
     c, r = cross_check_world(griis_name_only=[("a2", "AA", None)])
-    for setting in (Settings(), Settings(griis_without_status="apply")):
+    for setting in (DESIGN_5, replace(DESIGN_5, griis_without_status="apply")):
         found = griis_cross_check(c, r, WORLD, setting)
         assert found["listed"]["species"] == 1 and found["other"]["species"] == 3
 
@@ -214,7 +215,7 @@ def test_native_status_counts_a_presence_once_and_takes_a_table_with_counts():
 
 
 def test_native_status_agrees_with_layer_3_in_native_only_mode():
-    out = clean(COUNTS, REFS, WORLD, frozenset({3}), Settings(wcvp_mode="native_only"))
+    out = clean(COUNTS, REFS, WORLD, frozenset({3}), replace(DESIGN_5, wcvp_mode="native_only"))
     taken = {(s, p) for s, p in out.removed.filter(pl.col("rule") == "wcvp_outside_native").select("species_id", "part").iter_rows()}
     status = native_status(COUNTS, REFS.wcvp, REFS.tdwg3_parts, REFS.taxa)
     assert taken == {(s, p) for s, p, v in status.iter_rows() if v == "outside"}
@@ -226,7 +227,7 @@ def test_native_status_counts_plants_only_as_layer_3_does():
     `native_status` gives them no status: what the calibration counts as outside is what layer 3 would take."""
     stray = [taxon(s, kingdom, "Magnoliopsida") for s, kingdom in (("p1", None), ("p3", "Fungi"))]
     r = replace(REFS, taxa=pl.DataFrame([t for t in TAXA if t["species_id"] not in ("p1", "p3")] + stray, schema=REFS.taxa.schema))
-    out = clean(COUNTS, r, WORLD, frozenset({3}), Settings(wcvp_mode="native_only"))
+    out = clean(COUNTS, r, WORLD, frozenset({3}), replace(DESIGN_5, wcvp_mode="native_only"))
     taken = {(s, p) for s, p in out.removed.filter(pl.col("rule") == "wcvp_outside_native").select("species_id", "part").iter_rows()}
     status = native_status(COUNTS, r.wcvp, r.tdwg3_parts, r.taxa)
     assert taken == {(s, p) for s, p, v in status.iter_rows() if v == "outside"} == {("p4", "103:land")}
@@ -273,11 +274,23 @@ def test_the_grid_has_144_settings_in_a_stable_order():
     assert grid[143] == Settings(satellite_record_share=0.02, satellite_cell_share=0.20, under_rate_factor=0.02, group_min_records=3000)
     assert grid[1].group_min_records == 1000 and grid[3].under_rate_factor == 0.01  # the last varies fastest
     assert grid[12].satellite_cell_share == 0.05 and grid[48].satellite_record_share == 0.01  # and the first slowest: 48 settings to a record share, 12 to a cell share
-    assert grid[64] == Settings() and grid.index(Settings()) == 64  # the design's setting is the second value of every threshold: 1 * 48 + 1 * 12 + 1 * 3 + 1
+    assert grid[64] == DESIGN_5 == DESIGN and grid.index(DESIGN_5) == 64  # the design's setting is the second value of every threshold: 1 * 48 + 1 * 12 + 1 * 3 + 1
+    # the defaults of `Settings` are setting 132, which Markus chose (2026-11-01): the grid has it too, as the third record share, the fourth cell share and the first of the others
+    assert grid[132] == Settings() and grid.index(Settings()) == 132 == 2 * 48 + 3 * 12 + 0 * 3 + 0
+
+
+def test_the_grid_does_not_depend_on_the_defaults_of_settings():
+    # the grid sets the four thresholds itself, so a base with any thresholds gives the same 144 settings, and the defaults of `Settings` may change without it
+    odd = Settings(satellite_record_share=0.9, satellite_cell_share=0.9, under_rate_factor=0.9, group_min_records=7)
+    assert settings_grid(odd) == settings_grid(DESIGN_5) == settings_grid(Settings()) == settings_grid()
+    fixture = pl.read_csv(ROOT / "tests" / "fixtures" / "res7_grid144_settings.csv")
+    assert [(s.satellite_record_share, s.satellite_cell_share, s.under_rate_factor, s.group_min_records) for s in settings_grid()] == list(
+        zip(*(fixture[k].to_list() for k in THRESHOLDS), strict=True)
+    )  # and they are the thresholds of the dry run at resolution 7, setting by setting
 
 
 def test_the_grid_keeps_the_other_settings_of_its_base():
-    base = Settings(heuristic_min_records=30, wcvp_mode="introduced", land_share=0.9)
+    base = replace(DESIGN_5, heuristic_min_records=30, wcvp_mode="introduced", land_share=0.9)
     assert all((s.heuristic_min_records, s.wcvp_mode, s.land_share) == (30, "introduced", 0.9) for s in settings_grid(base))
 
 
@@ -663,25 +676,25 @@ def test_calibrate_can_take_the_baseline_a_caller_made():
 
 
 def test_a_baseline_records_its_settings_and_calibrate_refuses_one_that_does_not_match_the_grid():
-    start = baseline(COUNTS, REFS, WORLD, Settings(land_share=0.9))
-    assert start.settings == Settings(land_share=0.9)
+    start = baseline(COUNTS, REFS, WORLD, replace(DESIGN_5, land_share=0.9))
+    assert start.settings == replace(DESIGN_5, land_share=0.9)
     with pytest.raises(ValueError, match="baseline"):
-        calibrate(COUNTS, [Settings()], REFS, WORLD, start)
+        calibrate(COUNTS, [DESIGN_5], REFS, WORLD, start)
     with pytest.raises(ValueError, match="baseline"):
-        calibrate(COUNTS, [Settings()], REFS, WORLD, baseline(COUNTS, REFS, WORLD, Settings(rules_off={"extinct"})))
+        calibrate(COUNTS, [DESIGN_5], REFS, WORLD, baseline(COUNTS, REFS, WORLD, replace(DESIGN_5, rules_off={"extinct"})))
     # what layer 5 reads is not in the baseline, so a different threshold or a layer 5 rule off does not matter
-    other = baseline(COUNTS, REFS, WORLD, Settings(satellite_cell_share=0.1, rules_off={"thin_long_range"}))
-    assert calibrate(COUNTS, [Settings()], REFS, WORLD, other).equals(calibrate(COUNTS, [Settings()], REFS, WORLD))
+    other = baseline(COUNTS, REFS, WORLD, replace(DESIGN_5, satellite_cell_share=0.1, rules_off={"thin_long_range"}))
+    assert calibrate(COUNTS, [DESIGN_5], REFS, WORLD, other).equals(calibrate(COUNTS, [DESIGN_5], REFS, WORLD))
 
 
 def test_the_rules_layers_1_2_and_4_read_come_from_rules():
     assert EARLY_RULES == {"extinct", "no_wild_range"}
     assert EARLY_RULES == {rule for rule in SWITCHABLE if RULES[rule] in (1, 2, 4)}
     assert {RULES[rule] for rule in SWITCHABLE} <= {2, 3, 5}  # so that no switchable rule of another layer goes unchecked
-    calibrate(COUNTS, [Settings(), Settings(rules_off={"thin_long_range", "under_reported"})], REFS, WORLD)  # layer 5 rules may differ
+    calibrate(COUNTS, [DESIGN_5, replace(DESIGN_5, rules_off={"thin_long_range", "under_reported"})], REFS, WORLD)  # layer 5 rules may differ
     for rule in EARLY_RULES:
         with pytest.raises(ValueError, match="rules_off"):
-            calibrate(COUNTS, [Settings(), Settings(rules_off={rule})], REFS, WORLD)
+            calibrate(COUNTS, [DESIGN_5, replace(DESIGN_5, rules_off={rule})], REFS, WORLD)
 
 
 KELP_COUNTS = counts(*COUNTS.iter_rows(named=True), *land("kelp", {"1": 30, "2": 30}), row("kelp", "3:land", n=0, n_raw=5))
@@ -696,7 +709,7 @@ def test_in_the_drops_only_reading_a_presence_a_fold_moved_is_moved_and_not_lost
     start = baseline(KELP_COUNTS, KELP_REFS, WORLD)
     assert set(start.moved.iter_rows()) == {("kelp", "1:land"), ("kelp", "2:land")}
     assert set(start.absent.iter_rows()) == {("kelp", "1:land"), ("kelp", "2:land"), ("kelp", "3:land")}
-    got = readings(start, KELP_REFS, WORLD, Settings())
+    got = readings(start, KELP_REFS, WORLD, DESIGN_5)
     assert set(got) == {"layer5", "run_all", "run_drops"}
     # layer 5 judges what layers 1, 2 and 4 leave, and the kelp has no land presence then: the 181 native presences of the plants, one of them lost
     assert (got["layer5"]["native"], got["layer5"]["native_lost"], got["layer5"]["outside"], got["layer5"]["outside_removed"]) == (181, 1, 3, 3)
@@ -707,7 +720,7 @@ def test_in_the_drops_only_reading_a_presence_a_fold_moved_is_moved_and_not_lost
     assert got["run_drops"]["native_loss"] == pytest.approx(2 / 184) and got["run_all"]["native_loss"] == pytest.approx(4 / 184)
     assert got["run_all"]["outside_removed"] == got["run_drops"]["outside_removed"] == 3
     assert got["run_drops"]["outside_rate"] == 1.0
-    out = calibrate(KELP_COUNTS, [Settings()], KELP_REFS, WORLD).row(0, named=True)
+    out = calibrate(KELP_COUNTS, [DESIGN_5], KELP_REFS, WORLD).row(0, named=True)
     assert (out["run_native"], out["run_native_lost"], out["run_outside"], out["run_outside_removed"]) == (184, 2, 3, 3)
     assert (out["native"], out["native_lost"]) == (181, 1)
 
@@ -721,13 +734,13 @@ def test_a_part_that_only_received_a_fold_is_no_raw_presence_and_is_not_counted(
 
 def test_calibrate_leaves_layer_3_off():
     # with WCVP's layer on, the outside presences would be gone before layer 5 ever saw them
-    out = calibrate(COUNTS, [Settings()], REFS, WORLD)
+    out = calibrate(COUNTS, [DESIGN_5], REFS, WORLD)
     assert out["outside"].to_list() == [3]
 
 
 def test_calibrate_refuses_a_grid_that_differs_in_what_layers_1_2_and_4_use():
     with pytest.raises(ValueError, match="land_share"):
-        calibrate(COUNTS, [Settings(), Settings(land_share=0.9)], REFS, WORLD)
+        calibrate(COUNTS, [DESIGN_5, replace(DESIGN_5, land_share=0.9)], REFS, WORLD)
     with pytest.raises(ValueError, match="no settings"):
         calibrate(COUNTS, [], REFS, WORLD)
 
@@ -735,14 +748,14 @@ def test_calibrate_refuses_a_grid_that_differs_in_what_layers_1_2_and_4_use():
 def test_calibrate_refuses_a_table_with_no_outside_or_no_native_presences():
     only_native = refs(TAXA, GROUPS, [(s, "NAT", True) for s in PLANTS] + [("p2", "ISL", True), ("p1", "FAR", True), ("p3", "FAR", True), ("p4", "FAR", True)], tdwg3=TDWG)
     with pytest.raises(ValueError, match="outside"):
-        calibrate(COUNTS, [Settings()], only_native, WORLD)
+        calibrate(COUNTS, [DESIGN_5], only_native, WORLD)
 
 
 def test_outlier_rows_are_what_clean_logs_for_layer_5():
     plants = calibration_counts(COUNTS, REFS)
-    before = clean(plants, REFS, WORLD, BEFORE_5)
-    after = clean(plants, REFS, WORLD, LAYERS_WITHOUT_3)
-    rows_ = outlier_rows(before.presence, REFS, WORLD, Settings())
+    before = clean(plants, REFS, WORLD, BEFORE_5, DESIGN_5)
+    after = clean(plants, REFS, WORLD, LAYERS_WITHOUT_3, DESIGN_5)
+    rows_ = outlier_rows(before.presence, REFS, WORLD, DESIGN_5)
     assert {"species_id", "part", "rule", "records"} <= set(rows_.columns)
     logged = after.removed.filter(pl.col("layer") == 5)
     assert set(rows_.select("species_id", "part", "rule").iter_rows()) == set(logged.select("species_id", "part", "rule").iter_rows())
@@ -753,7 +766,7 @@ def test_outlier_rows_are_what_clean_logs_for_layer_5():
 # ---- scoring one setting (the hold-out)
 
 def test_score_is_the_calibration_of_one_setting_as_a_dict():
-    setting = Settings()
+    setting = DESIGN_5
     got = score(COUNTS, setting, REFS, WORLD)
     row_ = calibrate(COUNTS, [setting], REFS, WORLD).row(0, named=True)
     assert got == {k: row_[k] for k in SCORE}
@@ -761,7 +774,7 @@ def test_score_is_the_calibration_of_one_setting_as_a_dict():
 
 
 def test_scoring_names_no_species():
-    got = score(COUNTS, Settings(), REFS, WORLD)
+    got = score(COUNTS, DESIGN_5, REFS, WORLD)
     assert set(got) == set(SCORE) and all(isinstance(v, int | float) for v in got.values())
 
 
@@ -820,6 +833,32 @@ def test_the_scan_finds_every_way_to_unseal():
         assert not unsealing_calls(code, "scripts/x.py"), code
     assert unsealing_calls('_select(d, s, "B", True, ())', "src/realms/occurrences.py")
     assert not unsealing_calls('_select(d, s, half, unsealed, ())', "src/realms/occurrences.py")
+
+
+def settings_calls(code: str) -> list[tuple[str, int, set[str]]]:
+    """The calls of `Settings` and of `clean` in `code`, with the line and what they pass: the keywords for `Settings`, and `settings` for `clean` if it is passed."""
+    found = []
+    for node in ast.walk(ast.parse(code)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("Settings", "clean"):
+            passed = {k.arg for k in node.keywords if k.arg}
+            if node.func.id == "clean" and len(node.args) >= 5:
+                passed.add("settings")
+            found.append((node.func.id, node.lineno, passed))
+    return found
+
+
+def test_the_calibration_does_not_lean_on_the_defaults_of_settings():
+    """The defaults of `Settings` are setting 132 (Markus, 2026-11-01), and the calibration must not move with them: whatever it builds or cleans with names its thresholds
+    (`DESIGN`, or the grid's own), so that the 144 settings it evaluates and the design it compares them with stay what they were."""
+    for path in ("src/realms/calibrate.py", "scripts/calibrate.py"):
+        code = (ROOT / path).read_text()
+        for name, line, passed in settings_calls(code):
+            if name == "Settings":
+                assert set(THRESHOLDS) <= passed, f"{path}:{line} builds Settings without naming all four thresholds"
+            else:
+                assert "settings" in passed, f"{path}:{line} cleans with the default Settings"
+        assert not re.search(r"=\s*Settings\(\)", code), path  # no default argument of Settings()
+    assert settings_calls("Settings()") == [("Settings", 1, set())] and settings_calls("clean(a, b, c, d)") == [("clean", 1, set())]  # the scan sees what it should
 
 
 def test_the_one_unsealed_call_is_in_the_calibration_script_and_nowhere_else():
@@ -1119,6 +1158,9 @@ class ScriptWorld:
         self.split_path.parent.mkdir()
         self.split_path.touch()
         self.seal = tmp_path / "split" / "held_out-315557.started"
+        self.frozen = tmp_path / "frozen"  # the frozen country-code decisions of the sub-national lists: the world has none, so a table with no rows
+        self.frozen.mkdir()
+        (self.frozen / f"griis_uses_code-res{resolution}.csv").write_text("country,subdivision,uses_code\n")
         self.loads = []
 
         def spy(out_dir, split_, half, **kwargs):
@@ -1127,6 +1169,7 @@ class ScriptWorld:
 
         grid = Grid(resolution, WORLD.cells, WORLD.adjacency)
         monkeypatch.setattr(script, "SEAL_MARKER", self.seal)
+        monkeypatch.setattr(script, "FROZEN_DIR", self.frozen)
         monkeypatch.setattr(script, "load_country_counts", spy)
         monkeypatch.setattr(script, "load_grid", lambda gpkg, land: grid)
         monkeypatch.setattr(script, "load_references", lambda grid_, reference: BOTH_REFS)
@@ -1183,6 +1226,47 @@ def test_the_dry_run_reports_the_hull_walk_and_what_the_old_rule_would_have_chos
     old = report["chosen_by_old_rule"]
     assert old["setting"] == choose(table, rule="most_removed")[0] and set(old["readings"]) == {"layer5", "run_all", "run_drops"}
     assert set(report["chosen"]["readings"]) == {"layer5", "run_all", "run_drops"}
+
+
+def test_the_dry_run_refuses_without_the_frozen_table_before_it_loads_or_writes_anything(world7):
+    world7.run()
+    report = (world7.results / "res7" / "report.json").read_text()
+    world7.loads.clear()
+    (world7.frozen / "griis_uses_code-res7.csv").unlink()
+    with pytest.raises(SystemExit, match=r"FAILED .*griis_uses_code-res7\.csv is missing.*scripts/griis_codes\.py"):
+        world7.run()
+    assert world7.loads == []  # nothing was loaded
+    assert (world7.results / "res7" / "report.json").read_text() == report  # and the report of the earlier run is not unlinked by the refusal
+
+
+def test_the_dry_run_hands_layer_3_the_frozen_table_and_runs_the_known_cases_at_the_designs_thresholds(world7, monkeypatch):
+    table = pl.DataFrame([("AA", "Sub", True)], schema=USES_CODE_SCHEMA, orient="row")
+    table.write_csv(world7.frozen / "griis_uses_code-res7.csv")
+    script = world7.script
+    cleaned, crossed = [], []
+    real_clean, real_cross = script.clean, script.griis_cross_check
+
+    def spy_clean(counts_, refs_, grid_, layers=frozenset(), settings=None, uses_code=None):
+        cleaned.append((layers, settings, uses_code))
+        return real_clean(counts_, refs_, grid_, layers, settings, uses_code)
+
+    def spy_cross(counts_, refs_, grid_, settings, uses_code=None):
+        crossed.append((settings, uses_code))
+        return real_cross(counts_, refs_, grid_, settings, uses_code)
+
+    monkeypatch.setattr(script, "clean", spy_clean)
+    monkeypatch.setattr(script, "griis_cross_check", spy_cross)
+    world7.run()
+    thresholds = ("satellite_record_share", "satellite_cell_share", "under_rate_factor", "group_min_records")
+    assert len(cleaned) == 1 and len(crossed) == 2  # the known cases, and the cross-check at the chosen setting and the design's
+    layers, known, handed = cleaned[0]
+    assert layers == frozenset(LAYERS) and handed.equals(table)
+    assert [getattr(known, k) for k in thresholds] == [getattr(DESIGN_5, k) for k in thresholds] != [getattr(Settings(), k) for k in thresholds]  # not the defaults, which are setting 132
+    assert all(uses.equals(table) for _, uses in crossed)
+    report = world7.report()
+    assert report["design_setting"]["setting"] == 64 == settings_grid().index(DESIGN_5)  # the design's setting, which is not the default one (132)
+    assert {k: report["design_setting"][k] for k in thresholds} == {k: getattr(DESIGN_5, k) for k in thresholds}
+    assert [s for s, _ in crossed][1] == settings_grid()[64]
 
 
 def test_a_dry_run_that_fails_leaves_no_report_of_an_earlier_one(world7, monkeypatch):
@@ -1376,7 +1460,7 @@ def failing_load(world: ScriptWorld):
 
     world.monkeypatch.setattr(world.script, "load_country_counts", fails)
     with pytest.raises(MemoryError):
-        world.script.score_held_out(world.counts_dir, BOTH_SPLIT, BOTH_REFS, WORLD, Settings(), markers, {"setting": 75})
+        world.script.score_held_out(world.counts_dir, BOTH_SPLIT, BOTH_REFS, WORLD, DESIGN_5, markers, {"setting": 75})
     return markers, attempts
 
 
@@ -1422,13 +1506,13 @@ def test_score_held_out_loads_the_calibration_species_of_half_b_group_mates_incl
         return load_country_counts(out_dir, split_, half, **kwargs)
 
     monkeypatch.setattr(script, "load_country_counts", spy)
-    got = script.score_held_out(out, split, r, WORLD, Settings(), markers, {"setting": 40, "dry_run_chosen": 75})
+    got = script.score_held_out(out, split, r, WORLD, DESIGN_5, markers, {"setting": 40, "dry_run_chosen": 75})
     for marker in markers:
         lines = marker.read_text().splitlines()
         assert [line.split()[0] for line in lines] == ["started", "commit", "setting", "dry_run_chosen"]  # the time, the commit that ran it, and what it scores
         assert re.fullmatch(r"[0-9a-f]{40}|unknown", lines[1].split()[1]) and datetime.fromisoformat(lines[0].split()[1])
     assert calls == [(["alga", "heavy", "p1", "p2", "p3", "p4"], "B", {"unsealed": True})]  # the alga is loaded, the bird of half B never is
-    assert got == {**score(everything, Settings(), r, WORLD), "species_loaded": {"species": 6, "plantae": 5, "not_plantae": 1}}
+    assert got == {**score(everything, DESIGN_5, r, WORLD), "species_loaded": {"species": 6, "plantae": 5, "not_plantae": 1}}
     assert set(got) == {*SCORE, "species_loaded"}
     assert all(isinstance(v, int | float) for k, v in got.items() if k != "species_loaded")
     assert set(got["species_loaded"]) == {"species", "plantae", "not_plantae"}  # no species, no cell: numbers only

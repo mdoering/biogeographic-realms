@@ -4,12 +4,31 @@ The grid has cells named by numbers, so that "lowest cell id" can be told from t
 `(land_km2, sea_km2)`, and a part with less than `ZERO_KM2` of area is none.
 """
 
+from dataclasses import replace
+from pathlib import Path
+
 import numpy as np
 import polars as pl
 import pytest
 
-from clean_helpers import GRID, counts, gone, kept, make_grid, refs, row, taxon
-from realms.clean import KEY, LAYERS, RULES, SWITCHABLE, Settings, _layer_3, _part_table, _Run, clean
+import realms.clean as clean_module
+from clean_helpers import DESIGN_5, GRID, counts, gone, kept, make_grid, refs, row, taxon
+from realms.clean import (
+    KEY,
+    LAYERS,
+    RULES,
+    SWITCHABLE,
+    USES_CODE_SCHEMA,
+    Settings,
+    _layer_3,
+    _part_table,
+    _Run,
+    clean,
+    codes_seen,
+    derive_uses_code,
+    frozen_uses_code,
+    read_uses_code,
+)
 from realms.clean_report import removal_summary
 from realms.grid import ZERO_KM2, cell_of, part_adjacency, parts
 from realms.matrix import cell_taxa
@@ -21,11 +40,20 @@ ALL = frozenset(LAYERS)
 
 # ---- settings
 
-def test_settings_hold_the_design_values():
+def test_default_settings_are_setting_132():
+    # Markus chose setting 132 of the calibration's 144 on 2026-11-01: record share 2%, cell share 20%, rate factor 0.5%, group minimum 300
     s = Settings()
-    assert (s.land_share, s.satellite_gap_km, s.satellite_record_share, s.satellite_cell_share) == (0.95, 500, 0.01, 0.05)
-    assert (s.satellite_min_datasets, s.satellite_min_years, s.group_min_records) == (2, 3, 1000)
-    assert (s.under_max_records, s.under_rate_factor, s.thin_max_records, s.thin_km) == (5, 0.01, 5, 1000)
+    assert (s.satellite_record_share, s.satellite_cell_share, s.under_rate_factor, s.group_min_records) == (0.02, 0.20, 0.005, 300)
+    assert s != DESIGN_5
+    assert (DESIGN_5.satellite_record_share, DESIGN_5.satellite_cell_share, DESIGN_5.under_rate_factor, DESIGN_5.group_min_records) == (0.01, 0.05, 0.01, 1000)
+    assert replace(s, **{k: getattr(DESIGN_5, k) for k in ("satellite_record_share", "satellite_cell_share", "under_rate_factor", "group_min_records")}) == DESIGN_5
+
+
+def test_settings_hold_the_design_values_but_for_the_layer_5_thresholds():
+    s = Settings()
+    assert (s.land_share, s.satellite_gap_km) == (0.95, 500)
+    assert (s.satellite_min_datasets, s.satellite_min_years) == (2, 3)
+    assert (s.under_max_records, s.thin_max_records, s.thin_km) == (5, 5, 1000)
     assert (s.core_share, s.heuristic_min_records, s.wcvp_mode) == (0.9, 20, "native_only")
     assert (s.side_conflict, s.rules_off) == ("environment", frozenset())
     assert s.griis_without_status == "skip"  # a GRIIS list with no distributions is not applied
@@ -341,6 +369,160 @@ def test_gbif_uses_the_code_of_a_list_where_it_occurs_in_the_cells_of_that_list(
     # with no FR row in that cell it is the cell that decides, however many FR rows there are elsewhere
     c = counts(row("s1", "11:land", country="RE"), row("s1", "10:land", country="FR"), row("s1", "13:land", country="FR"))
     assert gone(clean(c, r, GRID), 3, "griis_subnational") == {("s1", "11:land", "RE")}
+
+
+# ---- the frozen country-code decision of the sub-national lists
+
+IC = refs([taxon("s1")], griis=[("s1", "IC", "Tenerife")], admin1=[("11", "IC", "Tenerife", "overlap")])
+
+
+def frozen(*rows_) -> pl.DataFrame:
+    """A frozen table: (country, subdivision, uses_code) rows."""
+    return pl.DataFrame(list(rows_), schema=USES_CODE_SCHEMA, orient="row")
+
+
+def test_a_frozen_uses_code_table_overrides_what_the_counts_say():
+    # no row of the counts carries `IC`, so the counts say GBIF does not use it and the cell decides alone: the ES row goes
+    c = counts(row("s1", "11:land", country="ES"), row("s1", "10:land", country="ES"))
+    assert gone(clean(c, IC, GRID), 3, "griis_subnational") == {("s1", "11:land", "ES")}
+    # frozen as used, the list filters by code: no row is IC, so nothing is taken
+    out = clean(c, IC, GRID, uses_code=frozen(("IC", "Tenerife", True)))
+    assert gone(out, 3, "griis_subnational") == set()
+    assert set(kept(out)) == {("s1", "11:land"), ("s1", "10:land")}
+    # and the other way round: an IC row is in the cell, so the counts say by code and the ES row stays, but frozen as not used the cell decides alone
+    c = counts(row("s1", "11:land", country="IC"), row("s1", "11:land", country="ES", n=5), row("s1", "10:land", country="ES"))
+    assert gone(clean(c, IC, GRID), 3, "griis_subnational") == {("s1", "11:land", "IC")}
+    assert gone(clean(c, IC, GRID, uses_code=frozen(("IC", "Tenerife", False))), 3, "griis_subnational") == {("s1", "11:land", "IC"), ("s1", "11:land", "ES")}
+
+
+def test_a_frozen_table_that_agrees_with_the_counts_changes_nothing():
+    c = counts(row("s1", "11:land", country="IC"), row("s1", "11:land", country="ES"), row("s1", "10:land", country="FR"))
+    derived = derive_uses_code(IC.admin1_cells, codes_seen(c))
+    assert derived.rows() == [("IC", "Tenerife", True)]
+    same = clean(c, IC, GRID)
+    assert clean(c, IC, GRID, uses_code=derived).removed.equals(same.removed)
+
+
+def test_the_frozen_table_decides_every_pass_of_layer_3_not_only_the_first(monkeypatch):
+    # a land species has a row in the open sea of cell 12 and one on the land of cell 13: layer 4 moves the first to 13:land, and layer 3 judges it there again
+    r = refs([taxon("s1", environment="terrestrial")], griis=[("s1", "IC", "Tenerife")], admin1=[("13", "IC", "Tenerife", "overlap")])
+    c = counts(row("s1", "12:sea", country="ES"), row("s1", "13:land", country="ES"))
+    table = frozen(("IC", "Tenerife", True))
+    calls = []
+    real = clean_module._layer_3
+
+    def spy(*args, **kwargs):
+        calls.append((kwargs.get("only") is not None, kwargs.get("uses_code")))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(clean_module, "_layer_3", spy)
+    out = clean(c, r, GRID, frozenset({1, 2, 3, 4}), uses_code=table)
+    assert [first for first, _ in calls] == [False, True]  # the first pass, and the pass over the rows layer 4 moved
+    assert all(t is not None and t.equals(table) for _, t in calls)  # the frozen table, both times, and not the counts' own decision
+    assert gone(out, 4, "land_sea_neighbour") == {("s1", "12:sea", "ES")} and gone(out, 3) == set()  # by code: no ES row is taken, however many cells the list has
+    calls.clear()
+    assert gone(clean(c, r, GRID, frozenset({1, 2, 3, 4})), 3, "griis_subnational") != set()  # derived, the cell decides alone and takes them
+
+
+def test_a_frozen_table_is_not_read_when_layer_3_is_off():
+    c = counts(row("s1", "11:land", country="ES"))
+    broken = frozen(("IC", "Tenerife", True), ("IC", "Tenerife", False))  # twice, which layer 3 would refuse
+    assert clean(c, IC, GRID, frozenset({1, 2, 4, 5}), uses_code=broken).presence.height == 1
+
+
+def test_a_frozen_table_that_misses_an_applied_list_is_refused():
+    c = counts(row("s1", "11:land", country="ES"))
+    with pytest.raises(ValueError, match=r"IC.*Tenerife"):
+        clean(c, IC, GRID, uses_code=frozen(("IC", "Gomera", True)))
+    with pytest.raises(ValueError, match=r"IC.*Tenerife"):
+        clean(c, IC, GRID, uses_code=frozen())
+    # a place of the table that no list names does no harm, and a list that is not applied needs no decision (under `skip` a name-only list is not applied)
+    name_only = refs([taxon("s1")], griis_name_only=[("s1", "IC", "Tenerife")], admin1=[("11", "IC", "Tenerife", "overlap")])
+    assert clean(c, name_only, GRID, uses_code=frozen(("FR", "Reunion", False))).presence.height == 1
+    with pytest.raises(ValueError, match=r"IC.*Tenerife"):
+        clean(c, name_only, GRID, settings=Settings(griis_without_status="apply"), uses_code=frozen(("FR", "Reunion", False)))
+
+
+def test_a_frozen_table_of_the_wrong_shape_is_refused():
+    c = counts(row("s1", "11:land", country="ES"))
+    with pytest.raises(ValueError, match="columns"):
+        clean(c, IC, GRID, uses_code=frozen(("IC", "Tenerife", True)).drop("uses_code"))
+    with pytest.raises(ValueError, match="uses_code"):
+        clean(c, IC, GRID, uses_code=pl.DataFrame({"country": ["IC"], "subdivision": ["Tenerife"], "uses_code": ["yes"]}))
+    with pytest.raises(ValueError, match="twice"):
+        clean(c, IC, GRID, uses_code=frozen(("IC", "Tenerife", True), ("IC", "Tenerife", False)))
+    with pytest.raises(ValueError, match="no value"):
+        clean(c, IC, GRID, uses_code=frozen(("IC", "Tenerife", None)))
+
+
+def test_the_derivation_decides_every_place_of_the_lists_by_where_gbif_uses_the_code():
+    cells = pl.DataFrame(
+        [("11", "FR", "Reunion", "centre"), ("12", "FR", "Reunion", "overlap"), ("11", "US", "Texas", "centre"), ("13", "IC", "Tenerife", "overlap")],
+        schema={"cell": pl.String, "country": pl.String, "subdivision": pl.String, "via": pl.String},
+        orient="row",
+    )
+    c = counts(row("s1", "11:land", country="RE"), row("s1", "11:sea", country="US"), row("s1", "10:land", country="FR"), row("s1", "13:land", country="ES"), row("s1", "13:sea", country=None))
+    table = derive_uses_code(cells, codes_seen(c))
+    assert table.schema == pl.Schema(USES_CODE_SCHEMA)
+    # `FR` is in the counts but not in the cells of Reunion, `US` is in Texas's cell, and no row says `IC`; sorted by country and subdivision
+    assert table.rows() == [("FR", "Reunion", False), ("IC", "Tenerife", False), ("US", "Texas", True)]
+    assert derive_uses_code(cells.head(0), codes_seen(c)).rows() == []
+    assert codes_seen(c).sort("cell", "countrycode").rows() == [("FR", "10"), ("RE", "11"), ("US", "11"), ("ES", "13")]  # no null code, each pair once
+
+
+def test_a_frozen_table_is_read_from_its_file_and_written_back_the_same(tmp_path):
+    table = frozen(("US", "Texas", True), ("FR", "Reunion", False))
+    path = tmp_path / "griis_uses_code-res7.csv"
+    table.sort("country", "subdivision").write_csv(path)
+    assert path.read_text().splitlines() == ["country,subdivision,uses_code", "FR,Reunion,false", "US,Texas,true"]
+    assert read_uses_code(path).equals(table.sort("country", "subdivision"))
+    assert frozen_uses_code(7, tmp_path).equals(read_uses_code(path))
+    with pytest.raises(FileNotFoundError, match=r"griis_codes\.py"):
+        frozen_uses_code(6, tmp_path)  # the message says what to run
+    path.write_text("country,subdivision,uses_code\nFR,Reunion,maybe\n")
+    with pytest.raises(ValueError, match="uses_code"):
+        read_uses_code(path)
+    path.write_text("country,subdivision\nFR,Reunion\n")
+    with pytest.raises(ValueError, match="columns"):
+        read_uses_code(path)
+
+
+ROOT = Path(__file__).parent.parent
+FROZEN_RESOLUTIONS = {7: "0020744-261023074918325", 6: "0019721-261023074918325"}
+
+
+def derived_from_half_a(resolution: int) -> pl.DataFrame:
+    """The table as `scripts/griis_codes.py` derives it, from half A's counts, or a skip where the data is not on this machine."""
+    import importlib.util
+
+    key = FROZEN_RESOLUTIONS[resolution]
+    needed = [
+        ROOT / "data" / "gbif" / key / "_COMPLETE",
+        ROOT / "data" / "split" / "halves-315557.parquet",
+        ROOT / "data" / "reference" / "manifest.json",
+        ROOT / "data" / "reference" / "grids" / f"ISEA3H-{resolution}.gpkg",
+    ]
+    if missing := [p for p in needed if not p.exists()]:
+        pytest.skip(f"{missing[0]} is not there")
+    spec = importlib.util.spec_from_file_location("griis_codes_script", ROOT / "scripts" / "griis_codes.py")
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    return script.derive(ROOT / "data" / "gbif" / key, resolution, ROOT / "data" / "reference", ROOT / "data" / "split" / "halves-315557.parquet")
+
+
+def test_the_frozen_res7_table_equals_the_derivation_from_half_a():
+    derived = derived_from_half_a(7)
+    frozen_file = read_uses_code(ROOT / "reference" / "griis_uses_code-res7.csv")
+    assert frozen_file.equals(derived) and frozen_file.height == 24  # every place of the sub-national lists has its decision
+    decided = {(c, d): u for c, d, u in frozen_file.iter_rows()}
+    # both ways occur: the French overseas places carry the sovereign's code in the list only (their records say RE, GP and so on), the US states and the rest carry their own
+    assert [k for k, u in decided.items() if not u] == [("FR", "Guadeloupe"), ("FR", "Martinique"), ("FR", "Reunion"), ("FR", "Saint-Pierre")]
+    assert decided[("US", "Alaska")] and decided[("US", "Hawaii")] and decided[("PT", "Azores")]
+
+
+def test_the_frozen_res6_table_equals_the_derivation_from_half_a():
+    derived = derived_from_half_a(6)
+    assert read_uses_code(ROOT / "reference" / "griis_uses_code-res6.csv").equals(derived)
 
 
 def test_the_code_gbif_uses_is_read_from_the_counts_and_not_from_what_is_left_of_them():
@@ -764,7 +946,7 @@ RANDOM_EDGES = [("1", "2"), ("2", "3"), ("3", "4"), ("4", "5"), ("5", "6"), ("6"
 # 15 degrees of longitude apart, so that cells are over 1,000 km apart and the neighbour spacing, the median of the edges, is 15 degrees
 RANDOM_CENTRES = {cell: (0.0, 15.0 * i) for i, cell in enumerate(RANDOM_CELLS)}
 RANDOM_GRID = make_grid(RANDOM_CELLS, RANDOM_EDGES, RANDOM_CENTRES)
-# thresholds of layer 5 that the random tables of 8 cells and a few hundred records left by layers 1 to 4 can meet: the design's would need 20 cells and 1,000 records of a group
+# thresholds of layer 5 that the random tables of 8 cells and a few hundred records left by layers 1 to 4 can meet, which the defaults (setting 132) and the design's need not
 LOOSE_5 = {"satellite_record_share": 0.3, "satellite_cell_share": 0.6, "group_min_records": 60, "under_max_records": 20, "under_rate_factor": 0.5}
 RANDOM_PARTS = [f"{cell}:{kind}" for cell in RANDOM_CELLS for kind in ("land", "sea")]
 # the land parts with area, and the TDWG regions they touch: 7 is in none, and 5's land has no area
@@ -862,7 +1044,7 @@ def random_case(seed: int):
     )
 
 
-@pytest.mark.parametrize("heuristics", [{}, LOOSE_5], ids=["design-layer5", "loose-layer5"])
+@pytest.mark.parametrize("heuristics", [{}, LOOSE_5], ids=["default-layer5", "loose-layer5"])
 @pytest.mark.parametrize("layer_1", [True, False], ids=["layer1", "no-layer1"])
 @pytest.mark.parametrize("side_conflict", ["environment", "leave"])
 @pytest.mark.parametrize("wcvp_mode", ["native_only", "introduced", "off"])

@@ -6,12 +6,13 @@ north and south, are the cells where a rare record can sit by itself. All cells 
 """
 
 import math
+from dataclasses import replace
 
 import polars as pl
 import pytest
 
-from clean_helpers import counts, gone, kept, make_grid, refs, row, taxon
-from realms.clean import LAYERS, REMOVED_SCHEMA, RULES, SWITCHABLE, Cleaned, Settings, clean
+from clean_helpers import DESIGN_5, counts, gone, kept, make_grid, refs, row, taxon
+from realms.clean import LAYERS, REMOVED_SCHEMA, RULES, SWITCHABLE, Cleaned, clean
 from realms.outliers import (
     cell_graph,
     core_parts,
@@ -64,27 +65,27 @@ def big_range(species, extra: dict | None = None, **given_extra):
 
 def test_core_parts_are_the_top_cells_holding_90_percent_of_the_records():
     # 60 + 30 hold 90 of the 100, so the cells with 6 and 4 are not core
-    core = core_parts(presence(*rows("a", {"1": 60, "2": 30, "3": 6, "4": 4})), Settings())
+    core = core_parts(presence(*rows("a", {"1": 60, "2": 30, "3": 6, "4": 4})), DESIGN_5)
     assert {"species_id", "part", "cell"} <= set(core.columns)
     assert set(core["part"]) == {"1:land", "2:land"}
     assert set(core["cell"]) == {"1", "2"}
 
 
 def test_a_species_with_under_20_records_is_all_core_and_with_20_it_is_not():
-    assert set(core_parts(presence(*rows("a", {"1": 10, "2": 8, "3": 1})), Settings())["part"]) == {"1:land", "2:land", "3:land"}  # 19
-    assert set(core_parts(presence(*rows("b", {"1": 17, "2": 2, "3": 1})), Settings())["part"]) == {"1:land", "2:land"}  # 20: 18 are 90%
+    assert set(core_parts(presence(*rows("a", {"1": 10, "2": 8, "3": 1})), DESIGN_5)["part"]) == {"1:land", "2:land", "3:land"}  # 19
+    assert set(core_parts(presence(*rows("b", {"1": 17, "2": 2, "3": 1})), DESIGN_5)["part"]) == {"1:land", "2:land"}  # 20: 18 are 90%
 
 
 def test_among_tied_cells_the_core_is_the_lowest_cell_ids_up_to_the_line():
     # half of the 100 records is reached by two of the three cells of 30: the first two by cell id, which is arbitrary but always the same
-    core = core_parts(presence(*rows("a", {"3": 30, "1": 30, "2": 30, "4": 10})), Settings(core_share=0.5))
+    core = core_parts(presence(*rows("a", {"3": 30, "1": 30, "2": 30, "4": 10})), replace(DESIGN_5, core_share=0.5))
     assert set(core["cell"]) == {"1", "2"}
 
 
 def test_a_long_tail_of_equal_cells_that_crosses_the_line_is_core_only_up_to_the_line():
     # 1,000 records: 17 cells of 50 hold 850, and the line is at 900, so 50 of the 150 singletons are core as well: 67 cells, not all 167
     cells = {f"big{i:02d}": 50 for i in range(17)} | {f"one{i:03d}": 1 for i in range(150)}
-    core = core_parts(presence(*rows("a", cells)), Settings())
+    core = core_parts(presence(*rows("a", cells)), DESIGN_5)
     assert core["cell"].n_unique() == 67
     assert {c for c in core["cell"] if c.startswith("big")} == {f"big{i:02d}" for i in range(17)}
     assert {c for c in core["cell"] if c.startswith("one")} == {f"one{i:03d}" for i in range(50)}
@@ -92,12 +93,12 @@ def test_a_long_tail_of_equal_cells_that_crosses_the_line_is_core_only_up_to_the
 
 def test_a_cell_is_core_with_all_its_parts_and_countries():
     r = [row("a", "1:land", "AA", n=30), row("a", "1:sea", "BB", n=30), row("a", "2:land", "AA", n=30), row("a", "3:land", "AA", n=10)]
-    core = core_parts(presence(*r), Settings(core_share=0.5))
+    core = core_parts(presence(*r), replace(DESIGN_5, core_share=0.5))
     assert set(core["part"]) == {"1:land", "1:sea"}  # the cell holds 60 of the 100, summed over its parts
 
 
 def test_core_share_of_one_makes_every_cell_core():
-    assert core_parts(presence(*rows("a", {"1": 600, "2": 300, "3": 99, "4": 1})), Settings(core_share=1.0))["cell"].n_unique() == 4
+    assert core_parts(presence(*rows("a", {"1": 600, "2": 300, "3": 99, "4": 1})), replace(DESIGN_5, core_share=1.0))["cell"].n_unique() == 4
 
 
 # ---- the grid
@@ -138,7 +139,7 @@ def tiger(core_other=2000, here=1, zoo_total=5001, tiger_in_groups=True):
 def test_an_injected_zoo_record_is_removed():
     # 1 record in a cell holding 5,000 records of its group, far from a 400-record core
     c, r = tiger()
-    out = clean(c, r, WORLD, L5)
+    out = clean(c, r, WORLD, L5, DESIGN_5)
     assert gone(out, rule="under_reported") == {("tiger", f"{ZOO}:land", "AA")}
     assert gone(out) == gone(out, rule="under_reported")
     assert set(out.removed["layer"]) == {5}
@@ -159,25 +160,25 @@ def test_an_injected_zoo_record_is_removed():
 )
 def test_a_record_is_under_reported_only_if_all_four_conditions_hold(core_other, here, zoo_total, removed):
     c, r = tiger(core_other, here, zoo_total)
-    assert (gone(clean(c, r, WORLD, L5), rule="under_reported") == {("tiger", f"{ZOO}:land", "AA")}) is removed
+    assert (gone(clean(c, r, WORLD, L5, DESIGN_5), rule="under_reported") == {("tiger", f"{ZOO}:land", "AA")}) is removed
 
 
 def test_a_species_with_no_group_is_not_judged_by_its_rate():
     c, r = tiger(tiger_in_groups=False)
-    assert not gone(clean(c, r, WORLD, L5))
+    assert not gone(clean(c, r, WORLD, L5, DESIGN_5))
 
 
 def test_under_reported_needs_20_records_in_all():
     # 19 and 20 records, the one in the zoo's cell the same
     for core, removed in ((18, False), (19, True)):
         c = counts(*rows("s", {"1": core, ZOO: 1}), *rows("other", {"1": 100, ZOO: 5000}))
-        out = clean(c, refs(groups=[("s", "Mammals"), ("other", "Mammals")]), WORLD, L5)
+        out = clean(c, refs(groups=[("s", "Mammals"), ("other", "Mammals")]), WORLD, L5, DESIGN_5)
         assert (gone(out, rule="under_reported") == {("s", f"{ZOO}:land", "AA")}) is removed, core
 
 
 def test_a_vagrant_patch_is_removed():
     c = counts(*big_range("s", {VAGRANT: 1}))
-    out = clean(c, refs(), WORLD, L5)
+    out = clean(c, refs(), WORLD, L5, DESIGN_5)
     assert gone(out, rule="detached_satellite") == {("s", f"{VAGRANT}:land", "AA")}
     assert gone(out) == gone(out, rule="detached_satellite")
     assert len(kept(out)) == 45 and sum(kept(out).values()) == 1000
@@ -187,17 +188,17 @@ def test_a_narrow_endemic_with_15_records_in_2_cells_survives():
     # the cells are 5,500 km apart, and 10 + 5 records is under the 20 that the heuristics need
     c = counts(*rows("endemic", {VAGRANT: 10, ZOO: 5}))
     r = refs(groups=[("endemic", "Birds")])
-    out = clean(c, r, WORLD, L5)
+    out = clean(c, r, WORLD, L5, DESIGN_5)
     assert not gone(out) and sum(kept(out).values()) == 15
     # and with the other cell holding group records, as the zoo's does
-    out = clean(counts(*rows("endemic", {VAGRANT: 10, ZOO: 5}), *rows("noise", {ZOO: 5000})), refs(groups=[("endemic", "Birds"), ("noise", "Birds")]), WORLD, L5)
+    out = clean(counts(*rows("endemic", {VAGRANT: 10, ZOO: 5}), *rows("noise", {ZOO: 5000})), refs(groups=[("endemic", "Birds"), ("noise", "Birds")]), WORLD, L5, DESIGN_5)
     assert ("endemic", f"{ZOO}:land") in kept(out)
 
 
 @pytest.mark.parametrize("datasets, years, survives", [(2, 3, True), (5, 9, True), (1, 3, False), (2, 2, False), (1, 1, False)])
 def test_a_disjunct_patch_survives_with_2_datasets_and_3_years(datasets, years, survives):
     c = counts(*big_range("s", {VAGRANT: 5}, n_datasets=datasets, n_years=years))
-    out = clean(c, refs(), WORLD, L5)
+    out = clean(c, refs(), WORLD, L5, DESIGN_5)
     assert (not gone(out)) is survives
     assert gone(out) == (set() if survives else {("s", f"{VAGRANT}:land", "AA")})
 
@@ -205,23 +206,23 @@ def test_a_disjunct_patch_survives_with_2_datasets_and_3_years(datasets, years, 
 def test_the_datasets_and_years_of_a_patch_are_the_largest_over_its_parts():
     # no part of the two-cell patch has 2 datasets and 3 years, but one has 2 datasets and the other 3 years. A lower bound for the patch, and kept.
     c = counts(*big_range("s"), *rows("s", {GHOST_FAR: 5}, n_datasets=2, n_years=1), *rows("s", {GHOST_NEAR: 5}, n_datasets=1, n_years=3))
-    assert not gone(clean(c, refs(), WORLD, L5))
+    assert not gone(clean(c, refs(), WORLD, L5, DESIGN_5))
     c = counts(*big_range("s"), *rows("s", {GHOST_FAR: 5}, n_datasets=1, n_years=1), *rows("s", {GHOST_NEAR: 5}, n_datasets=1, n_years=1))
-    assert gone(clean(c, refs(), WORLD, L5)) == {("s", f"{GHOST_FAR}:land", "AA"), ("s", f"{GHOST_NEAR}:land", "AA")}
+    assert gone(clean(c, refs(), WORLD, L5, DESIGN_5)) == {("s", f"{GHOST_FAR}:land", "AA"), ("s", f"{GHOST_NEAR}:land", "AA")}
 
 
 def test_a_patch_of_two_cells_is_judged_as_one():
     # 2 of 47 cells is 4.3%, and its 10 records are 0.99% of 1,010. 5 and 5 are each far under, but it is the patch that counts
     c = counts(*big_range("s", {GHOST_FAR: 5, GHOST_NEAR: 5}))
-    assert {part for _, part, _ in gone(clean(c, refs(), WORLD, L5))} == {f"{GHOST_FAR}:land", f"{GHOST_NEAR}:land"}
+    assert {part for _, part, _ in gone(clean(c, refs(), WORLD, L5, DESIGN_5))} == {f"{GHOST_FAR}:land", f"{GHOST_NEAR}:land"}
     c = counts(*big_range("s", {GHOST_FAR: 5, GHOST_NEAR: 6}))  # 11 of 1,011 is 1.09%
-    assert not gone(clean(c, refs(), WORLD, L5))
+    assert not gone(clean(c, refs(), WORLD, L5, DESIGN_5))
 
 
 @pytest.mark.parametrize("records, removed", [(10, True), (11, False)])
 def test_a_patch_of_1_percent_of_the_records_is_not_under_it(records, removed):
     # 10 of 1,010 is 0.99% and 11 of 1,011 is 1.09%, of 1 cell in 46
-    out = clean(counts(*big_range("s", {VAGRANT: records})), refs(), WORLD, L5)
+    out = clean(counts(*big_range("s", {VAGRANT: records})), refs(), WORLD, L5, DESIGN_5)
     assert bool(gone(out)) is removed
 
 
@@ -234,7 +235,7 @@ def test_a_thin_species_is_taken_out():
         *rows("one", {"1": 3}),
         *rows("cell", {"1": 2, "2": 1}),
     )
-    out = clean(c, refs(), WORLD, L5)
+    out = clean(c, refs(), WORLD, L5, DESIGN_5)
     assert {s for s, _, _ in gone(out, rule="thin_long_range")} == {"far", "far4"}
     assert gone(out) == gone(out, rule="thin_long_range")
     assert {s for s, _ in kept(out)} == {"near", "five", "one", "cell"}
@@ -245,9 +246,9 @@ def test_a_thin_species_is_taken_out():
 def test_a_thin_species_needs_cells_over_1000_km_apart():
     # cells 3, 4 and 5 are 6, 9 and 12 degrees from cell 1 on the equator: 667, 1,000.8 and 1,334 km
     for far, removed in (("3", False), ("4", True), ("5", True)):
-        out = clean(counts(*rows("s", {"1": 1, far: 1})), refs(), WORLD, L5)
+        out = clean(counts(*rows("s", {"1": 1, far: 1})), refs(), WORLD, L5, DESIGN_5)
         assert bool(gone(out)) is removed, far
-    assert not gone(clean(counts(*rows("s", {"1": 1, "4": 1})), refs(), WORLD, L5, Settings(thin_km=1001)))
+    assert not gone(clean(counts(*rows("s", {"1": 1, "4": 1})), refs(), WORLD, L5, replace(DESIGN_5, thin_km=1001)))
 
 
 # ---- the guardrails
@@ -256,20 +257,20 @@ def test_core_cells_are_never_removed_even_where_they_meet_the_condition():
     vagrant = counts(*big_range("s", {VAGRANT: 1}))
     c, r = tiger()
     for table, reference, rule, cell in ((vagrant, refs(), "detached_satellite", VAGRANT), (c, r, "under_reported", ZOO)):
-        assert gone(clean(table, reference, WORLD, L5, Settings()), rule=rule), rule  # not core: removed
-        guarded = clean(table, reference, WORLD, L5, Settings(core_share=1.0))  # every cell core
+        assert gone(clean(table, reference, WORLD, L5, DESIGN_5), rule=rule), rule  # not core: removed
+        guarded = clean(table, reference, WORLD, L5, replace(DESIGN_5, core_share=1.0))  # every cell core
         assert not gone(guarded), rule
         assert any(part == f"{cell}:land" for _, part in kept(guarded)), rule
 
 
 def test_a_species_under_20_records_is_never_judged_by_the_record_share_rules():
     c = counts(*rows("s", {"1": 18, ZOO: 1}), *rows("other", {"1": 2000, ZOO: 5000}), *rows("t", {"1": 10, VAGRANT: 9}))  # 19 records each
-    out = clean(c, refs(groups=[("s", "Mammals"), ("other", "Mammals"), ("t", "Mammals")]), WORLD, L5)
+    out = clean(c, refs(groups=[("s", "Mammals"), ("other", "Mammals"), ("t", "Mammals")]), WORLD, L5, DESIGN_5)
     assert not gone(out)
 
 
 def test_the_thin_rule_is_the_exception_to_the_core_guardrail():
-    out = clean(counts(*rows("s", {"1": 1, VAGRANT: 1})), refs(), WORLD, L5, Settings(core_share=1.0))
+    out = clean(counts(*rows("s", {"1": 1, VAGRANT: 1})), refs(), WORLD, L5, replace(DESIGN_5, core_share=1.0))
     assert gone(out, rule="thin_long_range") == {("s", "1:land", "AA"), ("s", f"{VAGRANT}:land", "AA")}
 
 
@@ -281,20 +282,20 @@ def test_a_cell_is_judged_on_its_records_summed_over_parts_and_countries_and_goe
     r = refs(groups=[("tiger", "Mammals"), ("other", "Mammals")])
     # 3 + 2 records in two parts and two countries of the zoo's cell: 5 at most, and both rows go
     zoo = [row("tiger", f"{ZOO}:land", "AA", n=3), row("tiger", f"{ZOO}:sea", "BB", n=2)]
-    assert gone(clean(counts(*core, *other, *zoo), r, WORLD, L5)) == {("tiger", f"{ZOO}:land", "AA"), ("tiger", f"{ZOO}:sea", "BB")}
+    assert gone(clean(counts(*core, *other, *zoo), r, WORLD, L5, DESIGN_5)) == {("tiger", f"{ZOO}:land", "AA"), ("tiger", f"{ZOO}:sea", "BB")}
     # 3 + 3 is 6, and each part alone is under 5: kept
     zoo = [row("tiger", f"{ZOO}:land", "AA", n=3), row("tiger", f"{ZOO}:sea", "BB", n=3)]
-    assert not gone(clean(counts(*core, *other, *zoo), r, WORLD, L5))
+    assert not gone(clean(counts(*core, *other, *zoo), r, WORLD, L5, DESIGN_5))
 
 
 def test_a_patch_is_5_percent_of_the_cells_not_of_the_parts():
     # the vagrant's cell has two parts. 1 cell of 20 is 5%, which is not under, and 1 of 22 is 4.5%, which is, where 2 parts of 23 would be 8.7%
     chain = {str(i): 50 for i in range(1, 20)}
     c = counts(*rows("s", chain), row("s", f"{VAGRANT}:land", n=1), row("s", f"{VAGRANT}:sea", n=1))
-    assert not gone(clean(c, refs(), WORLD, L5))
+    assert not gone(clean(c, refs(), WORLD, L5, DESIGN_5))
     chain = {str(i): 50 for i in range(1, 22)}
     c = counts(*rows("s", chain), row("s", f"{VAGRANT}:land", n=1), row("s", f"{VAGRANT}:sea", n=1))
-    assert gone(clean(c, refs(), WORLD, L5)) == {("s", f"{VAGRANT}:land", "AA"), ("s", f"{VAGRANT}:sea", "AA")}
+    assert gone(clean(c, refs(), WORLD, L5, DESIGN_5)) == {("s", f"{VAGRANT}:land", "AA"), ("s", f"{VAGRANT}:sea", "AA")}
 
 
 # ---- the gap
@@ -303,15 +304,15 @@ def test_a_patch_is_5_percent_of_the_cells_not_of_the_parts():
 def test_the_gap_is_the_setting_plus_the_median_neighbour_spacing_of_the_grid(step, removed):
     # the same 6 degrees (667 km) between a patch and the range: apart where cells are a degree wide (gap 500 + 111 km), one patch where they are 3 (500 + 334)
     grid = world(step=step, extra={VAGRANT: (6.0, 0.0)})
-    out = clean(counts(*big_range("s", {VAGRANT: 1})), refs(), grid, L5)
+    out = clean(counts(*big_range("s", {VAGRANT: 1})), refs(), grid, L5, DESIGN_5)
     assert bool(gone(out, rule="detached_satellite")) is removed
 
 
 def test_the_gap_setting_moves_the_gap():
     c = counts(*big_range("s", {VAGRANT: 1}))
     grid = world(extra={VAGRANT: (6.0, 0.0)})  # 667 km from the range
-    assert not gone(clean(c, refs(), grid, L5, Settings(satellite_gap_km=500)))
-    assert gone(clean(c, refs(), grid, L5, Settings(satellite_gap_km=300)))
+    assert not gone(clean(c, refs(), grid, L5, replace(DESIGN_5, satellite_gap_km=500)))
+    assert gone(clean(c, refs(), grid, L5, replace(DESIGN_5, satellite_gap_km=300)))
 
 
 # ---- the rules
@@ -330,8 +331,8 @@ def test_the_rules_are_of_layer_5():
 @pytest.mark.parametrize("rule", ["detached_satellite", "under_reported", "thin_long_range"])
 def test_each_rule_can_be_switched_off_on_its_own(rule):
     c, r = everything()
-    on = clean(c, r, WORLD, L5)
-    off = clean(c, r, WORLD, L5, Settings(rules_off={rule}))
+    on = clean(c, r, WORLD, L5, DESIGN_5)
+    off = clean(c, r, WORLD, L5, replace(DESIGN_5, rules_off={rule}))
     assert gone(on, rule=rule) and not gone(off, rule=rule)
     for other in {"detached_satellite", "under_reported", "thin_long_range"} - {rule}:
         assert gone(off, rule=other) == gone(on, rule=other)
@@ -343,45 +344,45 @@ def test_a_cell_that_two_rules_flag_goes_with_the_first_and_the_second_takes_it_
     c = counts(*big_range("s", {VAGRANT: 1}), *rows("filler", {VAGRANT: 5000}))
     r = refs(groups=[("s", "Birds"), ("filler", "Birds")])
     both = {("s", f"{VAGRANT}:land", "AA")}
-    assert gone(clean(c, r, WORLD, L5), rule="detached_satellite") == both
-    assert not gone(clean(c, r, WORLD, L5), rule="under_reported")
-    assert gone(clean(c, r, WORLD, L5, Settings(rules_off={"detached_satellite"})), rule="under_reported") == both
+    assert gone(clean(c, r, WORLD, L5, DESIGN_5), rule="detached_satellite") == both
+    assert not gone(clean(c, r, WORLD, L5, DESIGN_5), rule="under_reported")
+    assert gone(clean(c, r, WORLD, L5, replace(DESIGN_5, rules_off={"detached_satellite"})), rule="under_reported") == both
 
 
 def test_the_heuristics_are_judged_on_what_the_layers_before_them_leave():
     # the zoo's group has its 5,000 records from a species that layer 2 takes out, so the zoo cell is not well sampled
     c, r = tiger()
     r = refs([taxon("tiger"), taxon("other", extinct=True)], groups=r.groups.rows())
-    assert ("tiger", f"{ZOO}:land") in kept(clean(c, r, WORLD, ALL))
-    assert not gone(clean(c, r, WORLD, ALL), rule="under_reported")
-    assert gone(clean(c, r, WORLD, ALL - {2}), rule="under_reported") == {("tiger", f"{ZOO}:land", "AA")}
+    assert ("tiger", f"{ZOO}:land") in kept(clean(c, r, WORLD, ALL, DESIGN_5))
+    assert not gone(clean(c, r, WORLD, ALL, DESIGN_5), rule="under_reported")
+    assert gone(clean(c, r, WORLD, ALL - {2}, DESIGN_5), rule="under_reported") == {("tiger", f"{ZOO}:land", "AA")}
 
 
 def test_layer_5_off_removes_nothing_and_on_it_changes_nothing_where_nothing_is_an_outlier():
     c = counts(*rows("s", {"1": 30, "2": 30, "3": 30}))
-    assert clean(c, refs(), WORLD, ALL).presence.equals(clean(c, refs(), WORLD, ALL - {5}).presence)
+    assert clean(c, refs(), WORLD, ALL, DESIGN_5).presence.equals(clean(c, refs(), WORLD, ALL - {5}, DESIGN_5).presence)
     c, r = everything()
-    assert not clean(c, r, WORLD, ALL - {5}).removed.filter(pl.col("layer") == 5).height
+    assert not clean(c, r, WORLD, ALL - {5}, DESIGN_5).removed.filter(pl.col("layer") == 5).height
 
 
 def test_the_heuristics_return_what_they_flag():
     c, r = everything()
     p = c.with_columns(pl.col("n").alias("records"))
-    satellite = detached_satellites(p, WORLD, Settings())
+    satellite = detached_satellites(p, WORLD, DESIGN_5)
     assert satellite.select("species_id", "cell").rows() == [("vagrant", VAGRANT)]
     assert {"records", "patch_records", "patch_cells", "patch_datasets", "patch_years"} <= set(satellite.columns)
     assert satellite["patch_records"].to_list() == [1] and satellite["patch_cells"].to_list() == [1]
-    under = under_reported(p, r.groups, Settings())
+    under = under_reported(p, r.groups, DESIGN_5)
     assert under.select("species_id", "cell").rows() == [("tiger", ZOO)]
     assert {"records", "group_records", "rate", "core_rate"} <= set(under.columns)
-    thin = thin_long_range(p, WORLD, Settings())
+    thin = thin_long_range(p, WORLD, DESIGN_5)
     assert sorted(thin.select("species_id", "cell").rows()) == [("ghost", "1"), ("ghost", GHOST_FAR)]
     assert thin["km"].min() > 1000
 
 
 def test_the_heuristics_refuse_a_presence_without_the_columns_they_need():
     with pytest.raises(ValueError, match="n_years"):
-        core_parts(presence(*rows("a", {"1": 5})).drop("n_years"), Settings())
+        core_parts(presence(*rows("a", {"1": 5})).drop("n_years"), DESIGN_5)
 
 
 # ---- suspect cells
@@ -433,7 +434,7 @@ def test_a_zoo_cell_stands_out_in_the_output_of_clean():
     c = counts(*[r for t in tigers for r in rows(t, {"1": 200, "2": 200, ZOO: 1})], *rows("other", {"1": 2000, "2": 2000, ZOO: 5000}), *rows("bystander", {PATCH: 30}))
     r = refs(groups=[(s, "Mammals") for s in (*tigers, "other")] + [("bystander", "Birds")])
     grid = world(edges=[(ZOO, PATCH)])
-    out = clean(c, r, grid, L5)
+    out = clean(c, r, grid, L5, DESIGN_5)
     assert len(gone(out, rule="under_reported")) == 12
     zoo = suspect_cells(out, grid)
     assert zoo["cell"].to_list() == [ZOO]

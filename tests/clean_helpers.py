@@ -6,10 +6,15 @@ The grid has cells named by numbers, so that "lowest cell id" can be told from t
 
 import polars as pl
 
-from realms.clean import Cleaned
+from realms.clean import Cleaned, Settings
 from realms.grid import Grid
 from realms.natives import References
 from realms.occurrences import COUNTS, DISTINCT
+
+# the design's layer 5 thresholds, which were the defaults of `Settings` until setting 132 of the calibration became them (Markus, 2026-11-01). A test of
+# what the design's values do passes this, and does not lean on the defaults
+DESIGN_5 = Settings(satellite_record_share=0.01, satellite_cell_share=0.05, under_rate_factor=0.01, group_min_records=1000)
+
 
 def make_grid(cells: dict[str, tuple[float, float]], edges: list[tuple[str, str]] = (), centres: dict[str, tuple[float, float]] | None = None) -> Grid:
     """A grid of `cells` (name: (land_km2, sea_km2)) with `edges` for neighbours. Cells sit a degree of longitude apart on the equator unless

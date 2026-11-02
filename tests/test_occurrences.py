@@ -304,6 +304,7 @@ def test_clean_counts_takes_the_resolution_from_the_marker_before_it_loads_anyth
 
     for name in ("twins_of", "load_grid", "load_references", "load_split", "load_country_counts"):
         monkeypatch.setattr(script, name, loaded)
+    monkeypatch.setattr(script, "FROZEN_DIR", tmp_path / "frozen")  # the repository's own table is not what is tested here
     out = ingested(tmp_path, SEVEN)
     without = tmp_path / "without"
     ingest(download(tmp_path, SEVEN), without)
@@ -315,6 +316,34 @@ def test_clean_counts_takes_the_resolution_from_the_marker_before_it_loads_anyth
     # with the marker and no resolution stated, it goes on, as far as the reference files that are not there
     monkeypatch.setattr("sys.argv", ["clean_counts.py", "--counts", str(out), "--reference", str(tmp_path / "none"), "--results", str(tmp_path / "results")])
     with pytest.raises(SystemExit, match="ISEA3H-6.gpkg"):
+        script.main()
+
+
+def test_clean_counts_refuses_without_the_frozen_country_code_table_before_it_loads_or_writes_anything(tmp_path, monkeypatch):
+    script = load_clean_counts()
+
+    def loaded(*args, **kwargs):
+        raise AssertionError("something was loaded")
+
+    for name in ("twins_of", "load_grid", "load_references", "load_split", "load_country_counts"):
+        monkeypatch.setattr(script, name, loaded)
+    out = ingested(tmp_path, SEVEN)
+    reference = tmp_path / "reference"
+    for stub in ("grids/ISEA3H-6.gpkg", "natural_earth/ne_10m_land.zip", "exports/extended/col.zip"):
+        (reference / stub).parent.mkdir(parents=True, exist_ok=True)
+        (reference / stub).touch()
+    split = tmp_path / "halves.parquet"
+    split.touch()
+    frozen = tmp_path / "frozen"
+    frozen.mkdir()
+    monkeypatch.setattr(script, "FROZEN_DIR", frozen)
+    monkeypatch.setattr("sys.argv", ["clean_counts.py", "--counts", str(out), "--reference", str(reference), "--split", str(split), "--results", str(tmp_path / "results")])
+    with pytest.raises(SystemExit, match=r"FAILED .*griis_uses_code-res6\.csv is missing.*scripts/griis_codes\.py"):
+        script.main()
+    assert not (tmp_path / "results").exists()
+    # with the table there it goes on, and the loaders (which fail here) are the next thing it reaches
+    (frozen / "griis_uses_code-res6.csv").write_text("country,subdivision,uses_code\n")
+    with pytest.raises(AssertionError, match="something was loaded"):
         script.main()
 
 

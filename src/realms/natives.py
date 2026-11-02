@@ -694,6 +694,23 @@ def _manifest_path(manifest: dict, item: str) -> Path | None:
     return Path(entry["path"]) if entry and entry.get("path") else None
 
 
+def load_admin1_cells(grid: Grid, reference_dir: Path = Path("data/reference")) -> pl.DataFrame:
+    """The `admin1_cells` of `load_references` alone: the cells of every sub-national GRIIS list that the manifest in `reference_dir` has an export for.
+
+    It needs the manifest's admin-1 polygons and the grid's file, and nothing of COL, WCVP or WRiMS, so that `scripts/griis_codes.py` need not load the
+    references (16 GB) to decide where GBIF uses a list's country code. `load_references` calls it, so the two agree.
+    """
+    reference_dir = Path(reference_dir)
+    manifest = json.loads((reference_dir / "manifest.json").read_text())
+    needed = {item: _manifest_path(manifest, item) for item in ("natural_earth_admin1", f"isea3h_{grid.resolution}")}
+    for item, path in needed.items():
+        if path is None:
+            raise ValueError(f"{reference_dir / 'manifest.json'} has no {item}: run scripts/fetch_reference.py")
+    griis = [k for k in sorted(manifest) if k.startswith("griis/") and _manifest_path(manifest, k) is not None]
+    subdivisions = sorted({(m.group(1), m.group(2)) for k in griis if (m := GRIIS_ALIAS.match(k.removeprefix("griis/"))) and m.group(2)})
+    return admin1_cells(grid, needed["natural_earth_admin1"], subdivisions, needed[f"isea3h_{grid.resolution}"])
+
+
 def load_references(grid: Grid, reference_dir: Path = Path("data/reference")) -> References:
     """Read the reference data `fetch_reference.py` put in `reference_dir`, as listed in its manifest, and join it to COL ids.
 
@@ -718,7 +735,6 @@ def load_references(grid: Grid, reference_dir: Path = Path("data/reference")) ->
     fallback = None
     if (cache := reference_dir / FALLBACK_FILE).exists():
         fallback = read_fallback(cache, (manifest.get("col") or {}).get("release"), index)
-    subdivisions = sorted({(m.group(1), m.group(2)) for k in griis if (m := GRIIS_ALIAS.match(k.removeprefix("griis/"))) and m.group(2)})
     gpkg = needed[f"isea3h_{grid.resolution}"]
     wcvp = wcvp_regions(needed["wcvp"], index, fallback)
     unknown = unknown_tdwg3(wcvp, needed["wgsrpd_level3"])
@@ -733,7 +749,7 @@ def load_references(grid: Grid, reference_dir: Path = Path("data/reference")) ->
     lists = griis_lists(names)
     del names
     wrims_ = wrims_pairs(wrims, index, fallback) if wrims else pl.DataFrame(schema={"species_id": pl.String, "area_id": pl.String, "area": pl.String, "country": pl.String})
-    cells = admin1_cells(grid, needed["natural_earth_admin1"], subdivisions, gpkg)
+    cells = load_admin1_cells(grid, reference_dir)
     griis_no_cells = griis_without_cells(griis_joined, cells)
     griis_name_only_no_cells = griis_without_cells(griis_name_only, cells)
     wrims_no_country = wrims_.filter(pl.col("country").is_null())
