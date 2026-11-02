@@ -29,6 +29,7 @@ import json
 import logging
 import sys
 import time
+from typing import Literal
 from dataclasses import asdict
 from pathlib import Path
 
@@ -42,7 +43,7 @@ from realms.explore import CLEANED, MERGED_SUFFIX, UNITS, assigned_only, load_co
 from realms.matrix import duplicate_names
 from realms.occurrences import IncompleteIngest, resolution_of
 
-METHODS = ("ward", "average")  # average is UPGMA
+METHODS: tuple[Literal["ward", "average"], ...] = ("ward", "average")  # average is UPGMA
 log = logging.getLogger("crosscheck")
 
 
