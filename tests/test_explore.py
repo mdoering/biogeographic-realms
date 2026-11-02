@@ -7,7 +7,7 @@ maps, with fewer trials and nulls than the analysis, so that a run takes seconds
 import inspect
 import json
 import shutil
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import geopandas as gpd
@@ -122,30 +122,30 @@ def planted(world, tmp_path_factory):
 def test_planted_realms_are_recovered_through_every_stage(world, planted):
     out, done = planted
     assert [k for k, v in done.items() if v.get("skipped")] == []
-    chosen = json.loads((out / "default" / "selected.json").read_text())
+    chosen = json.loads((out / "default" / "select" / "selected.json").read_text())
     assert chosen["k"] == 4 and not chosen["fell_short"]
 
-    candidates = pl.read_parquet(out / "default" / "candidates.parquet")
+    candidates = pl.read_parquet(out / "default" / "select" / "candidates.parquet")
     assert set(candidates.columns) == {"unit", "k", "realm", "sub_realm", "sub_realm_of"}
     found = dict(candidates.filter(pl.col("k") == 4).select("unit", "realm").iter_rows())
     assert len(found) == 120 and v_measure(found, {p: world.truth[p] for p in found}) >= 0.95
 
     # the map by part: the selected k is marked, and the thin parts have the realm of their neighbours
-    parts = pl.read_parquet(out / "default" / "parts.parquet")
+    parts = pl.read_parquet(out / "default" / "select" / "parts.parquet")
     picked = parts.filter(pl.col("selected"))
     assert picked["k"].unique().to_list() == [4] and picked.height == 123
     assert v_measure(dict(picked.select("part", "realm").iter_rows()), {**world.truth, **{f"{c}:land": 3 for c in THIN_CELLS}}) >= 0.95
 
-    selection = pl.read_csv(out / "default" / "selection.csv")
+    selection = pl.read_csv(out / "default" / "select" / "selection.csv")
     assert {"k", "stability", "excess"} <= set(selection.columns)
     assert selection.filter(pl.col("k") == 4)["stability"][0] >= 0.8
     screen = pl.read_csv(out / "default" / "screen.csv")
     assert screen["k"].to_list() == [2, 3, 4] and screen["excess"].is_finite().all()
 
-    structure = json.loads((out / "default" / "structure.json").read_text())
+    structure = json.loads((out / "default" / "select" / "structure.json").read_text())
     assert structure["degenerate"] is False and structure["modules"] == 4 and structure["single_unit_modules"] == 0
     assert 0.25 <= structure["largest_module_share_of_units"] <= 0.3 and structure["levels"] >= 1
-    partition = pl.read_parquet(out / "default" / "partition.parquet")
+    partition = pl.read_parquet(out / "default" / "select" / "partition.parquet")
     assert partition.columns == ["unit", "leaf", "top"] and partition.height == 120
 
     for name in ("presence.parquet", "summary.csv", "major.parquet", "taxa.parquet"):
@@ -153,8 +153,14 @@ def test_planted_realms_are_recovered_through_every_stage(world, planted):
     for name in ("members", "presence", "areas", "adjacency", "excluded", "stats"):
         assert (out / "units" / f"{name}.parquet").exists()
     assert (out / "units" / "removed_by_region.csv").exists()
-    log = json.loads((out / "default" / "log.json").read_text())
-    assert {"screen", "select"} <= set(log) and log["select"]["seconds"] > 0 and log["select"]["peak_rss_gb"] > 0
+    log = json.loads((out / "default" / "select" / "log.json").read_text())
+    assert set(log) == {"select"} and log["select"]["seconds"] > 0 and log["select"]["peak_rss_gb"] > 0
+    assert set(json.loads((out / "default" / "log.json").read_text())) == {"screen"}
+    # the screen's own files are in the configuration's directory, the select's in select/, and neither holds the other's
+    assert json.loads((out / "default" / "structure.json").read_text())["stage"] == "screen" and structure.get("stage") == "select"
+    assert {p.name for p in (out / "default").iterdir()} == {*explore.SCREEN_FILES, "log.json", "stage-screen.json", "select"}
+    assert {p.name for p in (out / "default" / "select").iterdir()} == {*explore.SELECT_FILES, "log.json", "stage-select.json"}
+    assert chosen["units"] == 120  # the units scored, all of them assigned here
 
 
 def test_a_stage_is_reused_when_its_inputs_are_unchanged(world, tmp_path, monkeypatch):
@@ -185,23 +191,29 @@ def test_a_stage_is_reused_when_its_inputs_are_unchanged(world, tmp_path, monkey
     # --force reruns the stage it is given, and the ones before it stay
     forced = explore.clean_stage(out, world.counts, world.refs, world.grid, SETTINGS, explore.LAYERS, world.list_codes, explore.clean_inputs(SETTINGS, explore.LAYERS, world.list_codes, world.marker), force=True)
     assert calls["clean"] == 3 and not forced["skipped"]
-    # a screen that is run again takes the select result it overwrote out of date
+    # and the stages after it are no longer current, although their hashes are the same: cleaning deleted their stamps, so they run again
+    assert not (out / "units" / "stage.json").exists() and not (out / "default" / "stage-screen.json").exists()
+    rerun = run_chain(out, world, stage="screen")
+    assert rerun["clean"]["skipped"] and not rerun["units"]["skipped"] and not rerun["screen"]["skipped"]
+    assert rerun["units"]["hash"] == first["units"]["hash"] and rerun["screen"]["hash"] == first["screen"]["hash"]
+    # a screen that is run again leaves the select result alone, which has a directory of its own
     run_chain(out, world, stage="select")
-    assert (out / "default" / "selected.json").exists()
+    selected = (out / "default" / "select" / "selected.json").read_bytes()
     explore.screen_stage(out, "default", explore.read_units(out), explore.network_matrix(out), explore.read_light_grid(out), InfomapOptions(), FAST, explore.read_stamp(out / "units")["hash"], force=True)
-    assert not (out / "default" / "selected.json").exists() and not (out / "default" / "selection.csv").exists()
+    assert (out / "default" / "select" / "selected.json").read_bytes() == selected
+    assert all(v["skipped"] for v in run_chain(out, world, stage="select").values())
 
 
 def test_a_degenerate_configuration_is_recorded_not_raised(world, tmp_path):
     out = tmp_path / "res7" / "native_only"
     done = run_chain(out, world, replace(FAST, floor_km2=1e12))  # no realm is as large as that, so they all merge into one
-    structure = json.loads((out / "default" / "structure.json").read_text())
+    structure = json.loads((out / "default" / "select" / "structure.json").read_text())
     assert structure["degenerate"] is True and "above the size floor" in structure["degenerate_reason"]
     assert structure["modules"] == 4
-    chosen = json.loads((out / "default" / "selected.json").read_text())
+    chosen = json.loads((out / "default" / "select" / "selected.json").read_text())
     assert chosen["degenerate"] is True and "k" not in chosen
-    assert pl.read_parquet(out / "default" / "candidates.parquet").height == 0
-    assert pl.read_csv(out / "default" / "screen.csv").height == 0 and pl.read_csv(out / "default" / "selection.csv").height == 0
+    assert pl.read_parquet(out / "default" / "select" / "candidates.parquet").height == 0
+    assert pl.read_csv(out / "default" / "screen.csv").height == 0 and pl.read_csv(out / "default" / "select" / "selection.csv").height == 0
     assert done["select"]["degenerate"] and done["screen"]["degenerate"]
 
 
@@ -228,9 +240,9 @@ def test_excluded_parts_are_never_in_the_network_or_the_scores(world, planted, m
     assert set(ct.cells) == set(units.areas) and len(ct.cells) == 120
     assert set(units.presence["unit"]) == set(units.areas)
     # no map that is scored has them, and no unit of a candidate or the partition is one of them
-    candidates = pl.read_parquet(out / "default" / "candidates.parquet")
+    candidates = pl.read_parquet(out / "default" / "select" / "candidates.parquet")
     assert set(candidates["unit"]) == set(units.areas)
-    assert set(pl.read_parquet(out / "default" / "partition.parquet")["unit"]) <= set(units.areas)
+    assert set(pl.read_parquet(out / "default" / "select" / "partition.parquet")["unit"]) <= set(units.areas)
     seen = []
     real = explore.excess_table
     monkeypatch.setattr(explore, "excess_table", lambda maps, ct, adjacency, areas, **kw: seen.append((maps, adjacency, areas)) or real(maps, ct, adjacency, areas, **kw))
@@ -238,7 +250,7 @@ def test_excluded_parts_are_never_in_the_network_or_the_scores(world, planted, m
     maps, adjacency, areas = seen[0]
     assert all(set(labels) == set(units.areas) for labels in maps.values()) and set(areas) == set(units.areas) and set(adjacency) == set(units.areas)
     # in the outputs only, they have a realm, and the parts file says that it was imputed
-    parts = pl.read_parquet(out / "default" / "parts.parquet").filter(pl.col("k") == 4)
+    parts = pl.read_parquet(out / "default" / "select" / "parts.parquet").filter(pl.col("k") == 4)
     imputed = parts.filter(pl.col("imputed"))
     assert set(imputed["part"]) == left_out and imputed["unit"].is_null().all()
     assert not parts.filter(~pl.col("imputed"))["part"].is_in(list(left_out)).any()
@@ -294,21 +306,21 @@ def test_units_without_a_module_leave_the_scores_but_not_the_map(world, planted,
         assert not set(lost) & {c for c in scored_ct.cells}
     assert len(units.areas) == 120  # the units that were passed in are untouched
 
-    structure = json.loads((out / "default" / "structure.json").read_text())
+    structure = json.loads((out / "default" / "select" / "structure.json").read_text())
     assert structure["unassigned"] == n and structure["unassigned_units"] == lost and structure["units"] == 120
     assert ("warning" in structure) is warns
     if warns:
         assert "more than 1%" in structure["warning"] and str(n) in structure["warning"]
     # the map has no label for them, and the parts file imputes them, for every k
-    partition = pl.read_parquet(out / "default" / "partition.parquet")
+    partition = pl.read_parquet(out / "default" / "select" / "partition.parquet")
     assert partition.height == 120 and partition.filter(pl.col("unit").is_in(lost))["leaf"].is_null().all() and partition["leaf"].null_count() == n
-    assert set(pl.read_parquet(out / "default" / "candidates.parquet")["unit"]) == kept
-    parts = pl.read_parquet(out / "default" / "parts.parquet")
+    assert set(pl.read_parquet(out / "default" / "select" / "candidates.parquet")["unit"]) == kept
+    parts = pl.read_parquet(out / "default" / "select" / "parts.parquet")
     for k, rows in parts.group_by("k"):
         gone = rows.filter(pl.col("part").is_in(lost))
         assert sorted(gone["part"]) == lost and gone["imputed"].all() and gone["unit"].is_null().all() and gone["realm"].is_not_null().all()
         assert rows.height == 123
-    assert json.loads((out / "default" / "selected.json").read_text())["k"] == 4
+    assert json.loads((out / "default" / "select" / "selected.json").read_text())["k"] == 4
 
 
 def test_only_half_a_is_loaded(world, tmp_path, monkeypatch):
@@ -391,14 +403,18 @@ def test_workers_that_fit_the_budget():
 
 def test_a_second_worker_pays_its_way_in_the_log(world, planted):
     out, _ = planted
-    log = json.loads((out / "default" / "log.json").read_text())
+    log = json.loads((out / "default" / "select" / "log.json").read_text())
     assert log["select"]["workers_requested"] == 1 and log["select"]["workers"] == []
+    one_worker = (out / "default" / "screen.csv").read_bytes()  # the planted screen ran with one worker
+    assert json.loads((out / "default" / "log.json").read_text())["screen"]["workers_requested"] == 1
     units = explore.read_units(out)
     ct = explore.network_matrix(out)
     explore.screen_stage(out, "default", units, ct, explore.read_light_grid(out), InfomapOptions(), FAST, explore.read_stamp(out / "units")["hash"], workers=2, force=True)
     log = json.loads((out / "default" / "log.json").read_text())
     assert log["screen"]["workers_requested"] == 2 and 1 <= log["screen"]["workers_used"] <= 2
     assert len(log["screen"]["workers"]) == 3 and all(w["peak_gb"] > 0 and w["pid"] for w in log["screen"]["workers"])  # a task for each of k = 2, 3, 4
+    # the two pools (two workers to measure, then as many as fit) score what one worker does
+    assert (out / "default" / "screen.csv").read_bytes() == one_worker
 
 
 def test_units_round_trip_through_their_files(planted):
@@ -417,7 +433,7 @@ def test_the_pipeline_runs_the_stages_up_to_the_one_asked_for_and_skips_the_curr
     monkeypatch.setattr(explore, "read_complete", lambda path: world.marker)
     monkeypatch.setattr(explore, "frozen_list_codes", lambda resolution, directory: world.list_codes)
     monkeypatch.setattr(explore, "load_grid", lambda gpkg, land: world.coarse if "ISEA3H-5" in str(gpkg) else world.grid)
-    monkeypatch.setattr(explore, "_manifest_path", lambda reference, item: world.coarse_gpkg if item.endswith("5") else Path(f"{item}.gpkg"))
+    monkeypatch.setattr(explore, "manifest_path", lambda reference, item: world.coarse_gpkg if item.endswith("5") else Path(f"{item}.gpkg"))
     monkeypatch.setattr(explore, "part_regions", lambda grid, path: world.regions)
     monkeypatch.setattr(explore, "load_references", lambda grid, directory: world.refs)
     monkeypatch.setattr(explore, "load_split", lambda path: pl.DataFrame({"species_id": ["x"], "half": ["A"]}))
@@ -436,7 +452,7 @@ def test_the_pipeline_runs_the_stages_up_to_the_one_asked_for_and_skips_the_curr
     second = explore.run_pipeline(replace(plan, rules_off=(), stage="select", only=("fine",)), UNITS)
     assert second["clean"]["skipped"] and second["units"]["skipped"] and loaded == ["A"]
     assert set(second) == {"directory", "clean", "units", "fine"} and not second["fine"]["screen"]["skipped"] and not second["fine"]["select"]["skipped"]
-    assert (out / "fine" / "selected.json").exists() and not (out / "default").exists()
+    assert (out / "fine" / "select" / "selected.json").exists() and not (out / "default").exists()
     third = explore.run_pipeline(replace(plan, rules_off=(), stage="select"), UNITS)
     assert third["fine"] == {"screen": {"skipped": True}, "select": {"skipped": True}} and not third["default"]["screen"]["skipped"]
     with pytest.raises(ValueError, match="nonsense"):
@@ -449,7 +465,8 @@ def test_the_pipeline_runs_the_stages_up_to_the_one_asked_for_and_skips_the_curr
 # ------------------------------------------------------------------ duplicate genus and family names merged as a run option
 
 CODES = pl.DataFrame(schema={"country": pl.String, "subdivision": pl.String, "code": pl.String})
-# the hashes of these inputs before the option existed: the default must keep them, so that every run made since stays current
+# The hashes of these inputs, as they were before the option existed and as every run of M1 has them. Change them consciously: a new value reruns every stage of
+# every run, so a change of the hashed inputs that is not meant to change the results (a new option off by default) must keep them.
 DEFAULT_CLEAN_HASH = "4a21d1f2381bc75a829816f4c136e453c6bda6c040fcead003b09960b1da0009"
 DEFAULT_SELECT_HASH = "92587114b47877aecdd749bb5dd9bb72b26a2a45b77d8ea082f22fec3ea75e96"
 
@@ -494,7 +511,7 @@ def patch_loaders(monkeypatch, world: World) -> None:
     monkeypatch.setattr(explore, "read_complete", lambda path: world.marker)
     monkeypatch.setattr(explore, "frozen_list_codes", lambda resolution, directory: world.list_codes)
     monkeypatch.setattr(explore, "load_grid", lambda gpkg, land: world.coarse if "ISEA3H-5" in str(gpkg) else world.grid)
-    monkeypatch.setattr(explore, "_manifest_path", lambda reference, item: world.coarse_gpkg if item.endswith("5") else Path(f"{item}.gpkg"))
+    monkeypatch.setattr(explore, "manifest_path", lambda reference, item: world.coarse_gpkg if item.endswith("5") else Path(f"{item}.gpkg"))
     monkeypatch.setattr(explore, "part_regions", lambda grid, path: world.regions)
     monkeypatch.setattr(explore, "load_references", lambda grid, directory: world.refs)
     monkeypatch.setattr(explore, "load_split", lambda path: pl.DataFrame({"species_id": ["x"], "half": ["A"]}))
@@ -520,8 +537,8 @@ def test_merge_duplicate_names_reaches_the_matrix_and_makes_a_run_of_its_own(wor
         assert not merged[stage]["skipped"] and merged[stage]["hash"] != plain[stage]["hash"]
     for stage in ("screen", "select"):
         assert not merged["default"][stage]["skipped"] and merged["default"][stage]["hash"] != plain["default"][stage]["hash"]
-    stamp = explore.read_stamp(merged["directory"] / "default", "stage-select")["inputs"]
-    assert stamp["merge_duplicate_names"] is True and "merge_duplicate_names" not in explore.read_stamp(plain["directory"] / "default", "stage-select")["inputs"]
+    stamp = explore.read_stamp(merged["directory"] / "default" / "select", "stage-select")["inputs"]
+    assert stamp["merge_duplicate_names"] is True and "merge_duplicate_names" not in explore.read_stamp(plain["directory"] / "default" / "select", "stage-select")["inputs"]
 
     # the cleaned taxa carry the names that merging needs only in the run that merges, and the presence is the same
     assert pl.read_parquet(plain["directory"] / "cleaned" / "taxa.parquet").columns == ["species_id", "genus_id", "family_id"]
@@ -537,3 +554,191 @@ def test_merge_duplicate_names_reaches_the_matrix_and_makes_a_run_of_its_own(wor
     # the run on ids is untouched: run again, every stage is current
     again = explore.run_pipeline(plan, UNITS)
     assert again["clean"]["skipped"] and again["units"]["skipped"] and again["default"] == {"screen": {"skipped": True}, "select": {"skipped": True}}
+
+
+# ------------------------------------------------------------------ method versions, a rewritten stage's dependants, the seed, the half, reading a result back
+
+
+def test_the_method_versions_are_one_and_enter_the_hashes_only_above_it(monkeypatch):
+    assert explore.METHOD_VERSION == {"clean": 1, "units": 1, "screen": 1, "select": 1}  # raise one when its stage's behaviour changes
+    settings, marker = Settings(wcvp_mode="native_only"), {"rows": 1, "resolution": 7}
+    options = InfomapOptions(markov_time=0.8)
+    units_before = explore.digest({"cleaned": "parent", "unit_settings": asdict(UnitSettings())})  # the units' inputs as M1 hashed them
+    assert explore.digest(explore.units_inputs("parent", UnitSettings())) == units_before
+    hashes = {
+        "clean": lambda: explore.digest(explore.clean_inputs(settings, explore.LAYERS, CODES, marker, "m")),
+        "units": lambda: explore.digest(explore.units_inputs("parent", UnitSettings())),
+        "screen": lambda: explore.digest(explore.config_inputs("parent", options, Params(), "screen")),
+        "select": lambda: explore.digest(explore.config_inputs("parent", options, Params(), "select")),
+    }
+    today = {stage: hash_() for stage, hash_ in hashes.items()}
+    assert today["clean"] == DEFAULT_CLEAN_HASH and today["select"] == DEFAULT_SELECT_HASH
+    for stage in explore.METHOD_VERSION:
+        monkeypatch.setitem(explore.METHOD_VERSION, stage, 2)
+        assert {s: h() != today[s] for s, h in hashes.items()} == {s: s == stage for s in hashes}  # that stage's hash only; the stages after follow through it
+        monkeypatch.setitem(explore.METHOD_VERSION, stage, 1)
+
+
+def test_a_stage_written_again_deletes_the_stamps_of_the_stages_that_depend_on_it(world, planted, tmp_path):
+    out = tmp_path / "res7" / "native_only"
+    shutil.copytree(planted[0], out)
+    (out / "fine-s2" / "select").mkdir(parents=True)
+    for stamp in ("fine-s2/stage-screen.json", "fine-s2/select/stage-select.json"):
+        (out / stamp).write_text("{}")
+    screens = sorted(out.glob("*/stage-screen.json"))
+    selects = sorted(out.glob("*/select/stage-select.json"))
+    assert len(screens) == len(selects) == 2
+    # a screen or a select takes nothing with it
+    assert explore.invalidate_after(out, "screen") == [] and explore.invalidate_after(out, "select") == []
+    # the units take every configuration's screen and select, and leave the cleaning's stamp
+    parent = explore.read_stamp(out / "cleaned")["hash"]
+    explore.units_stage(out, world.grid, world.coarse, world.coarse_gpkg, UNITS, world.regions, parent, force=True)
+    assert not any(p.exists() for p in screens + selects) and (out / "cleaned" / "stage.json").exists() and (out / "units" / "stage.json").exists()
+    again = run_chain(out, world)
+    assert again["clean"]["skipped"] and again["units"]["skipped"] and not again["screen"]["skipped"] and not again["select"]["skipped"]
+    # cleaning takes the units too
+    inputs = explore.clean_inputs(SETTINGS, explore.LAYERS, world.list_codes, world.marker)
+    explore.clean_stage(out, world.counts, world.refs, world.grid, SETTINGS, explore.LAYERS, world.list_codes, inputs, force=True)
+    assert not (out / "units" / "stage.json").exists() and not (out / "default" / "stage-screen.json").exists()
+    assert not (out / "default" / "select" / "stage-select.json").exists()
+
+
+def test_a_second_seed_writes_a_directory_of_its_own_and_leaves_seed_one_as_it_was(world, tmp_path, monkeypatch):
+    load_configs = explore.load_configs
+    patch_loaders(monkeypatch, world)
+    budgets = []
+    real = explore.measured_workers
+    monkeypatch.setattr(explore, "measured_workers", lambda requested, seen, used, budget_gb=explore.BUDGET_GB: budgets.append(budget_gb) or real(requested, seen, used, budget_gb))
+    plan = explore.Plan(
+        counts=tmp_path / "counts", reference=tmp_path / "reference", split=tmp_path / "split", frozen_dir=tmp_path / "frozen", results=tmp_path / "results",
+        configs=tmp_path / "configs.toml", mode="native_only", rules_off=tuple(LAYER_5), stage="select", isolate=False,
+    )
+    first = explore.run_pipeline(plan, UNITS)
+    out = first["directory"]
+    assert budgets and set(budgets) == {explore.BUDGET_GB}
+    seed_one = {p: p.read_bytes() for p in sorted((out / "default").rglob("*")) if p.is_file() and p.name != "log.json"}
+    stamp = explore.read_stamp(out / "default" / "select", "stage-select")
+    assert stamp["inputs"]["params"]["seed"] == 1 and stamp["hash"] == explore.digest(explore.config_inputs(first["units"]["hash"], InfomapOptions(), FAST, "select"))
+
+    budgets.clear()
+    second = explore.run_pipeline(replace(plan, seed=2, budget_gb=12.5), UNITS)
+    assert second["clean"]["skipped"] and second["units"]["skipped"] and set(budgets) == {12.5}
+    assert not second["default"]["screen"]["skipped"] and not second["default"]["select"]["skipped"]
+    assert second["default"]["select"]["hash"] != first["default"]["select"]["hash"]
+    assert explore.read_stamp(out / "default-s2" / "select", "stage-select")["inputs"]["params"]["seed"] == 2
+    assert {p: p.read_bytes() for p in seed_one} == seed_one  # seed 1's files are untouched
+    third = explore.run_pipeline(plan, UNITS)
+    assert third["default"] == {"screen": {"skipped": True}, "select": {"skipped": True}}
+
+    assert explore.config_dir("mt080") == "mt080" and explore.config_dir("mt080", 1) == "mt080" and explore.config_dir("mt080", 2) == "mt080-s2"
+    with pytest.raises(ValueError, match="seed"):
+        replace(plan, seed=0)
+    path = tmp_path / "clash.toml"
+    for name in ("mt080-s2", "select"):
+        path.write_text(f'[configs."{name}"]\n')
+        with pytest.raises(ValueError, match="like a seed"):
+            load_configs(path)
+
+
+def test_the_half_is_a_only_and_another_would_never_take_its_stamps_or_directory(tmp_path):
+    with pytest.raises(ValueError, match="sealed until M3"):
+        explore.Plan(
+            counts=tmp_path, reference=tmp_path, split=tmp_path, frozen_dir=tmp_path, results=tmp_path, configs=tmp_path, mode="native_only", rules_off=(),
+            stage="clean", half="B",
+        )
+    # the name and the hash, at the function level: half A adds nothing to either, any other half changes both
+    assert explore.run_name("native_only", ["griis"]) == explore.run_name("native_only", ["griis"], half="A") == "native_only-no-griis"
+    assert explore.run_name("native_only", ["griis"], half="B") == "native_only-no-griis-half-B"
+    settings, marker = Settings(wcvp_mode="native_only"), {"rows": 1, "resolution": 7}
+    a = explore.clean_inputs(settings, explore.LAYERS, CODES, marker, "m", half="A", split_sha256="ignored for A")
+    assert explore.digest(a) == DEFAULT_CLEAN_HASH and "half" not in a
+    b = explore.clean_inputs(settings, explore.LAYERS, CODES, marker, "m", half="B", split_sha256="f" * 64)
+    assert b["half"] == "B" and b["split"] == "f" * 64 and explore.digest(b) != DEFAULT_CLEAN_HASH
+    assert explore.digest(explore.clean_inputs(settings, explore.LAYERS, CODES, marker, "m", half="B", split_sha256="e" * 64)) != explore.digest(b)
+    with pytest.raises(ValueError, match="sha256"):
+        explore.clean_inputs(settings, explore.LAYERS, CODES, marker, "m", half="B")
+    # a stamp of half A is not current for half B's inputs, even in the same directory
+    directory = tmp_path / "cleaned"
+    directory.mkdir()
+    for name in explore.CLEAN_FILES:
+        (directory / name).write_text("")
+    explore.write_stamp(directory, "stage", explore.digest(a), a, {})
+    assert explore.is_current(directory, "stage", explore.digest(a), explore.CLEAN_FILES)
+    assert not explore.is_current(directory, "stage", explore.digest(b), explore.CLEAN_FILES)
+    # and the units, screen and select of B hash B's cleaning, so none of them can be A's either
+    assert explore.digest(explore.units_inputs(explore.digest(b), UnitSettings())) != explore.digest(explore.units_inputs(explore.digest(a), UnitSettings()))
+
+
+def test_a_select_result_is_read_back_only_when_it_is_current(world, planted, tmp_path, monkeypatch):
+    out = tmp_path / "res7" / "native_only"
+    shutil.copytree(planted[0], out)
+    monkeypatch.setattr(explore, "load_configs", lambda path: ({"default": InfomapOptions(), "fine": InfomapOptions(markov_time=0.9)}, FAST))
+    found = explore.read_selected(out, "default", tmp_path / "configs.toml")
+    assert found.directory == out / "default" / "select" and found.k == 4 and not found.fell_short and not found.merged
+    assert found.parts.equals(pl.read_parquet(out / "default" / "select" / "parts.parquet")) and found.selection["k"].to_list() == [2, 3, 4]
+    assert found.partition.unassigned == [] and len(found.partition.paths) == 120 and found.candidates.height > 0
+    for kwargs, message in (
+        ({"seed": 2}, "no select stamp"),  # no result at that seed
+        ({"merge_duplicate_names": True}, "not the current"),  # another hash
+    ):
+        with pytest.raises(ValueError, match=message):
+            explore.read_selected(out, "default", tmp_path / "configs.toml", **kwargs)
+    with pytest.raises(ValueError, match="no configuration"):
+        explore.read_selected(out, "nonsense", tmp_path / "configs.toml")
+    with pytest.raises(ValueError, match="no select stamp"):
+        explore.read_selected(out, "fine", tmp_path / "configs.toml")
+    # other parameters than those of the result: not current
+    monkeypatch.setattr(explore, "load_configs", lambda path: ({"default": InfomapOptions()}, replace(FAST, n_null_select=19)))
+    with pytest.raises(ValueError, match="not the current"):
+        explore.read_selected(out, "default", tmp_path / "configs.toml")
+    monkeypatch.setattr(explore, "load_configs", lambda path: ({"default": InfomapOptions()}, FAST))
+    # the units of another cleaning
+    stamp = json.loads((out / "units" / "stage.json").read_text())
+    (out / "units" / "stage.json").write_text(json.dumps(stamp | {"inputs": stamp["inputs"] | {"cleaned": "other"}}))
+    with pytest.raises(ValueError, match="cleaning other"):
+        explore.read_selected(out, "default", tmp_path / "configs.toml")
+    (out / "units" / "stage.json").write_text(json.dumps(stamp))
+    # the units written again: the select stamp is gone with them
+    explore.units_stage(out, world.grid, world.coarse, world.coarse_gpkg, UNITS, world.regions, explore.read_stamp(out / "cleaned")["hash"], force=True)
+    with pytest.raises(ValueError, match="no select stamp"):
+        explore.read_selected(out, "default", tmp_path / "configs.toml")
+
+
+def old_layout(planted: Path, out: Path) -> None:
+    """A copy of the planted run as the pipeline wrote it before select had a directory of its own: select's files over the screen's, both stamps, one log."""
+    shutil.copytree(planted, out)
+    config = out / "default"
+    logs = json.loads((config / "log.json").read_text()) | json.loads((config / "select" / "log.json").read_text())
+    for path in (config / "select").iterdir():
+        path.replace(config / path.name)
+    (config / "select").rmdir()
+    (config / "log.json").write_text(json.dumps(logs))
+    shutil.copytree(config, out / "entropy")  # a configuration that only had a screen
+    (out / "entropy" / "stage-select.json").unlink()
+
+
+def test_migrate_select_moves_the_select_result_and_drops_the_overwritten_screen_stamp(world, planted, tmp_path, monkeypatch):
+    root = tmp_path / "explore"
+    out = root / "res7" / "native_only"
+    old_layout(planted[0], out)
+    selected = (out / "default" / "selected.json").read_bytes()
+    entropy = {p.name: p.read_bytes() for p in (out / "entropy").iterdir()}
+    done = explore.migrate_select(root)
+    assert [d["directory"] for d in done] == [str(out / "default")] and done[0]["screen_stamp_removed"]
+    config = out / "default"
+    assert {p.name for p in config.iterdir()} == {"screen.csv", "log.json", "MIGRATED.txt", "select"}
+    assert {p.name for p in (config / "select").iterdir()} == {*explore.SELECT_FILES, "stage-select.json", "log.json"}
+    assert (config / "select" / "selected.json").read_bytes() == selected
+    assert set(json.loads((config / "log.json").read_text())) == {"screen"} and set(json.loads((config / "select" / "log.json").read_text())) == {"select"}
+    assert "screen.csv" in (config / "MIGRATED.txt").read_text()
+    assert {p.name: p.read_bytes() for p in (out / "entropy").iterdir()} == entropy  # a screen without a select is left alone
+    # the moved result reads back as current, and running it again changes nothing
+    monkeypatch.setattr(explore, "load_configs", lambda path: ({"default": InfomapOptions()}, FAST))
+    assert explore.read_selected(out, "default", tmp_path / "configs.toml").k == 4
+    before = {p: p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+    assert explore.migrate_select(root) == []
+    assert {p: p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()} == before
+    # a select stamp in both places is not guessed at
+    (config / "stage-select.json").write_text("{}")
+    with pytest.raises(ValueError, match="both here and in select"):
+        explore.migrate_select(root)
