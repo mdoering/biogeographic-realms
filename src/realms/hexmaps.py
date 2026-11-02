@@ -186,6 +186,8 @@ def plot_parts(
     - `imputed` is the parts, or a mapping of part to flag, whose realm was imputed rather than found; they are hatched.
     - `adjacency` is which parts are next to which, as `grid.part_adjacency` gives it; by default the parts that touch on the map.
 
+    A part with area that comes out empty on the map raises `ValueError`, before anything is written.
+
     `<out>.gpkg` holds a layer `parts` (part, realm, sub_realm, imputed) and a layer `realms` (realm, the parts dissolved into one
     geometry, and `dissolved`, how many parts that was), both in EPSG:4326.
     """
@@ -208,6 +210,11 @@ def plot_parts(
         crs=WGS84,
     )
     table = table[~table.geometry.is_empty].reset_index(drop=True)
+    # projected before anything is written: a part with area that comes out empty would be a hole in the map that nothing points to
+    projected = [_projected(s) for s in table.geometry]
+    vanished = [part for part, shape in zip(table["part"], projected, strict=True) if shape.is_empty]
+    if vanished:
+        raise ValueError(f"{len(vanished)} parts vanish when projected to {EQUAL_EARTH}, such as {vanished[0]!r}: the map would have holes")
     realms = sorted(set(table["realm"]))
     dissolved = gpd.GeoDataFrame(
         {
@@ -233,7 +240,7 @@ def plot_parts(
     globe = _projected(shapely.box(-180, -90, 180, 90))
     ax.fill(*_polygons(globe)[0].exterior.xy, facecolor=GLOBE, edgecolor=OUTLINE, linewidth=0.5, zorder=0)
 
-    flat = gpd.GeoDataFrame(table.drop(columns="geometry"), geometry=[_projected(s) for s in table.geometry], crs=EQUAL_EARTH)
+    flat = gpd.GeoDataFrame(table.drop(columns="geometry"), geometry=projected, crs=EQUAL_EARTH)
     # the edge in the fill's colour hides the hairline gaps between neighbours that antialiasing leaves
     flat.plot(ax=ax, color=[colours[r] for r in flat["realm"]], edgecolor=[colours[r] for r in flat["realm"]], linewidth=0.3, aspect=None, zorder=1)
     if flat["imputed"].any():

@@ -201,3 +201,39 @@ def test_realms_are_coloured_apart_from_their_neighbours_by_the_adjacency_given(
     adjacency[part_id(A, "sea")] = {part_id(A, "land")}
     plot_parts(geoms, LABELS, tmp_path / "m", "Realms", adjacency=adjacency)
     assert seen["n"] == {1: {2}, 2: {1}}
+
+
+def test_a_part_that_vanishes_in_projection_is_refused(coastal, tmp_path, monkeypatch):
+    """A part with area that projects to nothing would be a silent hole in the map: plot_parts raises instead."""
+    import realms.hexmaps as hexmaps
+
+    grid_file, land = coastal
+    geoms = part_geometries(grid_file, land, list(LABELS))
+    target = dict(zip(geoms["part"], geoms.geometry, strict=True))[part_id(A, "sea")]
+    real = hexmaps._densified
+
+    def losing(shape, step=hexmaps.SEGMENT):
+        return shapely.MultiPolygon() if shape.equals(target) else real(shape, step)
+
+    monkeypatch.setattr(hexmaps, "_densified", losing)
+    with pytest.raises(ValueError, match="vanish") as error:
+        plot_parts(geoms, LABELS, tmp_path / "m", "Realms")
+    assert part_id(A, "sea") in str(error.value)
+    assert not (tmp_path / "m.png").exists()
+
+
+# A coastal sea part at resolution 5 that shapely.segmentize (GEOS 3.14) turned into an empty polygon before `_densified` replaced it
+VANISHED = "4919636839102606602:sea"
+
+
+@pytest.mark.skipif(not (RES5.exists() and LAND.exists()), reason="needs data/reference/grids/ISEA3H-5.gpkg and the Natural Earth land")
+def test_the_part_that_segmentize_emptied_is_drawn_and_would_be_refused(tmp_path, monkeypatch):
+    import realms.hexmaps as hexmaps
+
+    geoms = part_geometries(RES5, LAND, [VANISHED])
+    assert not geoms.geometry.iloc[0].is_empty
+    plot_parts(geoms, {VANISHED: 1}, tmp_path / "drawn", "One part")  # the densifying in use keeps it
+    assert (tmp_path / "drawn.png").exists()
+    monkeypatch.setattr(hexmaps, "_densified", lambda shape, step=hexmaps.SEGMENT: shapely.segmentize(shape, step))
+    with pytest.raises(ValueError, match=f"vanish.*{VANISHED}"):
+        plot_parts(geoms, {VANISHED: 1}, tmp_path / "lost", "One part")
