@@ -14,8 +14,9 @@ extended export: `skip`, the default, does not apply them and `apply` applies th
 establishment means. The report has what the lists say (`griis_lists`: entries, introduced, unstated, native and uncertain, for the lists with a table).
 
 **The layer 5 thresholds are the defaults of `Settings`, which are setting 132 of the calibration** (Markus, 2026-11-01): record share 2%, cell share 20%, rate factor 0.5% and group
-minimum 300 (the report has them as `layer_5_thresholds`). **Where GBIF uses a sub-national GRIIS list's country code is the frozen table of the resolution**, `reference/griis_uses_code-res<r>.csv`
-(`scripts/griis_codes.py`, derived once from half A's counts), so that this run, the calibration and the later all-species run apply the same lists; the script refuses to start without it.
+minimum 300 (the report has them as `layer_5_thresholds`). **Which country code each sub-national GRIIS list applies to is the frozen table of the resolution**, `reference/griis_uses_code-res<r>.csv`
+(`scripts/griis_codes.py`: the code with most rows in the list's cells, derived once from half A's counts), so that this run, the calibration and the later all-species run apply the same lists; the script
+refuses to start without it. The report has every place with that code and its share of the rows in the list's cells (`list_codes`), and flags those under 80%.
 
 References are loaded once and need about 16 GB at the peak (`load_taxa`), so the modes share them. The counts are a download:
 `uv run python -I scripts/clean_counts.py --counts data/gbif/<key> [--modes native_only introduced off] [--griis-without-status skip|apply]`.
@@ -35,7 +36,7 @@ from pathlib import Path
 
 import polars as pl
 
-from realms.clean import FROZEN_DIR, GRIIS_WITHOUT_STATUS, LAYERS, USES_CODE_FILE, WCVP_MODES, Settings, clean, frozen_uses_code
+from realms.clean import GRIIS_WITHOUT_STATUS, LAYERS, LIST_CODES_FILE, WCVP_MODES, Settings, clean, code_rows, frozen_list_codes, list_code_shares
 from realms.clean_report import provisional_twin_records, provisional_twins, removal_summary
 from realms.grid import KINDS, ZERO_KM2, cell_of, load_grid, parts
 from realms.natives import load_references, name_index
@@ -43,6 +44,7 @@ from realms.occurrences import IncompleteIngest, load_country_counts, resolution
 from realms.outliers import suspect_cells
 from realms.split import load_split
 
+FROZEN_DIR = Path(__file__).resolve().parent.parent / "reference"  # the repository's `reference/`, which is tracked: the frozen decisions are part of the method
 # the layer 5 thresholds that the calibration varies, which the report states
 THRESHOLDS = ("satellite_record_share", "satellite_cell_share", "under_rate_factor", "group_min_records")
 # The Caspian Sea is no land in Natural Earth and no country in GADM. The box is on cell centres, wide enough for the cells of 265 km that
@@ -183,7 +185,7 @@ def main() -> None:
     if missing:
         raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
     try:
-        uses_code = frozen_uses_code(resolution, FROZEN_DIR)  # where GBIF uses a sub-national list's country code, frozen once from half A: before anything is loaded or written
+        list_codes = frozen_list_codes(resolution, FROZEN_DIR)  # the code each sub-national list applies to, frozen once from half A: before anything is loaded or written
     except (FileNotFoundError, ValueError) as error:
         raise SystemExit(f"FAILED {error}") from error
     directory = args.results / f"res{resolution}"
@@ -199,7 +201,7 @@ def main() -> None:
         "layers": list(LAYERS),
         "griis_without_status": args.griis_without_status,
         "layer_5_thresholds": {k: getattr(settings, k) for k in THRESHOLDS},
-        "uses_code": {"places": uses_code.height, "by_code": int(uses_code["uses_code"].sum()), "file": USES_CODE_FILE.format(resolution=resolution)},
+        "list_codes": {"file": LIST_CODES_FILE.format(resolution=resolution), "places": list_codes.height, "other_than_own": int((list_codes["code"] != list_codes["country"]).sum())},
         "modes": {},
     }
     started = time.perf_counter()
@@ -228,6 +230,12 @@ def main() -> None:
         "clean_species": clean_rows["species_id"].n_unique(),
     }
     say(f"counts of half A: {report['input']} (peak {peak_gb():.1f} GB)")
+    # every sub-national list with the code it applies to and how much of the rows in its cells carry it, from the counts of this run (half A, which is where the table was frozen)
+    shares = list_code_shares(refs.admin1_cells, code_rows(counts), list_codes)
+    report["list_codes"]["places_detail"] = shares.to_dicts()
+    report["list_codes"]["low_share"] = shares.filter(pl.col("low")).select("country", "subdivision").to_dicts()
+    for r in shares.iter_rows(named=True):
+        say(f"list code {r['country']}/{r['subdivision']} applies to {r['code']}: {r['with_code']:,} of {r['rows']:,} rows in its cells ({'no rows' if r['share'] is None else format(r['share'], '.1%')}){'  LOW' if r['low'] else ''}")
     report["provisional_twins"] = {
         "ids": twins.height,
         "with_one_accepted_twin": twins.filter(pl.col("accepted_ids") == 1).height,
@@ -257,7 +265,7 @@ def main() -> None:
         begun = time.perf_counter()
         out = directory / mode
         out.mkdir(exist_ok=True)
-        cleaned = clean(counts, refs, grid, frozenset(LAYERS), replace(settings, wcvp_mode=mode), uses_code)
+        cleaned = clean(counts, refs, grid, frozenset(LAYERS), replace(settings, wcvp_mode=mode), list_codes)
         seconds = time.perf_counter() - begun
         cleaned.presence.write_parquet(out / "presence.parquet")
         cleaned.removed.write_parquet(out / "removed.parquet")

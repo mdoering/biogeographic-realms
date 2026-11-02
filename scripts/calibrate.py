@@ -24,8 +24,8 @@ loads half B):
    show whether islands lose more.
 
 It writes `results/calibrate/res<r>/`: `settings.csv` (the 144 settings), `regions.csv`, `known_cases.json`, `griis_cross_check.json`, `calibrate.log`, and `report.json` last,
-with the `chosen` setting and the ingest's marker. References are loaded once and need about 16 GB at the peak. Layer 3 of the known cases and of the cross-check takes where GBIF uses
-a sub-national GRIIS list's country code from the frozen table of the resolution (`reference/griis_uses_code-res<r>.csv`, `scripts/griis_codes.py`), and the dry run refuses to start without it.
+with the `chosen` setting and the ingest's marker. References are loaded once and need about 16 GB at the peak. Layer 3 of the known cases and of the cross-check takes the country code each
+sub-national GRIIS list applies to from the frozen table of the resolution (`reference/griis_uses_code-res<r>.csv`, `scripts/griis_codes.py`), and the dry run refuses to start without it.
 
 **The scoring of half B** (`--score-half-b --setting N`) is the only call before the freeze that opens half B, listed in `DECISIONS.md`, and a run of its own, so that the
 setting is Markus's choice after he has seen the dry run, and half A's data is not in memory when half B is loaded. It scores setting `N` of the 144 on half B's calibration
@@ -85,13 +85,14 @@ from realms.calibrate import (
     top_regions,
     within_limit,
 )
-from realms.clean import FROZEN_DIR, GRIIS_WITHOUT_STATUS, LAYERS, Settings, clean, frozen_uses_code, outlier_rows
+from realms.clean import GRIIS_WITHOUT_STATUS, LAYERS, Settings, clean, frozen_list_codes, outlier_rows
 from realms.grid import load_grid
 from realms.natives import load_references, name_index
 from realms.occurrences import IncompleteIngest, load_country_counts, read_complete, resolution_of
 from realms.split import load_split
 
 SCORE_RESOLUTION = 7  # the resolution at which half B is scored, once
+FROZEN_DIR = Path(__file__).resolve().parent.parent / "reference"  # the repository's `reference/`, which is tracked: the frozen decisions are part of the method
 # the marker of a scoring of half B that does not depend on --results, next to the frozen split of release 315557, which it is about
 SEAL_MARKER = Path(__file__).resolve().parent.parent / "data" / "split" / "held_out-315557.started"
 HELD_OUT_KEYS = {"setting", "dry_run_chosen", "setting_is_dry_run_choice", *GRID, *SCORE, "species_loaded"}
@@ -312,7 +313,7 @@ def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
     if missing:
         raise SystemExit(f"FAILED these files are missing: {', '.join(missing)}")
     try:
-        uses_code = frozen_uses_code(resolution, FROZEN_DIR)  # the decision of where GBIF uses a sub-national list's code, frozen once, before anything is loaded or written
+        list_codes = frozen_list_codes(resolution, FROZEN_DIR)  # the country code each sub-national list applies to, frozen once, before anything is loaded or written
     except (FileNotFoundError, ValueError) as error:
         raise SystemExit(f"FAILED {error}") from error
     directory.mkdir(parents=True, exist_ok=True)
@@ -352,7 +353,7 @@ def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
     begun = time.perf_counter()
     index = name_index(col)
     known = replace(DESIGN, wcvp_mode="native_only", griis_without_status=args.griis_without_status)  # the design's thresholds, whatever the defaults of `Settings` are
-    cleaned = clean(counts, refs, grid, frozenset(LAYERS), known, uses_code)
+    cleaned = clean(counts, refs, grid, frozenset(LAYERS), known, list_codes)
     say(f"cleaned half A with all layers: {cleaned.presence.height} presences of {cleaned.presence['species_id'].n_unique()} species")
     cases = known_cases(CASES, index, split, counts, cleaned, refs, regions)
     del index, cleaned
@@ -435,7 +436,7 @@ def dry_run(args: argparse.Namespace, resolution: int, marker: dict) -> None:
     begun = time.perf_counter()
     cross = {}
     for name, setting in (("chosen", chosen), ("design", grid_of_settings[index_design])):
-        found = griis_cross_check(counts, refs, grid, setting, uses_code)
+        found = griis_cross_check(counts, refs, grid, setting, list_codes)
         cross[name] = {"setting": index_chosen if name == "chosen" else index_design, **{k: getattr(setting, k) for k in GRID}, **found}
         say(
             f"GRIIS cross-check at the {name} setting: animal presences listed as introduced {found['listed']['presences_removed']} of {found['listed']['presences']} taken by layer 5 "

@@ -18,19 +18,20 @@ from realms.clean import (
     LAYERS,
     RULES,
     SWITCHABLE,
-    USES_CODE_SCHEMA,
+    LIST_CODES_SCHEMA,
     Settings,
     _layer_3,
     _part_table,
     _Run,
     clean,
-    codes_seen,
-    derive_uses_code,
-    frozen_uses_code,
-    read_uses_code,
+    code_rows,
+    derive_list_codes,
+    frozen_list_codes,
+    list_code_shares,
+    read_list_codes,
 )
 from realms.clean_report import removal_summary
-from realms.grid import ZERO_KM2, cell_of, part_adjacency, parts
+from realms.grid import ZERO_KM2, part_adjacency, parts
 from realms.matrix import cell_taxa
 from realms.nullmodel import excess_table
 from realms.occurrences import COUNTS
@@ -280,14 +281,21 @@ def test_griis_removes_a_species_country_pair_from_every_part_of_that_country():
 FR_CELLS = [("11", "FR", "Reunion", "centre")]
 
 
-def test_a_sub_national_list_matches_on_cells_not_on_the_country_code():
-    # an overseas place carries the sovereign's code in the list (FR), while GBIF's records say RE: no row of Reunion's cell says FR, so the cell decides
-    r = refs([taxon("s1")], griis=[("s1", "FR", "Reunion")], admin1=FR_CELLS)
-    c = counts(row("s1", "11:land", country="RE"), row("s1", "11:sea", country="MU"), row("s1", "10:land", country="FR"), row("s1", "10:land", country="RE"))
+def test_a_sub_national_list_applies_to_the_code_gbif_uses_in_its_cells_and_not_to_its_own():
+    # an overseas place carries the sovereign's code in the list (FR), while GBIF's records say RE: RE has most rows in Reunion's cell (2 against MU's 1, and no row
+    # says FR there), so the list applies to RE rows, and the row of a neighbour country in the same cell is spared
+    r = refs([taxon("s1"), taxon("s2")], griis=[("s1", "FR", "Reunion")], admin1=FR_CELLS)
+    c = counts(
+        row("s1", "11:land", country="RE"),
+        row("s2", "11:land", country="RE"),
+        row("s1", "11:sea", country="MU"),
+        row("s1", "10:land", country="FR"),
+        row("s1", "10:land", country="RE"),
+    )
     out = clean(c, r, GRID)
-    assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "RE"), ("s1", "11:sea", "MU")}
+    assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "RE")}
     assert gone(out, 3, "griis") == set()
-    assert set(kept(out)) == {("s1", "10:land")}  # outside the cells the list does not apply, whatever the country code says
+    assert set(kept(out)) == {("s1", "11:sea"), ("s1", "10:land"), ("s2", "11:land")}  # outside the cells, or another code, the list does not apply
 
 
 def test_the_country_list_applies_to_the_rest_of_the_country_and_the_sub_national_list_to_its_cells():
@@ -335,156 +343,209 @@ US_CELLS = [("11", "US", "United", "overlap"), ("12", "US", "United", "overlap")
 
 
 def test_subnational_list_spares_the_neighbour_country_in_a_border_cell():
-    # GBIF uses `US`, so only US rows count. A CA row in a cell that overlaps a US state is Canada's, and Canada's lists are not this one
-    r = refs([taxon("s1")], griis=[("s1", "US", "United")], admin1=US_CELLS)
+    # `US` has most rows in the cells (3 against CA's 2), so only US rows count. A CA row in a cell that overlaps a US state is Canada's, and Canada's lists are not this one
+    r = refs([taxon("s1"), taxon("s2")], griis=[("s1", "US", "United")], admin1=US_CELLS)
     c = counts(
         row("s1", "11:land", country="US"),
         row("s1", "11:sea", country="US"),
+        row("s2", "11:land", country="US"),
         row("s1", "11:land", country="CA"),
         row("s1", "12:sea", country="CA"),
         row("s1", "10:land", country="US"),  # a US row outside the list's cells
     )
     out = clean(c, r, GRID)
     assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "US"), ("s1", "11:sea", "US")}
-    assert kept(out) == {("s1", "10:land"): 10, ("s1", "11:land"): 10, ("s1", "12:sea"): 10}
+    assert kept(out) == {("s1", "10:land"): 10, ("s1", "11:land"): 10, ("s1", "12:sea"): 10, ("s2", "11:land"): 10}
 
 
-def test_subnational_list_with_a_code_gbif_does_not_use_matches_on_cells_alone():
-    # the Canary Islands are `IC` in GRIIS and `ES` in GBIF, whose records never carry IC: the cells alone decide, whatever the row's code
+def test_a_list_applies_to_the_code_gbif_uses_where_its_own_never_occurs():
+    # the Canary Islands are `IC` in GRIIS and `ES` in GBIF, whose records never carry IC: ES has the rows there, so the list applies to ES rows. A row with no
+    # country code is no candidate and is judged by no sub-national list
     r = refs([taxon("s1")], griis=[("s1", "IC", "Tenerife")], admin1=[("11", "IC", "Tenerife", "overlap")])
     c = counts(row("s1", "11:land", country="ES"), row("s1", "11:sea", country=None), row("s1", "10:land", country="ES"))
     out = clean(c, r, GRID)
-    assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "ES"), ("s1", "11:sea", None)}
-    assert set(kept(out)) == {("s1", "10:land")}
-    # once a row does carry the code, GBIF uses it and the cells no longer decide alone: only IC rows count
-    c = counts(row("s1", "11:land", country="IC"), row("s1", "11:land", country="ES"))
+    assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "ES")}
+    assert set(kept(out)) == {("s1", "11:sea"), ("s1", "10:land")}
+
+
+def test_a_list_whose_cells_are_dominated_by_another_code_applies_to_that_codes_rows_only():
+    # Svalbard is a list of `NO`, and GBIF codes its records `SJ`: 3 rows of SJ, 1 of NO, 1 with no code and 1 of RU, in the list's cell. The list applies to the SJ rows. The
+    # NO row of the cell is Norway's, so Norway's own list takes it (it is not left to Svalbard's list, which is not for NO rows), and the others are spared
+    r = refs([taxon("s1"), taxon("s2"), taxon("s3")], griis=[("s1", "NO", "Svalbard"), ("s1", "NO", None)], admin1=[("11", "NO", "Svalbard", "overlap")])
+    c = counts(
+        row("s1", "11:land", country="SJ"),
+        row("s2", "11:land", country="SJ"),
+        row("s3", "11:sea", country="SJ"),
+        row("s1", "11:sea", country="NO"),
+        row("s1", "11:land", country=None),
+        row("s1", "11:land", country="RU"),
+        row("s1", "10:land", country="NO"),
+    )
+    out = clean(c, r, GRID)
+    assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "SJ")}
+    assert gone(out, 3, "griis") == {("s1", "11:sea", "NO"), ("s1", "10:land", "NO")}
+    assert set(kept(out)) == {("s1", "11:land"), ("s2", "11:land"), ("s3", "11:sea")}
+    assert derive_list_codes(r.admin1_cells, code_rows(c)).rows() == [("NO", "Svalbard", "SJ")]
+
+
+def test_a_tie_between_codes_goes_to_the_lists_own_code_and_then_to_the_lower_code():
+    # one IC row and one ES row in the cell: the list's own code wins the tie
+    r = refs([taxon("s1")], griis=[("s1", "IC", "Tenerife")], admin1=[("11", "IC", "Tenerife", "overlap")])
+    c = counts(row("s1", "11:land", country="IC"), row("s1", "11:sea", country="ES"))
     assert gone(clean(c, r, GRID), 3, "griis_subnational") == {("s1", "11:land", "IC")}
-
-
-def test_gbif_uses_the_code_of_a_list_where_it_occurs_in_the_cells_of_that_list():
-    # `FR` occurs elsewhere in the counts, and in the cell of Reunion's list too, so there only FR rows count and the cell does not decide alone
+    # with no row of the list's own code the lower of the tied codes wins: MU before RE
     r = refs([taxon("s1")], griis=[("s1", "FR", "Reunion")], admin1=FR_CELLS)
-    c = counts(row("s1", "11:land", country="RE"), row("s1", "11:sea", country="FR"), row("s1", "10:land", country="FR"))
-    assert gone(clean(c, r, GRID), 3, "griis_subnational") == {("s1", "11:sea", "FR")}
-    # with no FR row in that cell it is the cell that decides, however many FR rows there are elsewhere
-    c = counts(row("s1", "11:land", country="RE"), row("s1", "10:land", country="FR"), row("s1", "13:land", country="FR"))
-    assert gone(clean(c, r, GRID), 3, "griis_subnational") == {("s1", "11:land", "RE")}
+    c = counts(row("s1", "11:land", country="RE"), row("s1", "11:sea", country="MU"), row("s1", "10:land", country="FR"), row("s1", "13:land", country="FR"))
+    assert gone(clean(c, r, GRID), 3, "griis_subnational") == {("s1", "11:sea", "MU")}
+    # and FR rows elsewhere do not count: only the rows in the list's cells do
+    assert derive_list_codes(r.admin1_cells, code_rows(c)).rows() == [("FR", "Reunion", "MU")]
+    # a code with more rows wins over the list's own, tied or not: 2 rows of RE against 1 of FR
+    c = counts(row("s1", "11:land", country="RE"), row("s1", "12:sea", country="RE"), row("s1", "11:sea", country="FR"))
+    r2 = refs([taxon("s1")], griis=[("s1", "FR", "Reunion")], admin1=[("11", "FR", "Reunion", "centre"), ("12", "FR", "Reunion", "overlap")])
+    assert gone(clean(c, r2, GRID), 3, "griis_subnational") == {("s1", "11:land", "RE"), ("s1", "12:sea", "RE")}
 
 
-# ---- the frozen country-code decision of the sub-national lists
+# ---- the frozen country codes of the sub-national lists
 
 IC = refs([taxon("s1")], griis=[("s1", "IC", "Tenerife")], admin1=[("11", "IC", "Tenerife", "overlap")])
 
 
 def frozen(*rows_) -> pl.DataFrame:
-    """A frozen table: (country, subdivision, uses_code) rows."""
-    return pl.DataFrame(list(rows_), schema=USES_CODE_SCHEMA, orient="row")
+    """A frozen table: (country, subdivision, code) rows."""
+    return pl.DataFrame(list(rows_), schema=LIST_CODES_SCHEMA, orient="row")
 
 
-def test_a_frozen_uses_code_table_overrides_what_the_counts_say():
-    # no row of the counts carries `IC`, so the counts say GBIF does not use it and the cell decides alone: the ES row goes
+def test_a_frozen_list_codes_table_overrides_what_the_counts_say():
+    # no row of the counts carries `IC`, so the counts say ES and the list applies to the ES row
     c = counts(row("s1", "11:land", country="ES"), row("s1", "10:land", country="ES"))
     assert gone(clean(c, IC, GRID), 3, "griis_subnational") == {("s1", "11:land", "ES")}
-    # frozen as used, the list filters by code: no row is IC, so nothing is taken
-    out = clean(c, IC, GRID, uses_code=frozen(("IC", "Tenerife", True)))
+    # frozen as IC, the list applies to IC rows: there is none, so nothing is taken
+    out = clean(c, IC, GRID, list_codes=frozen(("IC", "Tenerife", "IC")))
     assert gone(out, 3, "griis_subnational") == set()
     assert set(kept(out)) == {("s1", "11:land"), ("s1", "10:land")}
-    # and the other way round: an IC row is in the cell, so the counts say by code and the ES row stays, but frozen as not used the cell decides alone
-    c = counts(row("s1", "11:land", country="IC"), row("s1", "11:land", country="ES", n=5), row("s1", "10:land", country="ES"))
-    assert gone(clean(c, IC, GRID), 3, "griis_subnational") == {("s1", "11:land", "IC")}
-    assert gone(clean(c, IC, GRID, uses_code=frozen(("IC", "Tenerife", False))), 3, "griis_subnational") == {("s1", "11:land", "IC"), ("s1", "11:land", "ES")}
+    # and the other way round: ES has 2 rows in the cell against IC's 1, so the counts say ES and the IC row stays, but frozen as IC it is the IC row that goes
+    c = counts(row("s1", "11:land", country="IC"), row("s1", "11:land", country="ES", n=5), row("s1", "11:sea", country="ES"), row("s1", "10:land", country="ES"))
+    assert gone(clean(c, IC, GRID), 3, "griis_subnational") == {("s1", "11:land", "ES"), ("s1", "11:sea", "ES")}
+    assert gone(clean(c, IC, GRID, list_codes=frozen(("IC", "Tenerife", "IC"))), 3, "griis_subnational") == {("s1", "11:land", "IC")}
 
 
 def test_a_frozen_table_that_agrees_with_the_counts_changes_nothing():
     c = counts(row("s1", "11:land", country="IC"), row("s1", "11:land", country="ES"), row("s1", "10:land", country="FR"))
-    derived = derive_uses_code(IC.admin1_cells, codes_seen(c))
-    assert derived.rows() == [("IC", "Tenerife", True)]
+    derived = derive_list_codes(IC.admin1_cells, code_rows(c))
+    assert derived.rows() == [("IC", "Tenerife", "IC")]  # a tie, and the list's own code
     same = clean(c, IC, GRID)
-    assert clean(c, IC, GRID, uses_code=derived).removed.equals(same.removed)
+    assert clean(c, IC, GRID, list_codes=derived).removed.equals(same.removed)
 
 
 def test_the_frozen_table_decides_every_pass_of_layer_3_not_only_the_first(monkeypatch):
     # a land species has a row in the open sea of cell 12 and one on the land of cell 13: layer 4 moves the first to 13:land, and layer 3 judges it there again
     r = refs([taxon("s1", environment="terrestrial")], griis=[("s1", "IC", "Tenerife")], admin1=[("13", "IC", "Tenerife", "overlap")])
     c = counts(row("s1", "12:sea", country="ES"), row("s1", "13:land", country="ES"))
-    table = frozen(("IC", "Tenerife", True))
+    table = frozen(("IC", "Tenerife", "IC"))
     calls = []
     real = clean_module._layer_3
 
     def spy(*args, **kwargs):
-        calls.append((kwargs.get("only") is not None, kwargs.get("uses_code")))
+        calls.append((kwargs.get("only") is not None, kwargs.get("list_codes")))
         return real(*args, **kwargs)
 
     monkeypatch.setattr(clean_module, "_layer_3", spy)
-    out = clean(c, r, GRID, frozenset({1, 2, 3, 4}), uses_code=table)
+    out = clean(c, r, GRID, frozenset({1, 2, 3, 4}), list_codes=table)
     assert [first for first, _ in calls] == [False, True]  # the first pass, and the pass over the rows layer 4 moved
     assert all(t is not None and t.equals(table) for _, t in calls)  # the frozen table, both times, and not the counts' own decision
-    assert gone(out, 4, "land_sea_neighbour") == {("s1", "12:sea", "ES")} and gone(out, 3) == set()  # by code: no ES row is taken, however many cells the list has
+    assert gone(out, 4, "land_sea_neighbour") == {("s1", "12:sea", "ES")} and gone(out, 3) == set()  # applied to IC rows: no ES row is taken
     calls.clear()
-    assert gone(clean(c, r, GRID, frozenset({1, 2, 3, 4})), 3, "griis_subnational") != set()  # derived, the cell decides alone and takes them
+    assert gone(clean(c, r, GRID, frozenset({1, 2, 3, 4})), 3, "griis_subnational") != set()  # derived, the code is ES and the rows are taken
 
 
 def test_a_frozen_table_is_not_read_when_layer_3_is_off():
     c = counts(row("s1", "11:land", country="ES"))
-    broken = frozen(("IC", "Tenerife", True), ("IC", "Tenerife", False))  # twice, which layer 3 would refuse
-    assert clean(c, IC, GRID, frozenset({1, 2, 4, 5}), uses_code=broken).presence.height == 1
+    broken = frozen(("IC", "Tenerife", "IC"), ("IC", "Tenerife", "ES"))  # twice, which layer 3 would refuse
+    assert clean(c, IC, GRID, frozenset({1, 2, 4, 5}), list_codes=broken).presence.height == 1
 
 
 def test_a_frozen_table_that_misses_an_applied_list_is_refused():
     c = counts(row("s1", "11:land", country="ES"))
     with pytest.raises(ValueError, match=r"IC.*Tenerife"):
-        clean(c, IC, GRID, uses_code=frozen(("IC", "Gomera", True)))
+        clean(c, IC, GRID, list_codes=frozen(("IC", "Gomera", "ES")))
     with pytest.raises(ValueError, match=r"IC.*Tenerife"):
-        clean(c, IC, GRID, uses_code=frozen())
+        clean(c, IC, GRID, list_codes=frozen())
     # a place of the table that no list names does no harm, and a list that is not applied needs no decision (under `skip` a name-only list is not applied)
     name_only = refs([taxon("s1")], griis_name_only=[("s1", "IC", "Tenerife")], admin1=[("11", "IC", "Tenerife", "overlap")])
-    assert clean(c, name_only, GRID, uses_code=frozen(("FR", "Reunion", False))).presence.height == 1
+    assert clean(c, name_only, GRID, list_codes=frozen(("FR", "Reunion", "RE"))).presence.height == 1
     with pytest.raises(ValueError, match=r"IC.*Tenerife"):
-        clean(c, name_only, GRID, settings=Settings(griis_without_status="apply"), uses_code=frozen(("FR", "Reunion", False)))
+        clean(c, name_only, GRID, settings=Settings(griis_without_status="apply"), list_codes=frozen(("FR", "Reunion", "RE")))
 
 
 def test_a_frozen_table_of_the_wrong_shape_is_refused():
     c = counts(row("s1", "11:land", country="ES"))
     with pytest.raises(ValueError, match="columns"):
-        clean(c, IC, GRID, uses_code=frozen(("IC", "Tenerife", True)).drop("uses_code"))
-    with pytest.raises(ValueError, match="uses_code"):
-        clean(c, IC, GRID, uses_code=pl.DataFrame({"country": ["IC"], "subdivision": ["Tenerife"], "uses_code": ["yes"]}))
+        clean(c, IC, GRID, list_codes=frozen(("IC", "Tenerife", "ES")).drop("code"))
+    with pytest.raises(ValueError, match="code is"):
+        clean(c, IC, GRID, list_codes=pl.DataFrame({"country": ["IC"], "subdivision": ["Tenerife"], "code": [1]}))
     with pytest.raises(ValueError, match="twice"):
-        clean(c, IC, GRID, uses_code=frozen(("IC", "Tenerife", True), ("IC", "Tenerife", False)))
+        clean(c, IC, GRID, list_codes=frozen(("IC", "Tenerife", "IC"), ("IC", "Tenerife", "ES")))
     with pytest.raises(ValueError, match="no value"):
-        clean(c, IC, GRID, uses_code=frozen(("IC", "Tenerife", None)))
+        clean(c, IC, GRID, list_codes=frozen(("IC", "Tenerife", None)))
+    with pytest.raises(ValueError, match="no value"):
+        clean(c, IC, GRID, list_codes=frozen(("IC", "Tenerife", "")))
 
 
-def test_the_derivation_decides_every_place_of_the_lists_by_where_gbif_uses_the_code():
+def test_the_code_rows_count_the_rows_of_each_code_in_each_cell_with_the_rows_that_have_none():
+    c = counts(row("s1", "11:land", country="RE"), row("s2", "11:land", country="RE"), row("s1", "11:sea", country="US"), row("s1", "13:land", country="ES"), row("s1", "13:sea", country=None))
+    seen = code_rows(c)
+    assert seen.columns == ["cell", "countrycode", "rows"]
+    assert seen.sort("cell", "countrycode", nulls_last=True).rows() == [("11", "RE", 2), ("11", "US", 1), ("13", "ES", 1), ("13", None, 1)]  # rows, over parts and species; a row with no code is counted
+
+
+def test_the_derivation_gives_every_place_of_the_lists_the_code_with_most_rows_in_its_cells():
     cells = pl.DataFrame(
-        [("11", "FR", "Reunion", "centre"), ("12", "FR", "Reunion", "overlap"), ("11", "US", "Texas", "centre"), ("13", "IC", "Tenerife", "overlap")],
+        [("11", "FR", "Reunion", "centre"), ("12", "FR", "Reunion", "overlap"), ("15", "US", "Texas", "centre"), ("13", "IC", "Tenerife", "overlap"), ("14", "XX", "Empty", "overlap")],
         schema={"cell": pl.String, "country": pl.String, "subdivision": pl.String, "via": pl.String},
         orient="row",
     )
-    c = counts(row("s1", "11:land", country="RE"), row("s1", "11:sea", country="US"), row("s1", "10:land", country="FR"), row("s1", "13:land", country="ES"), row("s1", "13:sea", country=None))
-    table = derive_uses_code(cells, codes_seen(c))
-    assert table.schema == pl.Schema(USES_CODE_SCHEMA)
-    # `FR` is in the counts but not in the cells of Reunion, `US` is in Texas's cell, and no row says `IC`; sorted by country and subdivision
-    assert table.rows() == [("FR", "Reunion", False), ("IC", "Tenerife", False), ("US", "Texas", True)]
-    assert derive_uses_code(cells.head(0), codes_seen(c)).rows() == []
-    assert codes_seen(c).sort("cell", "countrycode").rows() == [("FR", "10"), ("RE", "11"), ("US", "11"), ("ES", "13")]  # no null code, each pair once
+    c = counts(
+        row("s1", "11:land", country="RE"),
+        row("s2", "11:land", country="RE"),
+        row("s1", "11:sea", country="US"),
+        row("s3", "12:land", country="FR"),
+        row("s1", "10:land", country="FR"),  # not in a cell of a list
+        row("s1", "13:land", country="ES"),
+        row("s1", "13:sea", country=None),
+        row("s1", "15:land", country="US"),
+        row("s2", "15:land", country="US"),
+    )
+    seen = code_rows(c)
+    table = derive_list_codes(cells, seen)
+    assert table.schema == pl.Schema(LIST_CODES_SCHEMA)
+    # RE has 2 of Reunion's 4 rows, ES 1 of Tenerife's 2 (the row with no code is no candidate), Texas is all US, and the place with no row has its list's own code
+    assert table.rows() == [("FR", "Reunion", "RE"), ("IC", "Tenerife", "ES"), ("US", "Texas", "US"), ("XX", "Empty", "XX")]
+    assert derive_list_codes(cells.head(0), seen).rows() == []
+    shares = list_code_shares(cells, seen, table)
+    assert shares.columns == ["country", "subdivision", "code", "rows", "with_code", "share", "next_code", "next_rows", "low"]
+    assert shares.rows() == [
+        ("FR", "Reunion", "RE", 4, 2, 0.5, "FR", 1, True),  # the next code is the lower of FR and US, which have one row each
+        ("IC", "Tenerife", "ES", 2, 1, 0.5, None, None, True),
+        ("US", "Texas", "US", 2, 2, 1.0, None, None, False),
+        ("XX", "Empty", "XX", 0, 0, None, None, None, False),
+    ]
 
 
 def test_a_frozen_table_is_read_from_its_file_and_written_back_the_same(tmp_path):
-    table = frozen(("US", "Texas", True), ("FR", "Reunion", False))
+    table = frozen(("US", "Texas", "US"), ("FR", "Reunion", "RE"))
     path = tmp_path / "griis_uses_code-res7.csv"
     table.sort("country", "subdivision").write_csv(path)
-    assert path.read_text().splitlines() == ["country,subdivision,uses_code", "FR,Reunion,false", "US,Texas,true"]
-    assert read_uses_code(path).equals(table.sort("country", "subdivision"))
-    assert frozen_uses_code(7, tmp_path).equals(read_uses_code(path))
+    assert path.read_text().splitlines() == ["country,subdivision,code", "FR,Reunion,RE", "US,Texas,US"]
+    assert read_list_codes(path).equals(table.sort("country", "subdivision"))
+    assert frozen_list_codes(7, tmp_path).equals(read_list_codes(path))
     with pytest.raises(FileNotFoundError, match=r"griis_codes\.py"):
-        frozen_uses_code(6, tmp_path)  # the message says what to run
-    path.write_text("country,subdivision,uses_code\nFR,Reunion,maybe\n")
-    with pytest.raises(ValueError, match="uses_code"):
-        read_uses_code(path)
-    path.write_text("country,subdivision\nFR,Reunion\n")
+        frozen_list_codes(6, tmp_path)  # the message says what to run
+    path.write_text("country,subdivision,uses_code\nFR,Reunion,true\n")  # the first form of the table, which said whether GBIF used the list's code
     with pytest.raises(ValueError, match="columns"):
-        read_uses_code(path)
+        read_list_codes(path)
+    path.write_text("country,subdivision,code\nFR,Reunion,RE\nFR,Reunion,GP\n")
+    with pytest.raises(ValueError, match="twice"):
+        read_list_codes(path)
 
 
 ROOT = Path(__file__).parent.parent
@@ -512,17 +573,31 @@ def derived_from_half_a(resolution: int) -> pl.DataFrame:
 
 def test_the_frozen_res7_table_equals_the_derivation_from_half_a():
     derived = derived_from_half_a(7)
-    frozen_file = read_uses_code(ROOT / "reference" / "griis_uses_code-res7.csv")
-    assert frozen_file.equals(derived) and frozen_file.height == 24  # every place of the sub-national lists has its decision
-    decided = {(c, d): u for c, d, u in frozen_file.iter_rows()}
-    # both ways occur: the French overseas places carry the sovereign's code in the list only (their records say RE, GP and so on), the US states and the rest carry their own
-    assert [k for k, u in decided.items() if not u] == [("FR", "Guadeloupe"), ("FR", "Martinique"), ("FR", "Reunion"), ("FR", "Saint-Pierre")]
-    assert decided[("US", "Alaska")] and decided[("US", "Hawaii")] and decided[("PT", "Azores")]
+    frozen_file = read_list_codes(ROOT / "reference" / "griis_uses_code-res7.csv")
+    assert frozen_file.equals(derived) and frozen_file.height == 24  # every place of the sub-national lists has its code
+    other = {(c, d): k for c, d, k in frozen_file.filter(pl.col("code") != pl.col("country")).iter_rows()}
+    # the lists that apply to another code than their own country's: Svalbard's records are `SJ`, the French overseas places have codes of their own, and the cells of the
+    # three Dutch Caribbean places are mostly of Curacao (CW) and Saint Martin (MF), whose rows have more than BQ's (DECISIONS.md flags them, the shares are under 80%)
+    assert other == {
+        ("BQ", "Bonaire"): "CW",
+        ("BQ", "Saba"): "MF",
+        ("BQ", "StEustatius"): "MF",
+        ("FR", "Guadeloupe"): "GP",
+        ("FR", "Martinique"): "MQ",
+        ("FR", "Reunion"): "RE",
+        ("FR", "Saint-Pierre"): "PM",
+        ("NO", "Svalbard"): "SJ",
+    }
+    assert set(frozen_file.filter(pl.col("code") == pl.col("country"))["country"]) == {"FM", "KM", "PT", "SH", "TO", "US"}
 
 
 def test_the_frozen_res6_table_equals_the_derivation_from_half_a():
     derived = derived_from_half_a(6)
-    assert read_uses_code(ROOT / "reference" / "griis_uses_code-res6.csv").equals(derived)
+    assert read_list_codes(ROOT / "reference" / "griis_uses_code-res6.csv").equals(derived)
+    # the cells at resolution 6 are bigger, so more of the codes in them are a neighbour's: the res 6 table is not the res 7 one, and res 7 is the analysis resolution
+    at_7 = {(c, d): k for c, d, k in read_list_codes(ROOT / "reference" / "griis_uses_code-res7.csv").iter_rows()}
+    differs = {(c, d): k for c, d, k in derived.iter_rows() if at_7[(c, d)] != k}
+    assert differs == {("BQ", "Saba"): "VI", ("BQ", "StEustatius"): "GP", ("FR", "Martinique"): "GP", ("KM", "Mwali"): "YT", ("KM", "Ndzuwani"): "YT", ("KM", "Ngazidja"): "YT"}
 
 
 def test_the_code_gbif_uses_is_read_from_the_counts_and_not_from_what_is_left_of_them():
@@ -643,12 +718,13 @@ def test_layer_3_rules_can_be_switched_off_one_at_a_time():
         admin1=FR_CELLS,
         wrims=[("w", "a", "x", "AA")],
     )
-    c = counts(row("g", "10:land"), row("n", "11:land", country="RE"), row("w", "11:sea"))
+    # RE has 2 rows in Reunion's cell against AA's 1, so Reunion's list applies to RE
+    c = counts(row("g", "10:land"), row("n", "11:land", country="RE"), row("n", "11:sea", country="RE"), row("w", "11:sea"))
     assert len(clean(c, r, GRID).presence) == 0
     for rule, species in (("griis", "g"), ("griis_subnational", "n"), ("wrims", "w")):
         out = clean(c, r, GRID, settings=Settings(rules_off=frozenset({rule})))
         assert set(out.presence["species_id"]) == {species}, rule
-    assert len(clean(c, r, GRID, frozenset({1, 2, 4})).presence) == 3  # layer 3 off
+    assert len(clean(c, r, GRID, frozenset({1, 2, 4})).presence) == 4  # layer 3 off
 
 
 def test_a_row_the_alien_lists_and_wcvp_both_catch_goes_to_the_lists():
@@ -848,7 +924,7 @@ def test_layer_3_judges_the_moved_rows_with_the_same_settings():
     off = clean(c, CRAB, GRID, frozenset({1, 2, 3, 4}), Settings(rules_off=frozenset({"wrims"})))
     assert kept(off) == {("crab", "11:sea"): 55} and not gone(off, 3)
     # a sub-national list with no distribution table, which only `apply` applies. The land species' AA row at open sea (12) folds into the neighbour's
-    # land part (100), in the list's cell, where it already has BB records. GBIF uses AA in cell 100 (the other species' row), so the list applies by code.
+    # land part (100), in the list's cell, where it already has BB records. AA and BB have a row each in cell 100, a tie that goes to the list's own code, so the list applies to AA rows.
     r = refs(
         [taxon("land", environment="terrestrial"), taxon("other")],
         griis_name_only=[("land", "AA", "Sub")],
@@ -951,10 +1027,12 @@ LOOSE_5 = {"satellite_record_share": 0.3, "satellite_cell_share": 0.6, "group_mi
 RANDOM_PARTS = [f"{cell}:{kind}" for cell in RANDOM_CELLS for kind in ("land", "sea")]
 # the land parts with area, and the TDWG regions they touch: 7 is in none, and 5's land has no area
 RANDOM_TDWG3 = [("1:land", "R1"), ("2:land", "R1"), ("2:land", "R2"), ("4:land", "R2"), ("6:land", "R3"), ("7:land", None)]
-# `Isle` is a list of a country, XX, that no row carries (GBIF does not use its code), so the cells alone decide there; it shares cell 6 with `Sub`, whose
-# code AA is used, so that cell takes both lists. `Sub` also reaches cell 5, which has no land, so that a land species' AA row there, which the country's
+# `Isle` is a list of a country, XX, that no row carries (GBIF does not use its code), so it applies to the code with most rows in its cells; it shares cell 6 with `Sub`,
+# whose code AA is used, so that cell takes both lists. `Sub` also reaches cell 5, which has no land, so that a land species' AA row there, which the country's
 # list leaves to `Sub`, folds into a neighbour that is the country list's
 RANDOM_ADMIN1 = [("2", "AA", "Sub", "centre"), ("6", "AA", "Sub", "overlap"), ("5", "AA", "Sub", "overlap"), ("4", "XX", "Isle", "overlap"), ("6", "XX", "Isle", "overlap")]
+# the parts of `Sub`'s cells that have area: both parts of the coastal cells 2 and 6, and cell 5's sea
+SUB_PARTS = ["2:land", "2:sea", "6:land", "6:sea", "5:sea"]
 # the parts of the shore species: both parts of the coastal cells, the open sea next to them, cell 5's sea and the land of cell 4 next to it
 SHORE_PARTS = ["2:land", "2:sea", "6:land", "6:sea", "3:sea", "8:sea", "7:land", "5:sea", "4:land"]
 COUNTRIES = ["AA", "BB", "CC", None]
@@ -1038,6 +1116,23 @@ def random_case(seed: int):
             if shore.random() < 0.6:
                 country = home if shore.random() < 0.7 else COUNTRIES[shore.integers(3)]
                 rows.append(row(species, part, country, n=int(shore.integers(1, 30))))
+    # rows of AA in the cells of `Sub`, from a stream of their own, so that AA has most rows there in every seed and is the code that `Sub`'s list applies to: the
+    # country list leaves those rows to `Sub`, and layer 4 folds some of them into places where the country list takes them
+    sub = np.random.default_rng(seed + 3000)
+    have = {(r["species_id"], r["countrycode"], r["part"]) for r in rows}
+    for species in ids:
+        for _ in range(2):
+            part = SUB_PARTS[sub.integers(len(SUB_PARTS))]
+            if sub.random() < 0.8 and (species, "AA", part) not in have:
+                have.add((species, "AA", part))
+                rows.append(row(species, part, "AA", n=int(sub.integers(1, 30))))
+    # and rows of BB in cell 4, which only `Isle` has, so that `Isle`'s effective code is BB and not the AA of cell 6: the rows of AA in cell 4 are then the country list's
+    isle = np.random.default_rng(seed + 4000)
+    for species in ids:
+        for part in ("4:land", "4:sea"):
+            if isle.random() < 0.9 and (species, "BB", part) not in have:
+                have.add((species, "BB", part))
+                rows.append(row(species, part, "BB", n=int(isle.integers(1, 30))))
     return counts(*rows), refs(
         taxa, wcvp=wcvp, griis=griis, wrims=wrims, tdwg3=RANDOM_TDWG3, admin1=RANDOM_ADMIN1, griis_no_cells=griis_no_cells, wrims_no_country=wrims_no_country,
         no_wild_range=no_wild_range, griis_name_only=name_only, griis_name_only_no_cells=name_only_no_cells,
@@ -1068,8 +1163,8 @@ def test_records_are_conserved(seed, wcvp_mode, side_conflict, layer_1, heuristi
 @pytest.mark.parametrize("wcvp_mode", ["native_only", "off"])
 @pytest.mark.parametrize("seed", range(6))
 def test_records_are_conserved_with_every_branch_of_the_griis_rules(seed, wcvp_mode, griis_without_status):
-    """The same sum with the lists that have no table applied or not, and with the sub-national list that the cells alone decide (`XX`), which shares a cell
-    with one that goes by code (`AA`). The random world has both in every seed."""
+    """The same sum with the lists that have no table applied or not, and with the sub-national list whose own code no row carries (`XX`), which shares a cell
+    with one that applies to its own (`AA`). The random world has both in every seed."""
     c, r = random_case(seed)
     out = clean(c, r, RANDOM_GRID, ALL, Settings(wcvp_mode=wcvp_mode, griis_without_status=griis_without_status, **LOOSE_5))
     lost = out.removed.filter(pl.col("layer") >= 2, pl.col("to_part").is_null())["records"].sum()
@@ -1111,8 +1206,7 @@ def test_layer_3_would_take_nothing_of_what_clean_leaves(seed, wcvp_mode, griis_
     by_part = end.group_by("species_id", "part").agg(pl.col("records").sum()).sort("species_id", "part")
     assert by_part.equals(out.presence.select("species_id", "part", "records"))
     run = _Run(end)
-    seen = c.select("countrycode", cell_of(pl.col("part")).alias("cell")).drop_nulls("countrycode").unique()
-    _layer_3(run, r, _part_table(RANDOM_GRID), settings, seen)
+    _layer_3(run, r, _part_table(RANDOM_GRID), settings, code_rows(c))
     assert not run.removed and run.rows.equals(end)
 
 
@@ -1133,13 +1227,13 @@ def test_the_random_world_reaches_layer_3_after_the_folds():
     assert twice >= {"wrims", "wcvp_outside_native", "wcvp_introduced"}
 
 
-def test_the_random_world_reaches_the_cells_alone_branch_and_the_switch():
+def test_the_random_world_reaches_a_list_that_applies_to_a_code_not_its_own_and_the_switch():
     by_alone = by_skip = by_apply = 0
     for seed in range(6):
         c, r = random_case(seed)
         skipped = clean(c, r, RANDOM_GRID, ALL, Settings(wcvp_mode="off", **LOOSE_5))
         applied = clean(c, r, RANDOM_GRID, ALL, Settings(wcvp_mode="off", griis_without_status="apply", **LOOSE_5))
-        # a row of any country in cell 4, which only `Isle` has, is taken by cells alone (no row says XX)
+        # a row in cell 4, which only `Isle` has, is taken where it carries `Isle`'s effective code (no row says XX)
         alone = skipped.removed.filter(pl.col("rule") == "griis_subnational", pl.col("part").str.starts_with("4:"))
         by_alone += alone.height
         by_skip += skipped.removed.filter(pl.col("layer") == 3, pl.col("rule").str.starts_with("griis")).height

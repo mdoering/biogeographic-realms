@@ -342,7 +342,7 @@ def test_clean_counts_refuses_without_the_frozen_country_code_table_before_it_lo
         script.main()
     assert not (tmp_path / "results").exists()
     # with the table there it goes on, and the loaders (which fail here) are the next thing it reaches
-    (frozen / "griis_uses_code-res6.csv").write_text("country,subdivision,uses_code\n")
+    (frozen / "griis_uses_code-res6.csv").write_text("country,subdivision,code\n")
     with pytest.raises(AssertionError, match="something was loaded"):
         script.main()
 

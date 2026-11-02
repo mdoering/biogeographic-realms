@@ -698,7 +698,7 @@ def load_admin1_cells(grid: Grid, reference_dir: Path = Path("data/reference")) 
     """The `admin1_cells` of `load_references` alone: the cells of every sub-national GRIIS list that the manifest in `reference_dir` has an export for.
 
     It needs the manifest's admin-1 polygons and the grid's file, and nothing of COL, WCVP or WRiMS, so that `scripts/griis_codes.py` need not load the
-    references (16 GB) to decide where GBIF uses a list's country code. `load_references` calls it, so the two agree.
+    references (16 GB) to decide which country code each sub-national list applies to. `load_references` calls it, so the two agree.
     """
     reference_dir = Path(reference_dir)
     manifest = json.loads((reference_dir / "manifest.json").read_text())

@@ -532,7 +532,7 @@ def _unit_counts(frame: pl.DataFrame) -> dict:
     return {**out, **{f"{k}_share": _share(out[f"{k}_removed"], out[k]) for k in ("pairs", "presences", "records")}}
 
 
-def griis_cross_check(counts: pl.DataFrame, refs: References, grid: Grid, settings: Settings = DESIGN, uses_code: pl.DataFrame | None = None) -> dict:
+def griis_cross_check(counts: pl.DataFrame, refs: References, grid: Grid, settings: Settings = DESIGN, list_codes: pl.DataFrame | None = None) -> dict:
     """What layer 5 takes of the animals that GRIIS lists as introduced, against what it takes of all the other animals, at the thresholds of `settings`.
 
     Layers 1, 2 and 4 run on everything `counts` holds, so that layer 5 sees the group totals of the real run, with layer 3 off, and layer 5 is
@@ -542,11 +542,11 @@ def griis_cross_check(counts: pl.DataFrame, refs: References, grid: Grid, settin
     listed species' border cell (a CA row in a cell that overlaps a US state) count as listed with it, though no GRIIS rule took them. The lists are those with a distribution table, whatever `settings.griis_without_status` says, and an entry applies as in `clean`:
     introduced, or with no value, but not native or uncertain. Layer 5 judges cells, so the units are the (species, cell) pairs it judges, the presences (species, part)
     and the records; the shares are those layer 5 takes. A listed presence is one the real run's layer 3 takes first, so the share is how much of
-    that the heuristics would find unaided. Reports only: nothing is changed, and nothing of half B is read (the caller passes half A's counts). `uses_code` is the
-    frozen table that layer 3 takes the countries' codes from (`clean`), or `None` for the counts' own.
+    that the heuristics would find unaided. Reports only: nothing is changed, and nothing of half B is read (the caller passes half A's counts). `list_codes` is the
+    frozen table that says which country code each sub-national list applies to (`clean`), or `None` for the counts' own.
     """
     listing = replace(settings, wcvp_mode="off", rules_off=frozenset({"wrims"}), griis_without_status="skip")
-    taken = clean(counts, refs, grid, frozenset({1, 2, 3}), listing, uses_code).removed.filter(pl.col("rule").is_in(GRIIS_RULES))
+    taken = clean(counts, refs, grid, frozenset({1, 2, 3}), listing, list_codes).removed.filter(pl.col("rule").is_in(GRIIS_RULES))
     listed = taken.select("species_id", cell_of(pl.col("part")).alias("cell")).unique().with_columns(pl.lit(True).alias("listed"))
     early = clean(counts, refs, grid, BEFORE_5, settings)
     gone = outlier_rows(early.presence, refs, grid, settings).select("species_id", "part").unique().with_columns(pl.lit(True).alias("removed"))

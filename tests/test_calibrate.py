@@ -64,7 +64,7 @@ from realms.calibrate import (
     with_marginals,
     within_limit,
 )
-from realms.clean import LAYERS, RULES, SWITCHABLE, USES_CODE_SCHEMA, Settings, clean, outlier_rows
+from realms.clean import LAYERS, RULES, SWITCHABLE, LIST_CODES_SCHEMA, Settings, clean, outlier_rows
 from realms.grid import Grid
 from realms.occurrences import COLUMNS, COUNTS as COUNT_COLUMNS, SealedHalf, ingest, load_country_counts, mark_complete
 
@@ -1160,7 +1160,7 @@ class ScriptWorld:
         self.seal = tmp_path / "split" / "held_out-315557.started"
         self.frozen = tmp_path / "frozen"  # the frozen country-code decisions of the sub-national lists: the world has none, so a table with no rows
         self.frozen.mkdir()
-        (self.frozen / f"griis_uses_code-res{resolution}.csv").write_text("country,subdivision,uses_code\n")
+        (self.frozen / f"griis_uses_code-res{resolution}.csv").write_text("country,subdivision,code\n")
         self.loads = []
 
         def spy(out_dir, split_, half, **kwargs):
@@ -1240,19 +1240,19 @@ def test_the_dry_run_refuses_without_the_frozen_table_before_it_loads_or_writes_
 
 
 def test_the_dry_run_hands_layer_3_the_frozen_table_and_runs_the_known_cases_at_the_designs_thresholds(world7, monkeypatch):
-    table = pl.DataFrame([("AA", "Sub", True)], schema=USES_CODE_SCHEMA, orient="row")
+    table = pl.DataFrame([("AA", "Sub", "AA")], schema=LIST_CODES_SCHEMA, orient="row")
     table.write_csv(world7.frozen / "griis_uses_code-res7.csv")
     script = world7.script
     cleaned, crossed = [], []
     real_clean, real_cross = script.clean, script.griis_cross_check
 
-    def spy_clean(counts_, refs_, grid_, layers=frozenset(), settings=None, uses_code=None):
-        cleaned.append((layers, settings, uses_code))
-        return real_clean(counts_, refs_, grid_, layers, settings, uses_code)
+    def spy_clean(counts_, refs_, grid_, layers=frozenset(), settings=None, list_codes=None):
+        cleaned.append((layers, settings, list_codes))
+        return real_clean(counts_, refs_, grid_, layers, settings, list_codes)
 
-    def spy_cross(counts_, refs_, grid_, settings, uses_code=None):
-        crossed.append((settings, uses_code))
-        return real_cross(counts_, refs_, grid_, settings, uses_code)
+    def spy_cross(counts_, refs_, grid_, settings, list_codes=None):
+        crossed.append((settings, list_codes))
+        return real_cross(counts_, refs_, grid_, settings, list_codes)
 
     monkeypatch.setattr(script, "clean", spy_clean)
     monkeypatch.setattr(script, "griis_cross_check", spy_cross)

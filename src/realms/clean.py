@@ -17,7 +17,7 @@ Order and attribution:
   WCVP's native regions is therefore the list's, and what `wcvp_*` reports is what no list had already removed. To measure one source
   alone, switch the others off (`Settings.rules_off`, `wcvp_mode`). A GRIIS list applies by what it says its entries are: introduced ones (an
   empty value counts), never native or uncertain ones, and not at all a list with no distribution table, unless `griis_without_status` is `apply`.
-  Where GBIF uses a sub-national list's country code is a decision made once and frozen (see `derive_uses_code`), so that two runs apply the same lists.
+  A sub-national list applies to the rows in its cells that carry its **effective country code**, the code GBIF mostly uses in those cells: a decision made once and frozen (see `derive_list_codes`), so that two runs apply the same lists.
 - **Layer 4** folds a clearly land or clearly sea species' records on the wrong side to the right side. COL's environment is the surer
   word of the two ways to be clear, so where it disagrees with the records `Settings.side_conflict` lets it decide, or leaves the species be.
   **Layer 3 then judges again every row that layer 4 moved, where it went**, with the same settings, and a row it takes is logged under the layer 3
@@ -73,10 +73,10 @@ RULES = {
     "under_reported": 5,
     "thin_long_range": 5,
 }
-# the frozen decision of where GBIF uses a sub-national GRIIS list's country code, one row for each place of the lists (see `derive_uses_code`)
-USES_CODE_SCHEMA = {"country": pl.String, "subdivision": pl.String, "uses_code": pl.Boolean}
-USES_CODE_FILE = "griis_uses_code-res{resolution}.csv"
-FROZEN_DIR = Path(__file__).resolve().parents[2] / "reference"  # the repository's `reference/`, which is tracked: the decision is part of the method
+# the frozen effective country code of each sub-national GRIIS list, one row for each place of the lists (see `derive_list_codes`)
+LIST_CODES_SCHEMA = {"country": pl.String, "subdivision": pl.String, "code": pl.String}
+LIST_CODES_FILE = "griis_uses_code-res{resolution}.csv"  # in the repository's `reference/`, which is tracked: the decision is part of the method
+LOW_SHARE = 0.8  # an effective code with a smaller share of the rows in its list's cells is flagged in the reports
 KEY = ["species_id", "countrycode", "part"]
 OTHER = dict(zip(KINDS, reversed(KINDS), strict=True))  # the other part of a cell: land for sea and sea for land
 REMOVED_SCHEMA = {
@@ -346,74 +346,110 @@ def _wcvp(rows: pl.DataFrame, refs: References, mode: str) -> pl.DataFrame:
     return rows.join(outside.select("species_id", "part"), on=["species_id", "part"], how="semi")
 
 
-def codes_seen(counts: pl.DataFrame) -> pl.DataFrame:
-    """`countrycode` and `cell` of every row of `counts` (the country counts) that has a country code, each pair once: where GBIF uses a country code.
+def code_rows(counts: pl.DataFrame) -> pl.DataFrame:
+    """`countrycode`, `cell` and `rows` of the country counts: how many rows of `counts` there are for each country code (null included) in each cell.
 
-    Read from the counts as they came, before layer 1 takes rows out, so a row with no clean record still shows that GBIF used its code.
+    Read from the counts as they came, before layer 1 takes rows out, so a row with no clean record still shows which code GBIF used.
     """
-    return counts.select("countrycode", cell_of(pl.col("part")).alias("cell")).drop_nulls("countrycode").unique()
+    return counts.select("countrycode", cell_of(pl.col("part")).alias("cell")).group_by("cell", "countrycode").agg(pl.len().alias("rows"))
 
 
-def derive_uses_code(admin1_cells: pl.DataFrame, seen: pl.DataFrame) -> pl.DataFrame:
-    """For every place of the sub-national lists (`admin1_cells`: `cell`, `country`, `subdivision`), whether GBIF uses the list's country code there.
+def _place_rows(admin1_cells: pl.DataFrame, seen: pl.DataFrame) -> pl.DataFrame:
+    """`country`, `subdivision`, `countrycode` (null for rows with no code) and `rows`: the rows of `seen` (`code_rows`) in the cells of each place of the lists."""
+    cells = admin1_cells.select("cell", "country", "subdivision").unique()
+    return cells.join(seen.select("cell", "countrycode", "rows"), on="cell").group_by("country", "subdivision", "countrycode").agg(pl.col("rows").sum())
 
-    `seen` is `codes_seen` of the counts. A list is decided **by code** (`uses_code` true) when its country code occurs among the rows in the cells of
-    its subdivision, and **by cells alone** (false) when it does not: an overseas place carries the sovereign's code in its list (`FR`) and its own in the
-    records (`RE`, `GP`). The result has `USES_CODE_SCHEMA` and is sorted by country and subdivision. It is what `scripts/griis_codes.py` freezes from half A's
-    counts, and what `clean` derives from its own counts when it is given no frozen table.
+
+def derive_list_codes(admin1_cells: pl.DataFrame, seen: pl.DataFrame) -> pl.DataFrame:
+    """The effective country code of every place of the sub-national lists (`admin1_cells`: `cell`, `country`, `subdivision`): `country`, `subdivision` and `code`.
+
+    `seen` is `code_rows` of the counts. The effective code is the country code that has most **rows** among the rows in the cells of the place (a row with no
+    code is no candidate), with a tie going first to the list's own country code and then to the lower code. A place with no row with a code in its cells has its own
+    country code. A list applies to the rows in its cells that carry its effective code: the list's own where GBIF uses that (the US states), and where it does
+    not, the code GBIF does use there (`SJ` for Svalbard, a list of `NO`; `RE`, `GP` and `MQ` for the French overseas places, lists of `FR`), which spares the rows of a
+    neighbouring country in a cell they share. The result has `LIST_CODES_SCHEMA` and is sorted by country and subdivision. It is what `scripts/griis_codes.py` freezes
+    from half A's counts, and what `clean` derives from its own counts when it is given no frozen table.
     """
     places = admin1_cells.select("country", "subdivision").unique()
-    coded = (
-        admin1_cells.join(seen.rename({"countrycode": "country"}), on=["cell", "country"])
-        .select("country", "subdivision")
-        .unique()
-        .with_columns(pl.lit(True).alias("uses_code"))
+    ranked = (
+        _place_rows(admin1_cells, seen)
+        .drop_nulls("countrycode")
+        .with_columns((pl.col("countrycode") == pl.col("country")).alias("own"))
+        .sort(["country", "subdivision", "rows", "own", "countrycode"], descending=[False, False, True, True, False])
+        .unique(["country", "subdivision"], keep="first", maintain_order=True)
+        .select("country", "subdivision", pl.col("countrycode").alias("code"))
     )
     return (
-        places.join(coded, on=["country", "subdivision"], how="left")
-        .with_columns(pl.col("uses_code").fill_null(False))
-        .select(*USES_CODE_SCHEMA)
-        .cast(USES_CODE_SCHEMA)
+        places.join(ranked, on=["country", "subdivision"], how="left")
+        .with_columns(pl.col("code").fill_null(pl.col("country")))
+        .select(*LIST_CODES_SCHEMA)
+        .cast(LIST_CODES_SCHEMA)
         .sort("country", "subdivision")
     )
 
 
-def checked_uses_code(table: pl.DataFrame) -> pl.DataFrame:
-    """`table` as a frozen decision of `USES_CODE_SCHEMA`, or a `ValueError` for a table that lacks a column, has another type or a missing value, or decides a place twice."""
-    if [c for c in USES_CODE_SCHEMA if c not in table.columns]:
-        raise ValueError(f"the uses_code table needs the columns {list(USES_CODE_SCHEMA)}, and has {table.columns}")
-    table = table.select(*USES_CODE_SCHEMA)
-    for column, dtype in USES_CODE_SCHEMA.items():
+def list_code_shares(admin1_cells: pl.DataFrame, seen: pl.DataFrame, codes: pl.DataFrame) -> pl.DataFrame:
+    """For each place of `codes` (`derive_list_codes`, or a frozen table), how much of the rows in its cells carry its code: `country`, `subdivision`, `code`, `rows` (all
+    the rows of `seen` in its cells, those with no code included), `with_code`, `share` (`with_code / rows`, null where there are no rows), `next_code` and `next_rows`
+    (the code with most rows among the others, the lower code first on a tie, null if none) and `low`, whether the share is under `LOW_SHARE`. Sorted by country and subdivision.
+    """
+    per = _place_rows(admin1_cells, seen)
+    total = per.group_by("country", "subdivision").agg(pl.col("rows").sum())
+    chosen = codes.select("country", "subdivision", "code")
+    with_code = per.join(chosen, on=["country", "subdivision"]).filter(pl.col("countrycode") == pl.col("code")).select("country", "subdivision", pl.col("rows").alias("with_code"))
+    other = (
+        per.join(chosen, on=["country", "subdivision"])
+        .filter(pl.col("countrycode").is_not_null(), pl.col("countrycode") != pl.col("code"))
+        .sort(["country", "subdivision", "rows", "countrycode"], descending=[False, False, True, False])
+        .unique(["country", "subdivision"], keep="first", maintain_order=True)
+        .select("country", "subdivision", pl.col("countrycode").alias("next_code"), pl.col("rows").alias("next_rows"))
+    )
+    return (
+        chosen.join(total, on=["country", "subdivision"], how="left")
+        .join(with_code, on=["country", "subdivision"], how="left")
+        .join(other, on=["country", "subdivision"], how="left")
+        .with_columns(pl.col("rows").fill_null(0), pl.col("with_code").fill_null(0))
+        .with_columns(pl.when(pl.col("rows") > 0).then(pl.col("with_code") / pl.col("rows")).alias("share"))
+        .with_columns((pl.col("share") < LOW_SHARE).fill_null(False).alias("low"))
+        .select("country", "subdivision", "code", "rows", "with_code", "share", "next_code", "next_rows", "low")
+        .sort("country", "subdivision")
+    )
+
+
+def checked_list_codes(table: pl.DataFrame) -> pl.DataFrame:
+    """`table` as a frozen decision of `LIST_CODES_SCHEMA`, or a `ValueError` for a table that lacks a column, has another type, a missing or empty value, or decides a place twice."""
+    if [c for c in LIST_CODES_SCHEMA if c not in table.columns]:
+        raise ValueError(f"the list codes table needs the columns {list(LIST_CODES_SCHEMA)}, and has {table.columns}")
+    table = table.select(*LIST_CODES_SCHEMA)
+    for column, dtype in LIST_CODES_SCHEMA.items():
         if table.schema[column] != dtype:
-            raise ValueError(f"the uses_code table's {column} is {dtype}, and not {table.schema[column]}")
-    if table.null_count().row(0) != (0, 0, 0):
-        raise ValueError("the uses_code table has no value for a country, a subdivision or its uses_code in some row")
+            raise ValueError(f"the list codes table's {column} is {dtype}, and not {table.schema[column]}")
+    if table.null_count().row(0) != (0, 0, 0) or (table["code"] == "").any():
+        raise ValueError("the list codes table has no value for a country, a subdivision or its code in some row")
     twice = table.group_by("country", "subdivision").len().filter(pl.col("len") > 1)
     if twice.height:
         shown = ", ".join(f"{c}/{d}" for c, d in twice.select("country", "subdivision").head(5).iter_rows())
-        raise ValueError(f"the uses_code table decides a place twice, which it must not: {shown}")
+        raise ValueError(f"the list codes table decides a place twice, which it must not: {shown}")
     return table
 
 
-def read_uses_code(path: Path) -> pl.DataFrame:
-    """A frozen table from its CSV (`country`, `subdivision`, `uses_code` as `true` or `false`), checked by `checked_uses_code`."""
+def read_list_codes(path: Path) -> pl.DataFrame:
+    """A frozen table from its CSV (`country`, `subdivision`, `code`), checked by `checked_list_codes`."""
     raw = pl.read_csv(path, infer_schema=False)
-    if raw.columns != list(USES_CODE_SCHEMA):
-        raise ValueError(f"{path} needs the columns {list(USES_CODE_SCHEMA)}, and has {raw.columns}")
-    if not raw["uses_code"].is_in(["true", "false"]).all():
-        raise ValueError(f"{path}: uses_code is true or false in every row")
-    return checked_uses_code(raw.with_columns((pl.col("uses_code") == "true")))
+    if raw.columns != list(LIST_CODES_SCHEMA):
+        raise ValueError(f"{path} needs the columns {list(LIST_CODES_SCHEMA)}, and has {raw.columns}")
+    return checked_list_codes(raw)
 
 
-def frozen_uses_code(resolution: int, directory: Path = FROZEN_DIR) -> pl.DataFrame:
+def frozen_list_codes(resolution: int, directory: Path) -> pl.DataFrame:
     """The frozen table of `resolution`, `griis_uses_code-res<r>.csv` in `directory` (the repository's `reference/`). Raises `FileNotFoundError` saying what to run if it is not there."""
-    path = directory / USES_CODE_FILE.format(resolution=resolution)
+    path = directory / LIST_CODES_FILE.format(resolution=resolution)
     if not path.exists():
         raise FileNotFoundError(
-            f"{path} is missing: it is the frozen decision of where GBIF uses the country codes of the sub-national GRIIS lists at resolution {resolution}, "
+            f"{path} is missing: it is the frozen decision of which country code each sub-national GRIIS list applies to at resolution {resolution}, "
             f"and every cleaning applies it. Derive it from half A's counts with `uv run python scripts/griis_codes.py --counts data/gbif/<key>`"
         )
-    return read_uses_code(path)
+    return read_list_codes(path)
 
 
 def _layer_3(
@@ -423,10 +459,11 @@ def _layer_3(
     settings: Settings,
     seen: pl.DataFrame | None,
     only: pl.DataFrame | None = None,
-    uses_code: pl.DataFrame | None = None,
+    list_codes: pl.DataFrame | None = None,
 ) -> None:
-    """Layer 3, and `run.unplaced`: the pairs it could not place. `seen` are the `countrycode` and `cell` of every row of the counts (`codes_seen`), which says
-    where GBIF uses a country code. `uses_code`, a frozen decision (`derive_uses_code`, checked), says it instead, and then `seen` is not read and may be `None`.
+    """Layer 3, and `run.unplaced`: the pairs it could not place. `seen` is `code_rows` of the counts, which says which country codes GBIF uses in which cells and
+    so which code each sub-national list applies to (`derive_list_codes`). `list_codes`, a frozen decision (`LIST_CODES_SCHEMA`, checked), says it instead, and then
+    `seen` is not read and may be `None`.
 
     `only`, keys of rows (`KEY`), limits it to those rows: the rows layer 4 moved, judged again where they went. Every rule decides a row by its key
     alone (species, country code and part, with what `refs` and `seen` say of them), so a row layer 3 kept the first time is kept again, and what it
@@ -444,37 +481,35 @@ def _layer_3(
     def located() -> pl.DataFrame:
         return judged().join(places, on="part", how="left")
 
+    # a sub-national list is for the rows in the cells that overlap its subdivision that carry its effective country code (`derive_list_codes`): the list's own
+    # where GBIF uses that, and where it does not, the code GBIF does use there (an overseas place carries the sovereign's code in its list, `FR`, and its own in the
+    # records, `RE`, `GP`). The cells are bigger than the places, so a border cell holds a neighbour country's rows too, and those are spared (a CA row in a cell that
+    # overlaps a US state, a DM row in Guadeloupe's cells). Only a list that is applied has a place: under `skip` a sub-national list with no distribution table is not
+    # applied. The code is the frozen table's where there is one, and the counts' otherwise.
+    applied = griis.filter(pl.col("subdivision").is_not_null()).select("country", "subdivision").unique()
+    cells = refs.admin1_cells.select("cell", "country", "subdivision")
+    placed = cells.select("country", "subdivision").unique().join(applied, on=["country", "subdivision"])
+    effective = cells.head(0).with_columns(pl.lit(None, dtype=pl.String).alias("code"))
+    if placed.height and not {"griis", "griis_subnational"} <= off:
+        if list_codes is None and seen is None:
+            raise ValueError("layer 3 needs either the country codes the counts hold (`seen`) or a frozen list codes table to say which code each sub-national list applies to")
+        decided = derive_list_codes(refs.admin1_cells, seen) if list_codes is None else list_codes
+        undecided = placed.join(decided.select("country", "subdivision"), on=["country", "subdivision"], how="anti")
+        if undecided.height:
+            shown = ", ".join(f"{c}/{d}" for c, d in undecided.sort("country", "subdivision").head(5).iter_rows())
+            raise ValueError(f"the frozen list codes table has no decision for {undecided.height} sub-national lists that are applied: {shown}")
+        effective = cells.join(placed, on=["country", "subdivision"]).join(decided.select("country", "subdivision", "code"), on=["country", "subdivision"])
+
     if "griis" not in off:
-        # a country's list is for its rows by country code, except in the cells of its sub-national lists, which have lists of their own. Only a list that is
-        # applied has one: under `skip` a sub-national list with no distribution table is not applied, and exempts nothing from the country's list
+        # a country's list is for its rows by country code, except the rows that a sub-national list of the cells applies to, which have a list of their own
         country = griis.filter(pl.col("subdivision").is_null()).select("species_id", pl.col("country").alias("countrycode")).unique()
-        applied = griis.filter(pl.col("subdivision").is_not_null()).select("country", "subdivision").unique()
-        covered = refs.admin1_cells.join(applied, on=["country", "subdivision"]).select("cell", pl.col("country").alias("countrycode")).unique()
+        covered = effective.select("cell", pl.col("code").alias("countrycode")).unique()
         hit = located().join(country, on=["species_id", "countrycode"], how="semi").join(covered, on=["cell", "countrycode"], how="anti")
         run.drop(hit, "griis")
     if "griis_subnational" not in off:
-        # a sub-national list is for the rows in the cells that overlap its subdivision, and the cells are bigger than the places, so a border cell holds
-        # a neighbour country's rows too. Where GBIF uses the list's country code in those cells only the rows with that code count, so a CA row in a cell
-        # that overlaps a US state is spared. Where it does not, the cells alone decide: an overseas place carries the sovereign's code in its list (`FR`) and
-        # its own in the records (`RE`, `GP`). On the real data those are the only lists that take this way: `IC`, the Canary Islands (`ES` in GBIF), would, but
-        # Natural Earth has no polygon for it, so it has no cells. That decision is the frozen table's where there is one, and the counts' otherwise.
-        cells = refs.admin1_cells.select("cell", "country", "subdivision")
-        if uses_code is None and seen is None:
-            raise ValueError("layer 3 needs either the country codes the counts hold (`seen`) or a frozen uses_code table to decide where GBIF uses a list's code")
-        decided = derive_uses_code(refs.admin1_cells, seen) if uses_code is None else uses_code
-        by_code_places = decided.filter(pl.col("uses_code")).select("country", "subdivision").with_columns(pl.lit(True).alias("by_code"))
-        listed = griis.filter(pl.col("subdivision").is_not_null()).join(cells, on=["country", "subdivision"])
-        undecided = listed.select("country", "subdivision").unique().join(decided.select("country", "subdivision"), on=["country", "subdivision"], how="anti")
-        if undecided.height:
-            shown = ", ".join(f"{c}/{d}" for c, d in undecided.sort("country", "subdivision").head(5).iter_rows())
-            raise ValueError(f"the frozen uses_code table has no decision for {undecided.height} sub-national lists that are applied: {shown}")
-        listed = listed.join(by_code_places, on=["country", "subdivision"], how="left").with_columns(pl.col("by_code").fill_null(False))
-        by_code = listed.filter(pl.col("by_code")).select("species_id", "cell", pl.col("country").alias("countrycode")).unique()
-        by_cell = listed.filter(~pl.col("by_code")).select("species_id", "cell").unique()
-        rows = located()
-        hit = pl.concat(
-            [rows.join(by_code, on=["species_id", "cell", "countrycode"], how="semi"), rows.join(by_cell, on=["species_id", "cell"], how="semi")]
-        ).unique(KEY, maintain_order=True)
+        listed = griis.filter(pl.col("subdivision").is_not_null()).join(effective, on=["country", "subdivision"])
+        by_code = listed.select("species_id", "cell", pl.col("code").alias("countrycode")).unique()
+        hit = located().join(by_code, on=["species_id", "cell", "countrycode"], how="semi")
         run.drop(hit, "griis_subnational")
     if "wrims" not in off:
         introduced = refs.wrims.filter(pl.col("country").is_not_null()).select("species_id", pl.col("country").alias("countrycode")).unique()
@@ -602,7 +637,7 @@ def clean(
     grid: Grid,
     layers: frozenset[int] = frozenset(LAYERS),
     settings: Settings = Settings(),
-    uses_code: pl.DataFrame | None = None,
+    list_codes: pl.DataFrame | None = None,
 ) -> Cleaned:
     """Clean the country counts of `load_country_counts` through the `layers` that are on, with the rules of `settings`.
 
@@ -613,13 +648,13 @@ def clean(
     - `introduced`: a plant loses the parts touching an introduced region and no native one (`wcvp_introduced`).
     - `off`: WCVP removes nothing, and GRIIS and WRiMS still apply.
 
-    A country's GRIIS list applies to rows by `countrycode`, except in the cells of its sub-national lists (`griis`). A sub-national list applies to the
-    rows in the cells that overlap its subdivision (`griis_subnational`), and where GBIF uses the list's country code in those cells, to the rows with that
-    code only, so that a neighbour country's row in a border cell stays. Where the code does not occur among the rows of the cells, as for the `FR` lists
-    of Reunion (`RE`) and Guadeloupe (`GP`), the cells alone decide (`IC` for the Canary Islands, `ES` in GBIF, is the case of the tests: it has no
-    cells on the real data). **Which of the two a list is** comes from `uses_code`, a frozen table (`country`, `subdivision`, `uses_code`: `derive_uses_code`,
-    `frozen_uses_code`) that decides it once for every run, or, where `uses_code` is `None`, from the country codes of `counts` itself (`derive_uses_code`).
-    A frozen table must decide every sub-national list that is applied, or `clean` raises. A country's list is left out of the cells of its sub-national lists that are applied, and only of those. Which GRIIS entries apply is `Settings.griis_without_status`
+    A country's GRIIS list applies to rows by `countrycode`, except the rows that a sub-national list applies to (`griis`). A sub-national list applies to the
+    rows in the cells that overlap its subdivision that carry its **effective country code** (`griis_subnational`): the code that has most rows in those cells, the
+    list's own on a tie, so that a neighbour country's row in a border cell stays. That is the list's own country code for the US states, and for the lists of
+    `NO` for Svalbard and of `FR` for Reunion and Guadeloupe it is the code GBIF uses there (`SJ`, `RE`, `GP`). The code comes from `list_codes`, a frozen table
+    (`country`, `subdivision`, `code`: `derive_list_codes`, `frozen_list_codes`) that decides it once for every run, or, where `list_codes` is `None`, from the
+    country codes of `counts` itself (`derive_list_codes`). A frozen table must decide every sub-national list that is applied, or `clean` raises. A row with no
+    country code is judged by no sub-national list. Which GRIIS entries apply is `Settings.griis_without_status`
     and what the lists say (`References.griis`). WRiMS applies to sea parts, by `countrycode` (`wrims`). What `refs` could not place is not applied,
     and is listed in `Cleaned.unplaced`.
 
@@ -655,18 +690,18 @@ def clean(
     if 2 in layers:
         _layer_2(run, refs, settings)
     if 3 in layers:
-        # which country codes GBIF uses in which cells is read from the counts as they came, before layer 1 takes rows out, unless a frozen table says
+        # which country code each sub-national list applies to is read from the counts as they came, before layer 1 takes rows out, unless a frozen table says
         seen = None
-        if uses_code is None:
-            seen = codes_seen(counts)
+        if list_codes is None:
+            seen = code_rows(counts)
         else:
-            uses_code = checked_uses_code(uses_code)
-        _layer_3(run, refs, meta, settings, seen, uses_code=uses_code)
+            list_codes = checked_list_codes(list_codes)
+        _layer_3(run, refs, meta, settings, seen, list_codes=list_codes)
     if 4 in layers:
         moved = _layer_4(run, refs, grid, meta, settings)
         if 3 in layers and not moved.is_empty():
             # layer 3 judges the place a row is in, so a row that layer 4 moved is judged where it went
-            _layer_3(run, refs, meta, settings, seen, only=moved, uses_code=uses_code)
+            _layer_3(run, refs, meta, settings, seen, only=moved, list_codes=list_codes)
     if 5 in layers:
         _layer_5(run, refs, grid, settings)
 
