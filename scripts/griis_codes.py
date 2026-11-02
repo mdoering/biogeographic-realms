@@ -1,14 +1,16 @@
 """Freeze which country code each sub-national GRIIS list applies to, from half A's counts, so that every run applies the same lists.
 
-A sub-national list (the US states, Svalbard, the French overseas places) is for the rows in the cells that overlap its subdivision, and the cells are bigger than the
-places, so a border cell holds a neighbour country's rows too. The list applies to the rows that carry its **effective country code**: the code that has most rows among
-the rows in its cells (counted by rows, the rows with no code not counting), with a tie going to the list's own country code and then to the lower code. For the US states
-that is `US`; for Svalbard, a list of `NO` whose records GBIF codes `SJ`, it is `SJ`; for Reunion, a list of `FR` whose records are `RE`, it is `RE`. Without a frozen table
-`clean` reads that off the counts it is given, so that half A, a calibration subset and the later all-species run could apply a list to different codes, by what each happens to
-hold. This derives the table once, from half A's counts at the ingest's resolution, with the rule of `realms.clean.derive_list_codes`, and writes it to
-`reference/griis_uses_code-res<r>.csv` (`country`, `subdivision`, `code`, sorted by country and subdivision) in the repository, where it is tracked. It prints every place with
-its code and the share of the rows in its cells that carry it, and warns of each place under 80%. `scripts/clean_counts.py` and `scripts/calibrate.py` read the table and refuse
-to run without it.
+A sub-national list (the US states, Svalbard, the French overseas places, the Dutch Caribbean) is for the rows in the cells that overlap its subdivision, and the cells are
+bigger than the places, so a border cell holds a neighbour country's rows too. The list applies to the rows that carry its **effective country code**. That is **the list's
+own country code where GBIF uses it materially in the list's cells**, meaning that the rows with that code are at least 10% of all the rows in the cells
+(`realms.clean.OWN_CODE_SHARE`; the rows with no code count in the denominator): the US states, and a small island that shares a big cell with a bigger neighbour, such as
+Saba with Saint Martin's rows around it. **Otherwise it is the code with most rows** among the rows in the cells (the rows with no code not counting), a tie going to the
+list's own country code and then to the lower code: for Svalbard, a list of `NO` whose records GBIF codes `SJ`, it is `SJ`; for Reunion, a list of `FR` whose records are
+`RE`, it is `RE`. Without a frozen table `clean` reads that off the counts it is given, so that half A, a calibration subset and the later all-species run could apply a list
+to different codes, by what each happens to hold. This derives the table once, from half A's counts at the ingest's resolution, with the rule of
+`realms.clean.derive_list_codes`, and writes it to `reference/griis_uses_code-res<r>.csv` (`country`, `subdivision`, `code`, sorted by country and subdivision) in the
+repository, where it is tracked. It prints every place with its code, the share of the rows in its cells that carry it, the list's own code's share and the next code,
+and warns of each place whose code has under 80%. `scripts/clean_counts.py` and `scripts/calibrate.py` read the table and refuse to run without it.
 
 Half A only (`load_country_counts` raises for half B, and nothing here asks it to). It needs the grid and the admin-1 cells of the lists, not the references. A table that is
 already there is left alone if it is the same, and **refused if it differs or cannot be read**, unless `--overwrite` says it is meant to: the table is a frozen decision, and a
@@ -81,7 +83,8 @@ def main() -> None:
     for r in shares.iter_rows(named=True):
         other = "" if r["next_code"] is None else f", next {r['next_code']} {r['next_rows']:,}"
         share = "no rows" if r["share"] is None else f"{r['share']:.1%}"
-        log.info("  %s/%s %s: %s of %s rows%s%s", r["country"], r["subdivision"], r["code"], share, f"{r['rows']:,}", other, "  LOW" if r["low"] else "")
+        own = "n/a" if r["own_share"] is None else f"{r['own_share']:.1%}"
+        log.info("  %s/%s %s: %s of %s rows, own %s %s%s%s", r["country"], r["subdivision"], r["code"], share, f"{r['rows']:,}", r["country"], own, other, "  LOW" if r["low"] else "")
     low = shares.filter(pl.col("low"))
     if low.height:
         log.warning("%d places have an effective code with under %.0f%% of the rows in their cells: %s", low.height, LOW_SHARE * 100, ", ".join(f"{c}/{d}" for c, d in low.select("country", "subdivision").iter_rows()))

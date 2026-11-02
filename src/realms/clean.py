@@ -17,7 +17,7 @@ Order and attribution:
   WCVP's native regions is therefore the list's, and what `wcvp_*` reports is what no list had already removed. To measure one source
   alone, switch the others off (`Settings.rules_off`, `wcvp_mode`). A GRIIS list applies by what it says its entries are: introduced ones (an
   empty value counts), never native or uncertain ones, and not at all a list with no distribution table, unless `griis_without_status` is `apply`.
-  A sub-national list applies to the rows in its cells that carry its **effective country code**, the code GBIF mostly uses in those cells: a decision made once and frozen (see `derive_list_codes`), so that two runs apply the same lists.
+  A sub-national list applies to the rows in its cells that carry its **effective country code**: its own where GBIF uses that materially in those cells, otherwise the code GBIF mostly uses there. A decision made once and frozen (see `derive_list_codes`), so that two runs apply the same lists.
 - **Layer 4** folds a clearly land or clearly sea species' records on the wrong side to the right side. COL's environment is the surer
   word of the two ways to be clear, so where it disagrees with the records `Settings.side_conflict` lets it decide, or leaves the species be.
   **Layer 3 then judges again every row that layer 4 moved, where it went**, with the same settings, and a row it takes is logged under the layer 3
@@ -77,6 +77,10 @@ RULES = {
 LIST_CODES_SCHEMA = {"country": pl.String, "subdivision": pl.String, "code": pl.String}
 LIST_CODES_FILE = "griis_uses_code-res{resolution}.csv"  # in the repository's `reference/`, which is tracked: the decision is part of the method
 LOW_SHARE = 0.8  # an effective code with a smaller share of the rows in its list's cells is flagged in the reports
+# a list keeps its own country code where GBIF uses it materially in the list's cells: at least this share of the rows there. A starting value: at resolution 7 the
+# places split cleanly around it (the sovereign-code places have under 1% and the rest 17.5% or more)
+OWN_CODE_SHARE = 0.10
+EPS = 1e-9  # a share compared with a count: 0.1 * 30 is 3.0000000000000004
 KEY = ["species_id", "countrycode", "part"]
 OTHER = dict(zip(KINDS, reversed(KINDS), strict=True))  # the other part of a cell: land for sea and sea for land
 REMOVED_SCHEMA = {
@@ -363,25 +367,37 @@ def _place_rows(admin1_cells: pl.DataFrame, seen: pl.DataFrame) -> pl.DataFrame:
 def derive_list_codes(admin1_cells: pl.DataFrame, seen: pl.DataFrame) -> pl.DataFrame:
     """The effective country code of every place of the sub-national lists (`admin1_cells`: `cell`, `country`, `subdivision`): `country`, `subdivision` and `code`.
 
-    `seen` is `code_rows` of the counts. The effective code is the country code that has most **rows** among the rows in the cells of the place (a row with no
-    code is no candidate), with a tie going first to the list's own country code and then to the lower code. A place with no row with a code in its cells has its own
-    country code. A list applies to the rows in its cells that carry its effective code: the list's own where GBIF uses that (the US states), and where it does
-    not, the code GBIF does use there (`SJ` for Svalbard, a list of `NO`; `RE`, `GP` and `MQ` for the French overseas places, lists of `FR`), which spares the rows of a
+    `seen` is `code_rows` of the counts. **A list keeps its own country code where GBIF uses it materially in the list's cells**: where the rows with that code are at
+    least `OWN_CODE_SHARE` of all the rows in the cells (the rows with no code included). Otherwise the effective code is the country code with most **rows** among the
+    rows in the cells (a row with no code is no candidate), a tie going first to the list's own country code and then to the lower code. A place with no row with a code
+    in its cells has its own country code. A list applies to the rows in its cells that carry its effective code: the list's own for the US states and for a small island
+    that shares a big cell with a bigger neighbour (the Dutch Caribbean lists, with Curacao's and Saint Martin's rows around them), and where GBIF does not use the own code,
+    the code it does use there (`SJ` for Svalbard, a list of `NO`; `RE`, `GP`, `MQ` and `PM` for the French overseas places, lists of `FR`), which spares the rows of a
     neighbouring country in a cell they share. The result has `LIST_CODES_SCHEMA` and is sorted by country and subdivision. It is what `scripts/griis_codes.py` freezes
     from half A's counts, and what `clean` derives from its own counts when it is given no frozen table.
     """
     places = admin1_cells.select("country", "subdivision").unique()
-    ranked = (
-        _place_rows(admin1_cells, seen)
-        .drop_nulls("countrycode")
+    per = _place_rows(admin1_cells, seen)
+    total = per.group_by("country", "subdivision").agg(pl.col("rows").sum().alias("total"))
+    own = per.filter(pl.col("countrycode") == pl.col("country")).select("country", "subdivision", pl.col("rows").alias("own_rows"))
+    dominant = (
+        per.drop_nulls("countrycode")
         .with_columns((pl.col("countrycode") == pl.col("country")).alias("own"))
         .sort(["country", "subdivision", "rows", "own", "countrycode"], descending=[False, False, True, True, False])
         .unique(["country", "subdivision"], keep="first", maintain_order=True)
-        .select("country", "subdivision", pl.col("countrycode").alias("code"))
+        .select("country", "subdivision", pl.col("countrycode").alias("dominant"))
     )
     return (
-        places.join(ranked, on=["country", "subdivision"], how="left")
-        .with_columns(pl.col("code").fill_null(pl.col("country")))
+        places.join(total, on=["country", "subdivision"], how="left")
+        .join(own, on=["country", "subdivision"], how="left")
+        .join(dominant, on=["country", "subdivision"], how="left")
+        .with_columns(pl.col("total").fill_null(0), pl.col("own_rows").fill_null(0))
+        .with_columns(
+            pl.when((pl.col("own_rows") > 0) & (pl.col("own_rows") >= OWN_CODE_SHARE * pl.col("total") - EPS))
+            .then(pl.col("country"))
+            .otherwise(pl.col("dominant").fill_null(pl.col("country")))
+            .alias("code")
+        )
         .select(*LIST_CODES_SCHEMA)
         .cast(LIST_CODES_SCHEMA)
         .sort("country", "subdivision")
@@ -390,13 +406,15 @@ def derive_list_codes(admin1_cells: pl.DataFrame, seen: pl.DataFrame) -> pl.Data
 
 def list_code_shares(admin1_cells: pl.DataFrame, seen: pl.DataFrame, codes: pl.DataFrame) -> pl.DataFrame:
     """For each place of `codes` (`derive_list_codes`, or a frozen table), how much of the rows in its cells carry its code: `country`, `subdivision`, `code`, `rows` (all
-    the rows of `seen` in its cells, those with no code included), `with_code`, `share` (`with_code / rows`, null where there are no rows), `next_code` and `next_rows`
-    (the code with most rows among the others, the lower code first on a tie, null if none) and `low`, whether the share is under `LOW_SHARE`. Sorted by country and subdivision.
+    the rows of `seen` in its cells, those with no code included), `with_code`, `share` (`with_code / rows`, null where there are no rows), `own_rows` and `own_share` (the
+    same for the list's own country code, which is what `OWN_CODE_SHARE` is compared with), `next_code` and `next_rows` (the code with most rows among the others, the
+    lower code first on a tie, null if none) and `low`, whether the share is under `LOW_SHARE`. Sorted by country and subdivision.
     """
     per = _place_rows(admin1_cells, seen)
     total = per.group_by("country", "subdivision").agg(pl.col("rows").sum())
     chosen = codes.select("country", "subdivision", "code")
     with_code = per.join(chosen, on=["country", "subdivision"]).filter(pl.col("countrycode") == pl.col("code")).select("country", "subdivision", pl.col("rows").alias("with_code"))
+    own = per.filter(pl.col("countrycode") == pl.col("country")).select("country", "subdivision", pl.col("rows").alias("own_rows"))
     other = (
         per.join(chosen, on=["country", "subdivision"])
         .filter(pl.col("countrycode").is_not_null(), pl.col("countrycode") != pl.col("code"))
@@ -407,11 +425,15 @@ def list_code_shares(admin1_cells: pl.DataFrame, seen: pl.DataFrame, codes: pl.D
     return (
         chosen.join(total, on=["country", "subdivision"], how="left")
         .join(with_code, on=["country", "subdivision"], how="left")
+        .join(own, on=["country", "subdivision"], how="left")
         .join(other, on=["country", "subdivision"], how="left")
-        .with_columns(pl.col("rows").fill_null(0), pl.col("with_code").fill_null(0))
-        .with_columns(pl.when(pl.col("rows") > 0).then(pl.col("with_code") / pl.col("rows")).alias("share"))
+        .with_columns(pl.col("rows").fill_null(0), pl.col("with_code").fill_null(0), pl.col("own_rows").fill_null(0))
+        .with_columns(
+            pl.when(pl.col("rows") > 0).then(pl.col("with_code") / pl.col("rows")).alias("share"),
+            pl.when(pl.col("rows") > 0).then(pl.col("own_rows") / pl.col("rows")).alias("own_share"),
+        )
         .with_columns((pl.col("share") < LOW_SHARE).fill_null(False).alias("low"))
-        .select("country", "subdivision", "code", "rows", "with_code", "share", "next_code", "next_rows", "low")
+        .select("country", "subdivision", "code", "rows", "with_code", "share", "own_rows", "own_share", "next_code", "next_rows", "low")
         .sort("country", "subdivision")
     )
 
@@ -482,7 +504,7 @@ def _layer_3(
         return judged().join(places, on="part", how="left")
 
     # a sub-national list is for the rows in the cells that overlap its subdivision that carry its effective country code (`derive_list_codes`): the list's own
-    # where GBIF uses that, and where it does not, the code GBIF does use there (an overseas place carries the sovereign's code in its list, `FR`, and its own in the
+    # where GBIF uses that materially, and where it does not, the code GBIF does use there (an overseas place carries the sovereign's code in its list, `FR`, and its own in the
     # records, `RE`, `GP`). The cells are bigger than the places, so a border cell holds a neighbour country's rows too, and those are spared (a CA row in a cell that
     # overlaps a US state, a DM row in Guadeloupe's cells). Only a list that is applied has a place: under `skip` a sub-national list with no distribution table is not
     # applied. The code is the frozen table's where there is one, and the counts' otherwise.
@@ -649,9 +671,10 @@ def clean(
     - `off`: WCVP removes nothing, and GRIIS and WRiMS still apply.
 
     A country's GRIIS list applies to rows by `countrycode`, except the rows that a sub-national list applies to (`griis`). A sub-national list applies to the
-    rows in the cells that overlap its subdivision that carry its **effective country code** (`griis_subnational`): the code that has most rows in those cells, the
-    list's own on a tie, so that a neighbour country's row in a border cell stays. That is the list's own country code for the US states, and for the lists of
-    `NO` for Svalbard and of `FR` for Reunion and Guadeloupe it is the code GBIF uses there (`SJ`, `RE`, `GP`). The code comes from `list_codes`, a frozen table
+    rows in the cells that overlap its subdivision that carry its **effective country code** (`griis_subnational`): the list's own where its rows are at least
+    `OWN_CODE_SHARE` of the rows in those cells, otherwise the code that has most rows there, so that a neighbour country's row in a border cell stays. That is the list's own
+    country code for the US states and the small islands of the Dutch Caribbean, and for the lists of `NO` for Svalbard and of `FR` for Reunion and Guadeloupe it is the code
+    GBIF uses there (`SJ`, `RE`, `GP`). The code comes from `list_codes`, a frozen table
     (`country`, `subdivision`, `code`: `derive_list_codes`, `frozen_list_codes`) that decides it once for every run, or, where `list_codes` is `None`, from the
     country codes of `counts` itself (`derive_list_codes`). A frozen table must decide every sub-national list that is applied, or `clean` raises. A row with no
     country code is judged by no sub-national list. Which GRIIS entries apply is `Settings.griis_without_status`

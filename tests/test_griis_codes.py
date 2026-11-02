@@ -27,11 +27,10 @@ COUNTS = counts(
     row("s1", "12:land", country="US"),
     row("s1", "13:land", country="SJ"),
     row("s2", "13:land", country="SJ"),
+    *[row(f"x{i}", "13:land", country="SJ") for i in range(8)],
     row("s1", "13:sea", country="NO"),
     row("s2", "13:sea", country="RU"),
 )
-
-
 def load_script():
     spec = importlib.util.spec_from_file_location("griis_codes_script", ROOT / "scripts" / "griis_codes.py")
     module = importlib.util.module_from_spec(spec)
@@ -74,7 +73,7 @@ def world(tmp_path, monkeypatch):
 def test_it_derives_from_half_a_and_writes_the_table_sorted_for_the_resolution_of_the_marker(world):
     world.run()
     assert world.loads == [("A", False)]  # half A, sealed: half B is never asked for
-    # RE is the code of Reunion's records and FR of its list, SJ that of Svalbard's (2 rows against NO's 1 and RU's 1)
+    # RE is the code of Reunion's records and FR of its list, SJ that of Svalbard's (10 rows against NO's 1 and RU's 1, so NO has 8.3% of the rows, under a tenth)
     assert world.path.read_text().splitlines() == ["country,subdivision,code", "FR,Reunion,RE", "NO,Svalbard,SJ", "US,Texas,US"]
     assert read_list_codes(world.path).schema == pl.Schema(LIST_CODES_SCHEMA)
 
@@ -83,10 +82,10 @@ def test_it_logs_every_place_with_its_code_and_its_share_and_warns_of_a_low_one(
     with caplog.at_level(logging.INFO, logger="griis_codes"):
         world.run()
     text = caplog.text
-    assert "NO/Svalbard SJ: 50.0% of 4 rows, next NO 1" in text and "US/Texas US: 100.0% of 1 rows" in text
-    assert "FR/Reunion RE: 100.0% of 1 rows" in text
-    assert "2 places have an effective code with under 80% of the rows in their cells: NO/Svalbard" not in text  # only Svalbard is under, and it is the one
-    assert "1 places have an effective code with under 80% of the rows in their cells: NO/Svalbard" in text
+    assert "NO/Svalbard SJ: 83.3% of 12 rows, own NO 8.3%, next NO 1" in text and "US/Texas US: 100.0% of 1 rows" in text
+    assert "FR/Reunion RE: 100.0% of 1 rows, own FR 0.0%" in text
+    assert "1 places have an effective code with under 80% of the rows in their cells: NO/Svalbard" not in text  # Svalbard's SJ has 83.3%
+    assert "places have an effective code with under 80%" not in text
     assert "lists applied to another code than their own: FR/Reunion as RE, NO/Svalbard as SJ" in text
 
 

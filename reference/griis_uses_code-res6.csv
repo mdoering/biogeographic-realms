@@ -1,7 +1,7 @@
 country,subdivision,code
-BQ,Bonaire,CW
+BQ,Bonaire,BQ
 BQ,Saba,VI
-BQ,StEustatius,GP
+BQ,StEustatius,BQ
 FM,Chuuk,FM
 FM,Kosrae,FM
 FM,Pohnpei,FM
@@ -10,9 +10,9 @@ FR,Guadeloupe,GP
 FR,Martinique,GP
 FR,Reunion,RE
 FR,Saint-Pierre,PM
-KM,Mwali,YT
-KM,Ndzuwani,YT
-KM,Ngazidja,YT
+KM,Mwali,KM
+KM,Ndzuwani,KM
+KM,Ngazidja,KM
 NO,Svalbard,SJ
 PT,Azores,PT
 PT,Madeira,PT
