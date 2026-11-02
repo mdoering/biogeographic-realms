@@ -64,7 +64,8 @@ def part_neighbours(parts: Collection[str], cell_adjacency: Mapping[str, Collect
 
 
 def realm_neighbours(labels: Mapping[str, int], adjacency: Mapping[str, Collection[str]]) -> dict[int, set[int]]:
-    """Realm to the realms that one of its parts is next to."""
+    """Realm to the realms that one of its parts is next to, with a key for every realm. `hexmaps._realm_neighbours` is its counterpart for `plot_parts`' own
+    colouring (both ways, realms without a neighbour left out); they agree on a symmetric adjacency."""
     neighbours: dict[int, set[int]] = {r: set() for r in set(labels.values())}
     for part, near in adjacency.items():
         if part not in labels:

@@ -29,8 +29,9 @@ from shapely import MultiPolygon, Polygon, STRtree
 from realms.grid import GEOD, SNAP, _neighbours, _planar, _shifted
 from realms.hexmaps import _cut_at_antimeridian, _densified, _polygons
 
-LAND = Path("data/reference/natural_earth/ne_10m_land.zip")
-CACHE = Path("results/boundaries")
+ROOT = Path(__file__).resolve().parents[2]  # the repository, so that the defaults below do not depend on the working directory
+LAND = ROOT / "data" / "reference" / "natural_earth" / "ne_10m_land.zip"
+CACHE = ROOT / "results" / "boundaries"
 KINDS = ("land", "sea")
 # Degrees. Region edges are straight in longitude and latitude; they are cut this short before rotating, so that they keep their shape.
 ROTATION_STEP = 0.25

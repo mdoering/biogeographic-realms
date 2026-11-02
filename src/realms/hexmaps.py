@@ -134,6 +134,9 @@ def part_geometries(gpkg: Path, land_zip: Path, parts: Iterable[str]) -> gpd.Geo
 
 
 def _realm_neighbours(realm_of: Mapping[str, int], adjacency: Mapping[str, Collection[str]]) -> dict[int, set[int]]:
+    """Realm to the realms that touch it, both ways, keyed only by realms that touch another.
+
+    `review.realm_neighbours` is the same for a symmetric adjacency, with a key for every realm; this one is kept so that `plot_parts`' colours stay as they are."""
     neighbours: dict[int, set[int]] = defaultdict(set)
     for part, near in adjacency.items():
         if part not in realm_of:
