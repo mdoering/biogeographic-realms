@@ -5,7 +5,7 @@ import polars as pl
 import pytest
 
 import reference_impl as ref
-from realms.matrix import RANKS, cell_taxa
+from realms.matrix import RANKS, cell_taxa, duplicate_names
 from realms.network import build_network, network_from
 from realms.synth import grid_presence, planted_network
 
@@ -268,3 +268,72 @@ def test_grid_taxa_and_adjacency():
     assert adjacency["c11"] == {"c01", "c10", "c12", "c21"}
     assert all(a in adjacency[b] for a, neighbours in adjacency.items() for b in neighbours)
     assert Counter(len(n) for n in adjacency.values()) == {2: 4, 3: 32, 4: 64}
+
+
+NAMES = ["species_id", "genus_id", "family_id", "genus", "family", "order", "kingdom"]
+
+
+def duplicates_case():
+    """Genus G1 and G2 are both Abax in Carabidae, family F1 and F2 are both Carabidae in Coleoptera. s5 is another kingdom's Abax."""
+    presence = frame([("a", "s1"), ("a", "s3"), ("b", "s2"), ("b", "s4"), ("c", "s5"), ("c", "s1")], ["cell", "species_id"])
+    taxa = frame(
+        [
+            ("s1", "G1", "F1", "Abax", "Carabidae", "Coleoptera", "Animalia"),
+            ("s2", "G1", "F1", "Abax", "Carabidae", "Coleoptera", "Animalia"),
+            ("s3", "G2", "F2", "Abax", "Carabidae", "Coleoptera", "Animalia"),
+            ("s4", "G2", "F2", "Abax", "Carabidae", "Coleoptera", "Animalia"),
+            ("s5", "G3", "F3", "Abax", "Carabidae", "Coleoptera", "Plantae"),
+        ],
+        NAMES,
+    )
+    return presence, taxa
+
+
+def test_two_ids_with_one_name_merge():
+    presence, taxa = duplicates_case()
+    found = duplicate_names(taxa)
+    assert found.columns == ["rank", "kingdom", "name", "parent", "ids"]
+    assert found.sort("rank").rows() == [
+        ("family", "Animalia", "Carabidae", "Coleoptera", ["F1", "F2"]),
+        ("genus", "Animalia", "Abax", "Carabidae", ["G1", "G2"]),
+    ]
+    merged = cell_taxa(presence, taxa, merge_duplicate_names=True)
+    assert merged.taxa == ["family:F1", "family:F3", "genus:G1", "genus:G3", "species:s1", "species:s2", "species:s3", "species:s4", "species:s5"]
+    j = {t: i for i, t in enumerate(merged.taxa)}
+    for s, genus, family in [("s1", "G1", "F1"), ("s2", "G1", "F1"), ("s3", "G1", "F1"), ("s4", "G1", "F1"), ("s5", "G3", "F3")]:
+        assert merged.genus_col[j[f"species:{s}"]] == j[f"genus:{genus}"]
+        assert merged.family_col[j[f"species:{s}"]] == j[f"family:{family}"]
+    row = {c: i for i, c in enumerate(merged.cells)}
+    assert merged.x[row["a"], j["genus:G1"]] and merged.x[row["b"], j["genus:G1"]]  # G2's species s3 and s4 count for G1
+    assert merged.x[row["a"], j["family:F1"]] and not merged.x[row["a"], j["family:F3"]]
+
+
+def test_one_name_in_two_kingdoms_does_not_merge():
+    presence, taxa = duplicates_case()
+    kingdoms = taxa.filter(pl.col("species_id").is_in(["s1", "s5"]))
+    assert duplicate_names(kingdoms).height == 0
+    merged = cell_taxa(presence, kingdoms, merge_duplicate_names=True)
+    assert merged.taxa == cell_taxa(presence, kingdoms).taxa
+    assert "genus:G3" in merged.taxa and "genus:G1" in merged.taxa
+
+
+def test_one_genus_name_in_two_families_does_not_merge():
+    presence, taxa = duplicates_case()
+    homonyms = taxa.with_columns(
+        pl.when(pl.col("genus_id") == "G2").then(pl.lit("Pterostichidae")).otherwise(pl.col("family")).alias("family"),
+        pl.when(pl.col("genus_id") == "G2").then(pl.lit("F9")).otherwise(pl.col("family_id")).alias("family_id"),
+    ).filter(pl.col("kingdom") == "Animalia")
+    assert duplicate_names(homonyms, ranks=("genus",)).height == 0
+    assert "genus:G2" in cell_taxa(presence, homonyms, merge_duplicate_names=True).taxa
+    nameless = taxa.with_columns(pl.when(pl.col("genus_id") == "G2").then(None).otherwise(pl.col("family")).alias("family"))
+    assert duplicate_names(nameless, ranks=("genus",)).height == 0  # a lineage that isn't known never merges
+
+
+def test_the_default_is_unchanged():
+    presence, taxa = duplicates_case()
+    plain, explicit = cell_taxa(presence, taxa), cell_taxa(presence, taxa, merge_duplicate_names=False)
+    assert plain.taxa == explicit.taxa == [
+        "family:F1", "family:F2", "family:F3", "genus:G1", "genus:G2", "genus:G3", "species:s1", "species:s2", "species:s3", "species:s4", "species:s5",
+    ]  # fmt: skip
+    assert (plain.x != explicit.x).nnz == 0
+    assert np.array_equal(plain.genus_col, explicit.genus_col) and np.array_equal(plain.family_col, explicit.family_col)

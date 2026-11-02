@@ -2077,3 +2077,25 @@ The rerun with `--stage units` skipped both stages, and `--stage clean --force` 
 
   So on a matrix that tied, two seeds agree at V 0.75 to 0.95 with 20 shuffles and 0.85 to 0.99 with 100, and the mean spread of the shuffles themselves was 0.50 to 0.72, so a single tree there is much less stable than the consensus. **The default stays 20.** Task 11 reports the seed sensitivity (the consensus at a few seeds, V-measure between them) beside the groups, and raises `shuffles` if it is low; the cost is linear in `shuffles` for the linkages, and the count matrices do not grow.
 - **Cost, measured at 11,292 units** (res 7; synthetic grid presence, 150,000 species, 181,500 taxa columns, 13.8M links, 107 x 107 grid cells cut to the first 11,292; ties are rare in it, which does not change the cost of a linkage): `rank_beta_sim` 18 s, 1.8 GB peak; one linkage 0.8 s for Ward and for average (about 0.07 s to condense, a 510 MB float64 vector); `consensus(..., ks=range(5, 61), shuffles=20)` 180 s for Ward and 172 s for average (186 s for Ward with `ids` given, which adds only an index), **8.5 GB peak RSS** for either, of which 7.1 GB are the 56 uint8 count matrices (127 MB each). Task 11 calling both methods takes about 6 minutes and 9 GB at a time, well inside the limits, with no shortcut needed beyond what is built in: one linkage per shuffle cut at all ks, and one n x n uint8 matrix per k built incrementally. The real species rank has more links than the synthetic one (588k species), which only `rank_beta_sim` feels, so that may take a minute or two.
+
+### Merging the duplicate genus and family ids of the XR (2026-11-02)
+
+`cell_taxa(..., merge_duplicate_names=True)` merges the ids that share a name in one lineage, for the open item of "Taxa by id, accepted only". The default is off and leaves every matrix as it was, so the Costello gate is unchanged (`selection.csv` and `selection.log` byte-identical to `results/costello/before/`). Task 11 reruns the chosen configuration with it on and compares.
+
+- **The rule (Markus's ruling, narrower than the brief's "share a name in one kingdom").** Genus ids merge when they share **kingdom, genus name and family name**; family ids when they share **kingdom, family name and order name**. A row with no id, name, kingdom or parent name never merges, because its lineage can't be established. Merging on kingdom and name alone would fuse true homonyms, a genus name under two families, which are the 672 genus ids "accepted in another family" above. Every id of a group is mapped to **the group's lowest id, compared as text**, so the survivor is the lowest and not the largest; the species columns' `genus_col` and `family_col` point at the survivor. `duplicate_names(taxa)` lists the groups as `rank, kingdom, name, parent, ids`. Tests: two ids with one name merge, one name in two kingdoms does not, one genus name in two families does not, and the default is unchanged.
+- **Real data, 315557 (2,529,340 accepted species).**
+
+  | | genus | family |
+  |---|---|---|
+  | ids that hold species | 240,578 | 16,906 |
+  | duplicate groups (kingdom, name, parent) | 4,861 | 811 |
+  | ids in those groups | 10,002 | 1,645 |
+  | ids merged away | 5,141 | 834 |
+  | species moved to another id | 102,554 | 334,851 |
+  | of those, species outside their group's largest id (the ones that change a column's size) | 17,265 | 13,217 |
+  | same-name groups by kingdom alone | 8,080 | 1,004 |
+  | ids outside the largest of those | 8,996 | 1,040 |
+  | kingdom-alone groups with ids under two or more parent names | 1,249 | 54 |
+  | kingdom-alone groups where no two ids share a parent name (left entirely apart) | 3,221 | 193 |
+
+  The kingdom-alone figures reproduce the 8,080 genus and 1,004 family names and the 8,996 and 1,040 non-largest ids of "Taxa by id" exactly, so the groups are the same population. The parent rule keeps 4,861 of 8,080 genus names and 811 of 1,004 family names as groups, and merges away 5,141 of the 8,996 genus ids and 834 of the 1,040 family ids; the rest are homonyms or have no parent name, and stay apart. The 5,141 are comparable with the 4,879 provisionally accepted in the same family. The "species moved" row counts relabelled species: when the lowest id is not the largest (1,706 genus groups, 218 family groups, for example a family whose small copy sorts first) the big id's species move to a smaller id's name, which changes no column's size. The row below it is the real change, 17,265 genus and 13,217 family species that join a larger taxon, against 28,942 and 14,416 outside the largest by kingdom alone.

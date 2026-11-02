@@ -172,17 +172,76 @@ def _parents(species: pl.Series, taxa: pl.DataFrame, rank: str) -> tuple[list[st
     return names.to_list(), position
 
 
-def cell_taxa(presence: pl.DataFrame, taxa: pl.DataFrame | None, ranks: Sequence[str] = RANKS) -> CellTaxa:
+PARENT_RANK = {"genus": "family", "family": "order"}  # the name that places a genus or family in one lineage
+
+
+def duplicate_names(taxa: pl.DataFrame, ranks: Sequence[str] = ("genus", "family")) -> pl.DataFrame:
+    """Genus and family ids that hold one name in one lineage, as `rank, kingdom, name, parent, ids` with `ids` sorted.
+
+    `taxa` lists accepted species with `<rank>_id`, the rank's name, its parent's name (the family for a genus, the order for a
+    family) and `kingdom`. Ids merge when they share kingdom, name and parent name, so a genus name in two families is a homonym
+    and stays apart. A row with no id, name, kingdom or parent name is skipped, as its lineage can't be established. Only groups
+    of two or more ids are returned.
+    """
+    _check_ranks(ranks)
+    groups = []
+    for rank in ranks:
+        if rank not in PARENT_RANK:
+            raise ValueError(f"only {list(PARENT_RANK)} have duplicate names, not {rank!r}")
+        key = ["kingdom", rank, PARENT_RANK[rank]]
+        found = (
+            taxa.select(*key, pl.col(f"{rank}_id").alias("id"))
+            .drop_nulls()
+            .unique()
+            .group_by(key)
+            .agg(pl.col("id").sort())
+            .filter(pl.col("id").list.len() > 1)
+        )
+        groups.append(
+            found.select(
+                pl.lit(rank).alias("rank"), "kingdom", pl.col(rank).alias("name"), pl.col(PARENT_RANK[rank]).alias("parent"), pl.col("id").alias("ids")
+            )
+        )
+    schema = {"rank": pl.String, "kingdom": pl.String, "name": pl.String, "parent": pl.String, "ids": pl.List(pl.String)}
+    return pl.concat(groups) if groups else pl.DataFrame(schema=schema)
+
+
+def merge_duplicates(taxa: pl.DataFrame) -> pl.DataFrame:
+    """`taxa` with every genus and family id of a `duplicate_names` group replaced by the group's lowest id, compared as text."""
+    groups = duplicate_names(taxa)
+    merged = taxa
+    for rank in ("genus", "family"):
+        column = f"{rank}_id"
+        own = (
+            groups.filter(pl.col("rank") == rank)
+            .select(pl.col("ids").list.first().alias("_lowest"), pl.col("ids").alias(column))
+            .explode(column)
+        )
+        if own.height:
+            merged = merged.join(own, on=column, how="left").with_columns(pl.coalesce("_lowest", column).alias(column)).drop("_lowest")
+    return merged
+
+
+def cell_taxa(
+    presence: pl.DataFrame, taxa: pl.DataFrame | None, ranks: Sequence[str] = RANKS, merge_duplicate_names: bool = False
+) -> CellTaxa:
     """The matrix for `cell, species_id` rows.
 
     A null species keeps its cell without a link. With `taxa`, which lists each accepted species once, any other species stops
     here, and its genus and family become columns where `genus_id` and `family_id` have values. Without `taxa` there are only
     species. The id of a taxon, not its name, tells taxa apart, because names repeat even within a kingdom.
+
+    With `merge_duplicate_names`, the ids of each `duplicate_names` group become one column named for the group's lowest id, ids
+    compared as text, so that a provisional copy of a genus or family doesn't count as a narrow taxon of its own. `taxa` then needs
+    the name columns. The default leaves the ids as they are.
     """
     _check_ranks(ranks)
     if taxa is not None and taxa["species_id"].is_duplicated().any():
         twice = taxa["species_id"].filter(taxa["species_id"].is_duplicated()).unique().sort().head(5).to_list()
         raise ValueError(f"taxa lists a species more than once, such as {twice}")
+
+    if merge_duplicate_names and taxa is not None:
+        taxa = merge_duplicates(taxa)
 
     cells = presence["cell"].drop_nulls().unique().sort()
     species = presence["species_id"].drop_nulls().unique().to_frame()
