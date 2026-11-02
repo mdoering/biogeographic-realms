@@ -2190,3 +2190,70 @@ The largest realm (1) holds 58.3% of the area and 42.6% of the units, and is alm
 - Task 10 (the WCVP circularity gate) and Task 11 (the beta-sim cross-check) use `mt080`, the k=7 map; there were no unassigned units, so no `warning`.
 
 **Cost.** The screen took 109 to 143 s per configuration (30 s for `variable`, which was degenerate), 4 workers, mostly the Infomap trials. The `log.json` peak of 6.5 to 14.9 GB is a high-water mark of the one process across the run (it never falls), not the memory of a configuration. Select took 850 s (`regularized`), 949 s (`mt075`) and 1,036 s (`mt080`) at a peak of 5.3 to 5.8 GB, and 1,056 to 1,149 s (`mt085`, `mt090`, `default`, `mt095`) at 7.1 GB: 14 to 19 minutes, 4 workers, of which the bootstraps are 495 to 724 s.
+
+### The circularity gate on half A (2026-11-02)
+
+**Headline mode: WCVP `native_only`.** Every WCVP mode passes the TDWG-edge gate, under both readings, so the rule takes the strongest, `native_only`. Half A only, at resolution 7 (release 315557), `mt080` (Markov time 0.8) on all five runs; nothing from B. `scripts/circularity.py` (helpers in `src/realms/circularity.py`, tests `tests/test_circularity.py`) reads each run's `parts.parquet` and writes `results/explore/res7/circularity/`: `runs.csv`, `pairs.csv`, `moves.csv`, `gate.csv` and `run.log`. It took 191 s, of which 54 s went on the rotations at 0.5 and 68 s on each gate.
+
+**The runs** (`--stage select`, `mt080`). Stability and falling short are context here, not a criterion:
+
+| run | selected k | stability | fell short | parts | land / sea boundary km |
+|---|---|---|---|---|---|
+| `off` | 7 | 0.730 | yes | 22,159 | 34,567 / 69,608 |
+| `introduced` | 7 | 0.762 | yes | 22,157 | 40,728 / 70,231 |
+| `native_only` | 7 | 0.806 | no | 22,147 | 41,473 / 61,495 |
+| no layer 2 (`native_only-no-extinct-no-no_wild_range`) | 12 | 0.801 | no | 22,167 | 49,374 / 193,953 |
+| no GRIIS (`native_only-no-griis-no-griis_subnational`) | 9 | 0.699 | yes | 22,149 | 36,390 / 69,332 |
+
+Under `mt080`, `off` and `introduced` fall short of 0.8, as does the run without GRIIS. The candidate ks run from 5-8 (`off`) to 5-12 (no layer 2). k = 5 to 8 is common to all five, and **k = 7** is the common k: `circularity.common_k` takes the shared k that the most runs selected (three of the five), and the files confirm it.
+
+**Comparison by part, not by unit.** Cleaning changes the network units (11,292 to 11,340), so maps are compared over the parts both runs map (`parts.parquet`, imputed parts included, `realms.score.v_measure`). Every pair shares 22,144 to 22,147 parts, and 0 to 22 parts are in only one run (table). A moved boundary is the symmetric difference of the two runs' `boundary(labels, kind, edges)` edges, in geodesic km. An edge that both runs draw does not move, even where the realm on either side changed.
+
+| pair | k | V, selected k | V, k = 7 | shared parts | only in a / b | land moved km, selected / k = 7 | sea moved km, selected / k = 7 |
+|---|---|---|---|---|---|---|---|
+| off / introduced | 7 / 7 | 0.890 | 0.890 | 22,156 | 3 / 1 | 37,549 / 37,549 | 30,045 / 30,045 |
+| off / native_only | 7 / 7 | 0.873 | 0.873 | 22,145 | 14 / 2 | 39,383 / 39,383 | 32,841 / 32,841 |
+| off / no layer 2 | 7 / 12 | 0.644 | 0.749 | 22,145 | 14 / 22 | 39,479 / 41,962 | 201,843 / 90,150 |
+| off / no GRIIS | 7 / 9 | 0.949 | 0.951 | 22,144 | 15 / 5 | 16,428 / 16,543 | 23,348 / 23,348 |
+| introduced / native_only | 7 / 7 | 0.953 | 0.953 | 22,146 | 11 / 1 | 17,034 / 17,034 | 20,441 / 20,441 |
+| introduced / no layer 2 | 7 / 12 | 0.695 | 0.819 | 22,146 | 11 / 21 | 30,654 / 27,406 | 199,261 / 87,741 |
+| introduced / no GRIIS | 7 / 9 | 0.890 | 0.887 | 22,145 | 12 / 4 | 36,479 / 34,082 | 29,247 / 29,247 |
+| native_only / no layer 2 | 7 / 12 | 0.712 | 0.841 | 22,147 | 0 / 20 | 27,194 / 23,946 | 189,605 / 78,085 |
+| native_only / no GRIIS | 7 / 9 | 0.885 | 0.883 | 22,146 | 1 / 3 | 34,560 / 31,218 | 34,493 / 34,493 |
+| no layer 2 / no GRIIS | 12 / 9 | 0.659 | 0.761 | 22,147 | 20 / 2 | 34,231 / 35,256 | 197,221 / 85,904 |
+
+**Moves by TDWG level 1 region** (land, at the selected k; `moves.csv` has every pair at both ks). An edge goes to the level 1 region whose level 3 polygons hold the centre of its first cell (`cell_a`, the lower id as text). If that centre is in no region, the second cell's is used, and otherwise the edge goes to `none`. A centre on an edge goes to the lowest level 3 code. Unlike `units.part_regions`, no nearest region is taken, so `none` holds coastal edges whose two cell centres both lie on the sea: 6,268 of the 21,872 cell centres are in a region.
+
+| pair | moved land km | top regions |
+|---|---|---|
+| off / introduced | 37,549 | Asia-Temperate 12,619 (34%), Northern America 12,182 (32%), none 5,717 (15%) |
+| off / native_only | 39,383 | Asia-Temperate 13,077 (33%), Northern America 11,981 (30%), none 6,275 (16%) |
+| introduced / native_only | 17,034 | Asia-Temperate 10,292 (60%), none 3,966 (23%), Asia-Tropical 1,626 (10%) |
+| native_only / no layer 2 | 27,194 | Asia-Temperate 7,933 (29%), none 6,657 (24%), Northern America 5,882 (22%), Southern America 3,254 (12%) |
+| native_only / no GRIIS | 34,560 | Northern America 11,981 (35%), Asia-Temperate 11,192 (32%), none 4,200 (12%) |
+
+**The gate** (`boundaries.gate`). `off` is the base, the regions are TDWG level 3, there are 99 rotations with seed 1, and each map is taken at its selected k, land boundaries only. All five runs went in, so the two layer variants have rows too, for information. `off`'s share near TDWG edges is 0.8328.
+
+| mode | share | raise | null q95, `land_tolerance=0.5` | passes | null q95, `None` | passes |
+|---|---|---|---|---|---|---|
+| introduced | 0.8287 | -0.0041 | +0.1674 | yes | +0.1633 | yes |
+| native_only | 0.7952 | -0.0376 | +0.1617 | yes | +0.1614 | yes |
+| no layer 2 | 0.7646 | -0.0682 | +0.1313 | yes | +0.1264 | yes |
+| no GRIIS | 0.8381 | +0.0053 | +0.0507 | yes | +0.0507 | yes |
+
+**The two readings agree for every mode.** The no-GRIIS q95 is the same under both (0.0506671). That was checked, and it is a coincidence of order statistics: the 94th and 95th of the 99 sorted null raises come from the same two draws in both sets (seed 1 gives the same first draws, and the 0.5 filter keeps both). Neither WCVP mode raises its share near TDWG edges at all: both are below `off`, `native_only` by 0.038.
+
+**The headline, by the rule (brief Step 3):** `native_only`, then `introduced`, then `off`. `native_only` passes at the default 0.5 reading, so it is the headline mode (`circularity.headline`). The layer variants are not candidates. Endemism excess plays no part.
+
+**What layer 2 alone changes** (`native_only` against no layer 2). This is the largest change of any switch. Without layer 2 (extinct species and species with no wild range kept), the selected map is k = 12, not 7 (stability 0.801). Its V-measure with `native_only` is 0.712, or 0.841 at k = 7. The sea boundary triples (61,495 to 193,953 km at the selected k; 78,085 km of sea boundary moves even at k = 7). The land boundary that moves is 27,194 km, spread over Asia-Temperate, Northern America and Southern America, with 1,052 km in Antarctica against 90 km in every other run. Layer 2 matters most on the sea.
+
+**What GRIIS alone changes** (`native_only` against no GRIIS). Without GRIIS (country and sub-national lists), the selected map is k = 9 at stability 0.699, short of the bar. Its V-measure with `native_only` is 0.885 (0.883 at k = 7), and 34,560 km of land boundary moves, 35% of it in Northern America. The no-GRIIS map is the closer one to `off` (V 0.949, 16,428 km moved). The Northern American boundary shows why. `off` and no GRIIS draw 2,369 km of land boundary there, against 11,315 km for `introduced` and 11,114 km for `native_only`, so the extra Northern American boundary of about 9,000 km appears only when WCVP and GRIIS clean together. Neither does it alone.
+
+**Caveats.**
+- **The land measure is mostly coastline.** The rotations' land filter tracks where the coasts land more than the internal TDWG borders (Task 6). It stays as built and is on Markus's list of open points.
+- **The gate has little power here.** At resolution 7, 60% of the cells with a land part (4,630 of 7,697) are within one cell of a TDWG edge, so any map's land boundary is mostly "near": the share is 0.80 to 0.84 for every run. Rotated, `off`'s share runs from 0.20 to 0.65 (5-95%, median 0.44), and the null raises are wide: for `native_only` from -0.142 to +0.162 (5-95%), median +0.028. A mode would need to raise its share by about 0.16 to fail. The WCVP modes lower it, so the verdict is not close, but the gate could miss a regional alignment that a global share dilutes.
+- **A regional signal, outside the rule.** The roughly 10,400 km of land boundary that `native_only` adds in Northern America, against `off`, is 93% near TDWG edges, where 73% of that region's cell centres are near one (`introduced`: 91%). Here the TDWG level 3 regions are US states and Canadian provinces. This does not change the verdict, which is defined on the whole map, but the WCVP-with-GRIIS boundary in Northern America is the place to look for a TDWG artefact. Its shape was not examined further (it runs from 23 to 77 degrees N).
+- **A single seed.** The rotations (seed 1) and every run's Infomap, bootstraps and null maps (`Params.seed` 1) were run once.
+- **`off` and `introduced` fall short of 0.8** under `mt080` (0.730 and 0.762), and so does no GRIIS (0.699). Their maps are less stable than the bar asks. The V-measures between runs (0.87 to 0.95 among the k = 7 maps) are about as high as the runs' own bootstrap stability (0.70 to 0.81), so part of every "move" may be Infomap's own variation rather than the cleaning. The pairs were not compared against a same-cleaning, other-seed baseline.
+- **Parts present in only one run.** 0 to 22 parts per pair. V-measure leaves them out, but they can put edges in one run's boundary only, so they count among the moved km.
+- **Different ks.** Pairs with no layer 2 (k = 12) or no GRIIS (k = 9) compare maps of different k at the selected k, which inflates the moves. The k = 7 columns compare like with like.
