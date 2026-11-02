@@ -2328,3 +2328,11 @@ The final review of the branch (99bfa17..5453f6f) found the pipeline's caching w
 ### One ocean realm is accepted (2026-11-02)
 
 Markus reviewed the M1 maps and accepted the single ocean realm of the k = 7 map (`native_only`, mt080: 58.3% of the units' area, 69.3% of the parts' with the imputed ones) as what the data says. No method change is made to split it: a split would have to come from the endemism excess, the stability or the calibration, not from the expectation of several marine realms. The ocean realm's sub-realms (k = 30 shows a tropical eastern North Pacific one) stay available for M4's comparison.
+
+### A second seed on mt080 (2026-11-02)
+
+At Markus's request, `native_only/mt080` was run again at seed 2 (`--seed 2`, `mt080-s2/`; screen 2 min, select 15 min), which changes Infomap's trials, the bootstrap resamples and the null maps.
+
+- **The maps barely move.** Infomap finds 889 modules against seed 1's 853 (unit V 0.964). At every k both seeds have (5 to 9), the maps agree at V 0.966 to 0.973 over all 22,147 parts. At k = 7 the realms are the same seven: 122 parts (0.55%, 20 of them imputed) change realm, most between realms 4 and 1, 5 and 0, and 0 and 4.
+- **The stability does not hold the bar.** At seed 2 no map reaches 0.8: k = 5 to 9 score 0.683, 0.640, 0.752, 0.753 and 0.765 (seed 1: 0.763, 0.738, 0.806, 0.793, 0.814). Select picks k = 9 and marks it fell short. The excess is lower too, 0.143 to 0.160 against 0.153 to 0.174. Seed 2 has no k = 10 map, because only nine units clear the size floor.
+- **What it means.** Between two seeds the stability of k = 7 moves by 0.054, while the reference maps agree at V 0.97. So most of the difference comes from the 20 bootstraps, not from the map. A gap of that size is larger than mt080's margin over the bar (0.006), and larger than the gaps that separated mt080 from mt090 (0.770), mt095 (0.759) and the default (0.674) at seed 1. The choice of mt080 in "Infomap's scale" therefore rests on one draw of the bootstraps. How to read the stability across seeds is left to Markus; no rule is changed here.
