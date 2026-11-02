@@ -102,8 +102,8 @@ def _neighbours(shapes: np.ndarray) -> set[tuple[int, int]]:
     return pairs
 
 
-def _land_km2(shapes: np.ndarray, land: Path) -> np.ndarray:
-    """Geodesic area of each cell's overlap with the land.
+def _land_overlaps(shapes: np.ndarray, land: Path) -> tuple[np.ndarray, np.ndarray]:
+    """The pieces of the land inside the cells, as (index of the cell, the piece), one entry per piece of land that meets the cell.
 
     The land is drawn between -180 and 180, so it is also tried a turn of longitude to either side. The continents are single
     polygons of tens of thousands of vertices, so a cell is only tested against polygons that meet it, and then only against the
@@ -116,7 +116,12 @@ def _land_km2(shapes: np.ndarray, land: Path) -> np.ndarray:
     meets = shapely.intersects(copies[j], shapes[i])
     i, j = i[meets], j[meets]
     inside = [shapely.clip_by_rect(land_piece, *box) for land_piece, box in zip(copies[j], shapely.bounds(shapes[i]), strict=True)]
-    overlap = shapely.intersection(shapes[i], inside)
+    return i, shapely.intersection(shapes[i], inside)
+
+
+def _land_km2(shapes: np.ndarray, land: Path) -> np.ndarray:
+    """Geodesic area of each cell's overlap with the land."""
+    i, overlap = _land_overlaps(shapes, land)
     result = np.zeros(len(shapes))
     for cell, piece in zip(i, overlap, strict=True):
         result[cell] += _km2(piece)
