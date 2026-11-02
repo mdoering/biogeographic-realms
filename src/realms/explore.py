@@ -23,6 +23,9 @@ the same hash. The hash of cleaning is that of the cleaning settings, the layers
 the `_COMPLETE` marker of the counts and the manifest of the references. Each later stage hashes the stage before it with its own settings (the unit settings, then the
 configuration and the parameters), so a change anywhere reruns what follows it.
 
+**Units that Infomap puts in no module** (a unit with no link) leave the scores: `assigned_only` takes them out of the matrix, areas and adjacency that `candidate_maps`, the bootstrap and the null maps are given, so
+the scored cells are the mapped ones. `structure.json` lists them (`unassigned`, `unassigned_units`, and a `warning` above 1% of the units), and `parts.parquet` imputes them as it does the excluded parts.
+
 **A degenerate clustering is a result.** `DegenerateClustering` (too few units above the size floor) and a network with no link at all are written to `structure.json`
 as `degenerate` with the reason, with empty maps, and never raised.
 
@@ -48,6 +51,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 from realms import nullmodel, parallel
@@ -332,6 +336,47 @@ def labelled_units(units: Units, labelled: set[str]) -> Units:
     )
 
 
+@dataclass(frozen=True)
+class Scored:
+    """What the maps are scored on: the matrix, areas and adjacency of the units that have a module, and the ones Infomap gave none (sorted)."""
+
+    ct: CellTaxa
+    areas: dict[str, float]
+    adjacency: dict[str, set[str]]
+    unassigned: list[str]
+
+
+def assigned_only(partition: Partition, ct: CellTaxa, units: Units) -> Scored:
+    """The matrix, areas and adjacency without the units that Infomap put in no module (`Partition.unassigned`), so that the scored cells are the mapped ones.
+
+    Such a unit has no label in the maps, so it must not count in the endemism scores, the null maps or the bootstraps either. Its row is gone from the
+    matrix, and it is in no neighbour set; a taxon column that no remaining unit holds goes too, with the genus and family columns renumbered. The units
+    themselves are left as they are: the parts of an unassigned unit get their realm from `labelled_units`.
+    """
+    lost = set(partition.unassigned)
+    if not lost:
+        return Scored(ct, units.areas, units.adjacency, [])
+    keep = np.array([c not in lost for c in ct.cells], dtype=bool)
+    x = ct.x[np.flatnonzero(keep)]
+    used = np.flatnonzero(x.getnnz(axis=0) > 0)
+    renumbered = np.full(x.shape[1], -1, dtype=np.int64)
+    renumbered[used] = np.arange(len(used))
+
+    def moved(parent: np.ndarray) -> np.ndarray:
+        parent = parent[used]
+        return np.where(parent >= 0, renumbered[np.maximum(parent, 0)], -1)
+
+    x = x[:, used]
+    x.sort_indices()
+    restricted = CellTaxa([c for c in ct.cells if c not in lost], [ct.taxa[j] for j in used.tolist()], ct.rank[used], x, moved(ct.genus_col), moved(ct.family_col))
+    return Scored(
+        restricted,
+        {u: a for u, a in units.areas.items() if u not in lost},
+        {u: near - lost for u, near in units.adjacency.items() if u not in lost},
+        sorted(lost),
+    )
+
+
 # ------------------------------------------------------------------ workers
 
 
@@ -383,12 +428,22 @@ def measured_workers(requested: int, seen: list[dict], used: list[int], budget_g
 # ------------------------------------------------------------------ one configuration
 
 
+UNASSIGNED_WARNING_SHARE = 0.01  # more than this share of the units without a module is worth a warning
+
+
 def structure(partition: Partition, areas: dict[str, float], n_units: int) -> dict:
-    """What Infomap found: modules (the finest), the top-level ones, the levels, the largest module's share of units and area, and single-unit modules."""
+    """What Infomap found: modules (the finest), the top-level ones, the levels, the largest module's share of units and area, and single-unit modules.
+
+    `unassigned` counts the units that are in no module and `unassigned_units` lists them: they are out of the scores (`assigned_only`). If they are more than
+    1% of `units` there is also a `warning`.
+    """
     paths = partition.paths
+    lost = {"unassigned": len(partition.unassigned), "unassigned_units": list(partition.unassigned)}
+    if len(partition.unassigned) > UNASSIGNED_WARNING_SHARE * n_units:
+        lost["warning"] = f"{len(partition.unassigned)} of {n_units} units are in no module, more than 1%: they are out of the scores and the bootstraps, and imputed in parts.parquet"
     if not paths:
         return {
-            "units": n_units, "unassigned": len(partition.unassigned), "modules": 0, "top_modules": 0, "levels": 0, "single_unit_modules": 0,
+            "units": n_units, **lost, "modules": 0, "top_modules": 0, "levels": 0, "single_unit_modules": 0,
             "largest_module_share_of_units": None, "largest_module_share_of_area": None,
             "largest_top_module_share_of_units": None, "largest_top_module_share_of_area": None,
         }
@@ -405,7 +460,7 @@ def structure(partition: Partition, areas: dict[str, float], n_units: int) -> di
     top_modules, top, top_area = shares(lambda path: path[0])
     return {
         "units": n_units,
-        "unassigned": len(partition.unassigned),
+        **lost,
         "modules": modules,
         "top_modules": top_modules,
         "levels": max(len(path) for path in paths.values()),
@@ -417,22 +472,26 @@ def structure(partition: Partition, areas: dict[str, float], n_units: int) -> di
     }
 
 
-def _cluster(units: Units, ct: CellTaxa, options: InfomapOptions, trials: int, params: Params, timings: dict) -> tuple[Partition, CandidateMaps | None, str | None]:
-    """Infomap, then the candidate maps. The reason is the message of a `DegenerateClustering`, or of a network that has no link at all, and the maps are then `None`."""
+def _cluster(units: Units, ct: CellTaxa, options: InfomapOptions, trials: int, params: Params, timings: dict) -> tuple[Partition, CandidateMaps | None, str | None, Scored]:
+    """Infomap, then the candidate maps on the units that have a module (`assigned_only`), which are returned for the scores that follow.
+
+    The reason is the message of a `DegenerateClustering`, or of a network that has no link at all, and the maps are then `None`.
+    """
     started = time.perf_counter()
     net = network_from(ct)
     partition = run_infomap(net, seed=params.seed, trials=trials, options=options)
     timings["infomap"] = round(time.perf_counter() - started, 2)
+    scored = assigned_only(partition, ct, units)
     if not partition.paths:
-        return partition, None, "no unit has a link to cluster on"
+        return partition, None, "no unit has a link to cluster on", scored
     started = time.perf_counter()
     try:
-        found = candidate_maps(partition, ct, units.areas, units.adjacency, k_max=params.k_max, k_min=params.k_min, floor_km2=params.floor_km2)
+        found = candidate_maps(partition, scored.ct, scored.areas, scored.adjacency, k_max=params.k_max, k_min=params.k_min, floor_km2=params.floor_km2)
     except DegenerateClustering as error:
-        return partition, None, str(error)
+        return partition, None, str(error), scored
     finally:
         timings["candidate_maps"] = round(time.perf_counter() - started, 2)
-    return partition, found, None
+    return partition, found, None, scored
 
 
 def _write_maps(
@@ -533,13 +592,13 @@ def screen_stage(
     timings: dict = {}
     seen: list[dict] = []
     used: list[int] = []
-    partition, found, reason = _cluster(units, ct, options, params.trials_screen, params, timings)
+    partition, found, reason, scored = _cluster(units, ct, options, params.trials_screen, params, timings)
     if found is None:
         pl.DataFrame(schema={"k": pl.Int64, "excess": pl.Float64}).write_csv(directory / "screen.csv")
     else:
         begun = time.perf_counter()
         with measured_workers(workers, seen, used):
-            excess = excess_table(found.maps, ct, units.adjacency, units.areas, n_null=params.n_null_screen, seed=params.seed, workers=workers)
+            excess = excess_table(found.maps, scored.ct, scored.adjacency, scored.areas, n_null=params.n_null_screen, seed=params.seed, workers=workers)
         timings["excess_table"] = round(time.perf_counter() - begun, 2)
         _table_rows(excess, "excess").write_csv(directory / "screen.csv")
     shape = structure(partition, units.areas, len(units.areas))
@@ -567,7 +626,7 @@ def select_stage(
     timings: dict = {}
     seen: list[dict] = []
     used: list[int] = []
-    partition, found, reason = _cluster(units, ct, options, params.trials_select, params, timings)
+    partition, found, reason, scored = _cluster(units, ct, options, params.trials_select, params, timings)
     chosen: int | None = None
     if found is None:
         pl.DataFrame(schema={"k": pl.Int64, "stability": pl.Float64, "excess": pl.Float64, "selected": pl.Boolean}).write_csv(directory / "selection.csv")
@@ -576,12 +635,12 @@ def select_stage(
         with measured_workers(workers, seen, used):
             begun = time.perf_counter()
             stability = bootstrap_stability(
-                ct, found.maps, units.areas, units.adjacency, n_boot=params.n_boot, seed=params.seed, trials=params.boot_trials,
+                scored.ct, found.maps, scored.areas, scored.adjacency, n_boot=params.n_boot, seed=params.seed, trials=params.boot_trials,
                 floor_km2=params.floor_km2, k_max=params.k_max, options=options, workers=workers,
             )
             timings["bootstrap_stability"] = round(time.perf_counter() - begun, 2)
             begun = time.perf_counter()
-            excess = excess_table(found.maps, ct, units.adjacency, units.areas, n_null=params.n_null_select, seed=params.seed, workers=workers)
+            excess = excess_table(found.maps, scored.ct, scored.adjacency, scored.areas, n_null=params.n_null_select, seed=params.seed, workers=workers)
             timings["excess_table"] = round(time.perf_counter() - begun, 2)
         table = _table_rows(stability, "stability").join(_table_rows(excess, "excess"), on="k")
         choice = select_level(table)

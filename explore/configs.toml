@@ -2,7 +2,38 @@
 # realms.cluster.InfomapOptions that differ from Infomap's defaults, so an empty table is the defaults.
 # The screen runs Infomap with trials_screen trials and judges every k against n_null_screen null maps.
 # Selection does not take its figures from here: it uses the design's, 10 trials, 20 bootstraps of 3 trials and 99 null maps.
+#
+# The scale sweep: Markov time 1.0 (the default) down to 0.75, which gives more and smaller modules, then four other ways to
+# change the scale at Markov time 1.0: a local Markov time (with Infomap's own damping), a regularized network, an entropy
+# correction, and clustering a top module again when it holds more than half of the cells.
 trials_screen = 3
 n_null_screen = 19
 
 [configs.default]
+
+[configs.mt095]
+markov_time = 0.95
+
+[configs.mt090]
+markov_time = 0.90
+
+[configs.mt085]
+markov_time = 0.85
+
+[configs.mt080]
+markov_time = 0.80
+
+[configs.mt075]
+markov_time = 0.75
+
+[configs.variable]
+variable_markov_time = true
+
+[configs.regularized]
+regularized = true
+
+[configs.entropy]
+entropy_corrected = true
+
+[configs.recurse50]
+recurse_share = 0.5

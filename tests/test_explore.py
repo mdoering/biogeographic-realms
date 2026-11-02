@@ -6,6 +6,7 @@ maps, with fewer trials and nulls than the analysis, so that a run takes seconds
 
 import inspect
 import json
+import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -255,6 +256,61 @@ def test_units_without_a_module_are_left_out_like_the_thin_ones(world, planted):
     assert explore.labelled_units(units, set(units.areas)) is units
 
 
+def unlinked_world(out: Path, n: int):
+    """The planted units, with the first `n` of them holding only a species that is not accepted: they stay rows of the matrix without a link."""
+    units = explore.read_units(out)
+    lost = sorted(units.areas)[:n]
+    presence = units.presence.with_columns(
+        pl.when(pl.col("unit").is_in(lost)).then(pl.lit("zz-not-accepted")).otherwise(pl.col("species_id")).alias("species_id")
+    ).unique(["unit", "species_id"])
+    units = replace(units, presence=presence)
+    ct = explore.network_matrix(out, units)
+    assert set(lost) <= set(ct.cells)
+    return units, ct, lost
+
+
+@pytest.mark.parametrize("n, warns", [(1, False), (3, True)])
+def test_units_without_a_module_leave_the_scores_but_not_the_map(world, planted, monkeypatch, tmp_path, n, warns):
+    out = tmp_path / "res7" / "native_only"
+    shutil.copytree(planted[0], out)
+    units, ct, lost = unlinked_world(out, n)
+    kept = set(units.areas) - set(lost)
+    seen = {"boot": [], "excess": []}
+    real_boot, real_excess = explore.bootstrap_stability, explore.excess_table
+    monkeypatch.setattr(
+        explore, "bootstrap_stability", lambda ct, maps, areas, adjacency, **kw: seen["boot"].append((ct, maps, areas, adjacency)) or real_boot(ct, maps, areas, adjacency, **kw)
+    )
+    monkeypatch.setattr(
+        explore, "excess_table", lambda maps, ct, adjacency, areas, **kw: seen["excess"].append((ct, maps, areas, adjacency)) or real_excess(maps, ct, adjacency, areas, **kw)
+    )
+    light = explore.read_light_grid(out)
+    parent = explore.read_stamp(out / "units")["hash"]
+    explore.screen_stage(out, "default", units, ct, light, InfomapOptions(), FAST, parent, force=True)
+    explore.select_stage(out, "default", units, ct, light, InfomapOptions(), FAST, parent, force=True)
+    assert len(seen["excess"]) == 2 and len(seen["boot"]) == 1  # screen and select score once each, and only select bootstraps
+    for scored_ct, maps, areas, adjacency in seen["excess"] + seen["boot"]:
+        assert set(scored_ct.cells) == kept and set(areas) == kept and set(adjacency) == kept
+        assert all(near <= kept for near in adjacency.values()) and all(set(labels) == kept for labels in maps.values())
+        assert not set(lost) & {c for c in scored_ct.cells}
+    assert len(units.areas) == 120  # the units that were passed in are untouched
+
+    structure = json.loads((out / "default" / "structure.json").read_text())
+    assert structure["unassigned"] == n and structure["unassigned_units"] == lost and structure["units"] == 120
+    assert ("warning" in structure) is warns
+    if warns:
+        assert "more than 1%" in structure["warning"] and str(n) in structure["warning"]
+    # the map has no label for them, and the parts file imputes them, for every k
+    partition = pl.read_parquet(out / "default" / "partition.parquet")
+    assert partition.height == 120 and partition.filter(pl.col("unit").is_in(lost))["leaf"].is_null().all() and partition["leaf"].null_count() == n
+    assert set(pl.read_parquet(out / "default" / "candidates.parquet")["unit"]) == kept
+    parts = pl.read_parquet(out / "default" / "parts.parquet")
+    for k, rows in parts.group_by("k"):
+        gone = rows.filter(pl.col("part").is_in(lost))
+        assert sorted(gone["part"]) == lost and gone["imputed"].all() and gone["unit"].is_null().all() and gone["realm"].is_not_null().all()
+        assert rows.height == 123
+    assert json.loads((out / "default" / "selected.json").read_text())["k"] == 4
+
+
 def test_only_half_a_is_loaded(world, tmp_path, monkeypatch):
     asked = []
 
@@ -284,7 +340,21 @@ def test_only_half_a_is_loaded(world, tmp_path, monkeypatch):
 
 def test_the_tracked_configs_are_the_default_options_and_the_screen_figures(tmp_path):
     configs, params = explore.load_configs(Path(__file__).parent.parent / "explore" / "configs.toml")
-    assert configs == {"default": InfomapOptions()}
+    assert list(configs) == ["default", "mt095", "mt090", "mt085", "mt080", "mt075", "variable", "regularized", "entropy", "recurse50"]
+    assert configs == {
+        "default": InfomapOptions(),
+        "mt095": InfomapOptions(markov_time=0.95),
+        "mt090": InfomapOptions(markov_time=0.90),
+        "mt085": InfomapOptions(markov_time=0.85),
+        "mt080": InfomapOptions(markov_time=0.80),
+        "mt075": InfomapOptions(markov_time=0.75),
+        "variable": InfomapOptions(variable_markov_time=True),
+        "regularized": InfomapOptions(regularized=True),
+        "entropy": InfomapOptions(entropy_corrected=True),
+        "recurse50": InfomapOptions(recurse_share=0.5),
+    }
+    assert configs["default"].args() == "" and configs["variable"].variable_markov_damping is None  # Infomap's own damping, and nothing else set
+    assert all(configs[n].markov_time == 1.0 for n in ("variable", "regularized", "entropy", "recurse50"))
     assert (params.trials_screen, params.n_null_screen) == (3, 19)
     assert (params.trials_select, params.n_boot, params.boot_trials, params.n_null_select) == (10, 20, 3, 99)
 
