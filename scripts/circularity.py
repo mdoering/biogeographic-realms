@@ -1,0 +1,179 @@
+"""The circularity gate on half A: how the cleaning runs' maps differ, where their boundaries move, and whether a WCVP mode follows TDWG edges.
+
+`uv run python -I scripts/circularity.py --counts data/gbif/<key>`
+
+Reads the select stage of one configuration (`--config`, default `mt080`) of each run, `results/explore/res<r>/<run>/<config>/`, at the resolution
+of the counts' `_COMPLETE` marker; the grid and the TDWG level 3 regions come from the references' manifest. Writes to `res<r>/circularity/`:
+
+- `runs.csv`: each run's selected k, its stability and whether it fell short of 0.8, its parts, and its land and sea boundary km at that k.
+- `pairs.csv`: for every pair of runs, the V-measure at each run's selected k and at the common k (`circularity.common_k`), the parts both hold
+  and those only one holds, and the km of land and sea boundary that moves (`circularity.moved`) at both.
+- `moves.csv`: the moved land boundary of every pair by TDWG level 1 region (`circularity.moves_by_region`), at the selected and the common k.
+- `gate.csv`: `boundaries.gate` with the first run as the base, every other run a mode, TDWG level 3 regions, each map at its selected k, read
+  twice: rotations kept within `land_tolerance=0.5` of the regions' boundary over land, and every rotation (`land_tolerance=None`).
+- `run.log`: what was read, the headline mode (`circularity.headline`, on the 0.5 reading) and the timings.
+
+Half A only: it reads the explore runs' outputs, which are half A's, and loads no counts.
+"""
+
+import argparse
+import itertools
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+
+import geopandas as gpd
+import polars as pl
+
+from realms.boundaries import boundary, edge_adjacency, edge_lengths, edge_share, gate, near_cells, rotations
+from realms.circularity import BASE, centre_regions, common_k, compare, headline, labels_at, moved, moves_by_region
+from realms.explore import _manifest_path
+from realms.grid import read_centres
+from realms.natives import TDWG_LEVEL3_CODE
+from realms.occurrences import IncompleteIngest, resolution_of
+
+RUNS = ("off", "introduced", "native_only", "native_only-no-extinct-no-no_wild_range", "native_only-no-griis-no-griis_subnational")
+TOLERANCES = (0.5, None)
+
+log = logging.getLogger("circularity")
+
+
+def read_run(directory: Path) -> dict:
+    """The selected map of one run and its candidate ks, after checking that `selected.json` and `parts.parquet` agree."""
+    chosen = json.loads((directory / "selected.json").read_text())
+    if chosen.get("degenerate"):
+        raise ValueError(f"{directory} is degenerate: {chosen}")
+    parts = pl.read_parquet(directory / "parts.parquet")
+    flagged = parts.filter(pl.col("selected"))["k"].unique().to_list()
+    if flagged != [chosen["k"]]:
+        raise ValueError(f"{directory}: selected.json says k={chosen['k']}, parts.parquet marks {flagged}")
+    sets = {frozenset(group["part"]) for _, group in parts.group_by("k")}
+    if len(sets) != 1:
+        raise ValueError(f"{directory}: parts.parquet holds other parts at different k")
+    selection = pl.read_csv(directory / "selection.csv")
+    stability = selection.filter(pl.col("k") == chosen["k"])["stability"].item()
+    return {"parts": parts, "k": chosen["k"], "fell_short": chosen["fell_short"], "stability": stability, "candidates": sorted(parts["k"].unique().to_list())}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--counts", type=Path, required=True, help="the ingested download the runs were cleaned from, data/gbif/<key>: its marker gives the resolution")
+    parser.add_argument("--config", default="mt080", help="the Infomap configuration of the runs, default mt080 (DECISIONS, Infomap's scale)")
+    parser.add_argument("--runs", nargs="+", default=list(RUNS), help="the runs, the base (WCVP off) first")
+    parser.add_argument("--rotations", type=int, default=99)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--results", type=Path, default=Path("results/explore"))
+    parser.add_argument("--reference", type=Path, default=Path("data/reference"))
+    args = parser.parse_args()
+    if args.runs[0] != BASE:
+        raise SystemExit(f"FAILED the first run is the base, {BASE}, not {args.runs[0]}")
+
+    try:
+        resolution = resolution_of(args.counts)
+    except (IncompleteIngest, FileNotFoundError) as error:
+        raise SystemExit(f"FAILED {error}") from error
+    root = args.results / f"res{resolution}"
+    out = root / "circularity"
+    out.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(out / "run.log", mode="w")],
+    )
+    started = time.perf_counter()
+    timings: dict[str, float] = {}
+
+    def lap(name: str, since: float) -> float:
+        timings[name] = round(time.perf_counter() - since, 1)
+        log.info(f"{name}: {timings[name]} s")
+        return time.perf_counter()
+
+    gpkg = _manifest_path(args.reference, f"isea3h_{resolution}")
+    level3 = _manifest_path(args.reference, "wgsrpd_level3")
+    land = _manifest_path(args.reference, "natural_earth_land")
+    log.info(f"resolution {resolution} (from {args.counts}), configuration {args.config}, grid {gpkg}, regions {level3}, land {land}")
+    log.info(f"runs {args.runs}, base {BASE}, {args.rotations} rotations, seed {args.seed}")
+
+    t = time.perf_counter()
+    runs = {run: read_run(root / run / args.config) for run in args.runs}
+    k = common_k({run: r["candidates"] for run, r in runs.items()}, {run: r["k"] for run, r in runs.items()})
+    for run, r in runs.items():
+        log.info(f"{run}: selected k={r['k']}, stability {r['stability']:.3f}, fell short {r['fell_short']}, candidates {r['candidates']}, {r['parts']['part'].n_unique()} parts")
+    log.info(f"common k={k}")
+    selected = {run: labels_at(r["parts"], r["k"]) for run, r in runs.items()}
+    common = {run: labels_at(r["parts"], k) for run, r in runs.items()}
+    t = lap("read the runs", t)
+
+    edges = edge_lengths(gpkg)
+    adjacency = edge_adjacency(edges)
+    regions = gpd.read_file(level3).sort_values(TDWG_LEVEL3_CODE, kind="stable")
+    region_of = centre_regions(read_centres(gpkg), regions)
+    log.info(f"{len(edges)} edges; {sum(v is not None for v in region_of.values())} of {len(region_of)} cell centres in a TDWG level 1 region")
+    t = lap("edges and regions", t)
+
+    lines = {
+        (at, kind, run): boundary(labels, kind, edges)
+        for at, maps in (("selected", selected), ("common", common))
+        for run, labels in maps.items()
+        for kind in ("land", "sea")
+    }
+    pl.DataFrame(
+        [
+            (run, r["k"], r["stability"], r["fell_short"], r["parts"]["part"].n_unique(), r["parts"].filter(pl.col("k") == r["k"])["imputed"].sum(),
+             lines[("selected", "land", run)]["km"].sum(), lines[("selected", "sea", run)]["km"].sum())
+            for run, r in runs.items()
+        ],
+        schema=["run", "k", "stability", "fell_short", "parts", "imputed_parts", "land_boundary_km", "sea_boundary_km"], orient="row",
+    ).write_csv(out / "runs.csv")
+
+    pairs, moves = [], []
+    for a, b in itertools.combinations(args.runs, 2):
+        at_selected, at_common = compare(selected[a], selected[b]), compare(common[a], common[b])
+        row = {
+            "run_a": a, "run_b": b, "k_a": runs[a]["k"], "k_b": runs[b]["k"], "common_k": k,
+            "v_selected": at_selected["v_measure"], "v_common": at_common["v_measure"],
+            "shared_parts": at_selected["shared"], "only_a": at_selected["only_a"], "only_b": at_selected["only_b"],
+        }
+        for at in ("selected", "common"):
+            for kind in ("land", "sea"):
+                shift = moved(lines[(at, kind, a)], lines[(at, kind, b)])
+                row[f"{kind}_moved_km_{at}"] = shift["km"].sum()
+                if kind == "land":
+                    by_region = moves_by_region(shift, region_of)
+                    total = shift["km"].sum()
+                    moves.append(by_region.with_columns(
+                        pl.lit(a).alias("run_a"), pl.lit(b).alias("run_b"), pl.lit(at).alias("at"),
+                        (pl.col("km") / total if total > 0 else pl.lit(None, dtype=pl.Float64)).alias("share"),
+                    ))
+        pairs.append(row)
+        log.info(f"{a} / {b}: V {row['v_selected']:.3f} at k={row['k_a']}/{row['k_b']}, {row['v_common']:.3f} at k={k}; land moved {row['land_moved_km_selected']:,.0f} km, sea {row['sea_moved_km_selected']:,.0f} km")
+    pl.DataFrame(pairs).write_csv(out / "pairs.csv")
+    pl.concat(moves).select("run_a", "run_b", "at", "region", "km", "edges", "share").write_csv(out / "moves.csv")
+    t = lap("pairs and moves", t)
+
+    base_share = edge_share(lines[("selected", "land", BASE)], near_cells(regions, gpkg, adjacency))
+    readings = []
+    for tolerance in TOLERANCES:
+        name = "none" if tolerance is None else f"{tolerance:g}"
+        turns = rotations(regions, args.rotations, args.seed, land_tolerance=tolerance, land=land)
+        t = lap(f"rotations, land_tolerance={name}", t)
+        rows = gate(selected, BASE, regions, turns, edges=edges, gpkg=gpkg, adjacency=adjacency)
+        t = lap(f"gate, land_tolerance={name}", t)
+        readings.append(rows.with_columns(pl.lit(name).alias("land_tolerance"), pl.lit(len(turns)).alias("rotations"), pl.lit(base_share).alias("base_share")))
+        for mode, share, lift, q95, passes in rows.iter_rows():
+            log.info(f"gate {name}: {mode} share {share:.4f} (off {base_share:.4f}), raise {lift:+.4f}, null q95 {q95:+.4f}, {'passes' if passes else 'FAILS'}")
+    gates = pl.concat(readings).select("land_tolerance", "rotations", "mode", "share", "base_share", "raise", "null_q95", "passes")
+    gates.write_csv(out / "gate.csv")
+
+    verdicts = {name: dict(gates.filter(pl.col("land_tolerance") == name).select("mode", "passes").iter_rows()) for name in gates["land_tolerance"].unique(maintain_order=True)}
+    differ = [mode for mode in verdicts["0.5"] if verdicts["0.5"][mode] != verdicts["none"][mode]]
+    if differ:
+        log.info(f"THE READINGS DIFFER for {differ}: 0.5 {[verdicts['0.5'][m] for m in differ]}, none {[verdicts['none'][m] for m in differ]}")
+    log.info(f"headline mode (land_tolerance=0.5): {headline(verdicts['0.5'])}; with every rotation it would be {headline(verdicts['none'])}")
+    timings["total"] = round(time.perf_counter() - started, 1)
+    log.info(f"timings {json.dumps(timings)}")
+
+
+if __name__ == "__main__":
+    main()
