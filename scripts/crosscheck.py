@@ -3,7 +3,8 @@
 `uv run python -I scripts/crosscheck.py --counts data/gbif/<key> --parts betasim names`
 
 Reads the select stage of one configuration (`--config`, default `mt080`) of the headline run (`--run`, default `native_only`) in
-`results/explore/res<r>/`, at the resolution of the counts' `_COMPLETE` marker. Writes to `res<r>/crosscheck/`, and appends to its `run.log`:
+`results/explore/res<r>/<run>/<config>/select/`, at the resolution of the counts' `_COMPLETE` marker, with `explore.read_selected` (which refuses a result
+that is not current). Writes to `res<r>/crosscheck/`, and appends to its `run.log`:
 
 - **betasim**: the matrix the select stage scored (`explore.network_matrix`, restricted by `explore.assigned_only` to the units Infomap gave a
   module), `betasim.rank_beta_sim` over its units and `betasim.consensus` with Ward and with UPGMA (`average`) at `--ks`, for each of `--seeds`,
@@ -25,21 +26,18 @@ Half A only: it reads the explore runs' outputs, which are half A's, and loads n
 """
 
 import argparse
-import json
 import logging
 import sys
 import time
 from typing import Literal
-from dataclasses import asdict
 from pathlib import Path
 
 import polars as pl
 
 from realms.betasim import consensus, rank_beta_sim
-from realms.circularity import check_select_stamp, compare, labels_at
-from realms.cluster import Partition
+from realms.circularity import compare, labels_at
 from realms.crosscheck import area_agreement, pairwise_v, unit_labels
-from realms.explore import CLEANED, MERGED_SUFFIX, UNITS, assigned_only, load_configs, network_matrix, peak_gb, read_stamp, read_units
+from realms.explore import CLEANED, MERGED_SUFFIX, UNITS, Selected, assigned_only, network_matrix, peak_gb, read_selected, read_units
 from realms.matrix import duplicate_names
 from realms.occurrences import IncompleteIngest, resolution_of
 
@@ -47,44 +45,20 @@ METHODS: tuple[Literal["ward", "average"], ...] = ("ward", "average")  # average
 log = logging.getLogger("crosscheck")
 
 
-def read_select(directory: Path, options: dict) -> dict:
-    """The select stage of a configuration: its stamp (checked to be select's, with these options), selected k, parts and selection table."""
-    stamp = read_stamp(directory, "stage-select")
-    check_select_stamp(stamp, options, str(directory))
-    chosen = json.loads((directory / "selected.json").read_text())
-    if chosen.get("degenerate"):
-        raise ValueError(f"{directory} is degenerate: {chosen}")
-    parts = pl.read_parquet(directory / "parts.parquet")
-    flagged = parts.filter(pl.col("selected"))["k"].unique().to_list()
-    if flagged != [chosen["k"]]:
-        raise ValueError(f"{directory}: selected.json says k={chosen['k']}, parts.parquet marks {flagged}")
-    units_hash = read_stamp(directory.parent / UNITS).get("hash")
-    if stamp["inputs"]["units"] != units_hash:
-        raise ValueError(f"{directory}: the select stamp is of units {stamp['inputs']['units']}, the units stage is {units_hash}")
-    return {
-        "stamp": stamp, "k": chosen["k"], "parts": parts, "selection": pl.read_csv(directory / "selection.csv"),
-        "merged": bool(stamp["inputs"].get("merge_duplicate_names")),
-    }
-
-
-def betasim(run_dir: Path, config: str, headline: dict, ks: list[int], seeds: list[int], shuffles: int, more: int, floor: float, out: Path) -> None:
+def betasim(run_dir: Path, headline: Selected, ks: list[int], seeds: list[int], shuffles: int, more: int, floor: float, out: Path) -> None:
     started = time.perf_counter()
-    k_sel = headline["k"]
+    k_sel = headline.k
     units = read_units(run_dir)
-    ct = network_matrix(run_dir, units, headline["merged"])
-    table = pl.read_parquet(run_dir / config / "partition.parquet")
-    partition = Partition(
-        paths={u: (top, leaf) for u, leaf, top in table.filter(pl.col("leaf").is_not_null()).iter_rows()},
-        unassigned=sorted(table.filter(pl.col("leaf").is_null())["unit"].to_list()),
-    )
+    ct = network_matrix(run_dir, units, headline.merged)
+    partition = headline.partition
     scored = assigned_only(partition, ct, units)  # the select stage's own restriction to the units Infomap gave a module
     ids = list(scored.ct.cells)
     log.info(f"matrix: {len(ct.cells)} units, {len(ct.taxa)} taxa; {len(partition.unassigned)} unassigned; scored {len(ids)} units, {len(scored.ct.taxa)} taxa")
 
     # Infomap's map of each unit, from the parts that are not imputed, checked against the candidates
-    candidates = pl.read_parquet(run_dir / config / "candidates.parquet")
-    infomap_ks = sorted(headline["parts"]["k"].unique().to_list())
-    infomap = {k: unit_labels(headline["parts"], k) for k in infomap_ks}
+    candidates = headline.candidates
+    infomap_ks = sorted(headline.parts["k"].unique().to_list())
+    infomap = {k: unit_labels(headline.parts, k) for k in infomap_ks}
     for k, labels in infomap.items():
         direct = dict(candidates.filter(pl.col("k") == k).select("unit", "realm").iter_rows())
         if labels != direct:
@@ -144,20 +118,20 @@ def betasim(run_dir: Path, config: str, headline: dict, ks: list[int], seeds: li
     log.info(f"betasim: {time.perf_counter() - started:.0f} s, peak {peak_gb():.1f} GB")
 
 
-def names(root: Path, run: str, merged_run: str, config: str, options: dict, headline: dict, out: Path) -> None:
-    merged = read_select(root / merged_run / config, options)
-    if not merged["merged"] or headline["merged"]:
-        raise ValueError(f"{merged_run} must merge duplicate names and {run} must not: their stamps say {merged['merged']} and {headline['merged']}")
-    k_ids, k_merged, k_sel = headline["k"], merged["k"], headline["k"]
+def names(root: Path, run: str, merged_run: str, config: str, configs: Path, headline: Selected, out: Path) -> None:
+    merged = read_selected(root / merged_run, config, configs, merge_duplicate_names=True)
+    if headline.merged or not merged.merged:
+        raise ValueError(f"{merged_run} must merge duplicate names and {run} must not: they say {merged.merged} and {headline.merged}")
+    k_ids, k_merged, k_sel = headline.k, merged.k, headline.k
     rows = []
     for at, ka, kb in (("selected", k_ids, k_merged), (f"k={k_sel}", k_sel, k_sel)):
-        found = compare(labels_at(headline["parts"], ka), labels_at(merged["parts"], kb))
+        found = compare(labels_at(headline.parts, ka), labels_at(merged.parts, kb))
         rows.append({"at": at, "k_ids": ka, "k_merged": kb, **found})
         log.info(f"names {at}: V {found['v_measure']:.3f} at k={ka}/{kb}, {found['shared']} parts shared, {found['only_a']} only on ids, {found['only_b']} only merged")
     pl.DataFrame(rows).rename({"shared": "shared_parts", "only_a": "only_ids", "only_b": "only_merged"}).write_csv(out / "names_v.csv")
 
-    table = headline["selection"].rename({"stability": "stability_ids", "excess": "excess_ids", "selected": "selected_ids"}).join(
-        merged["selection"].rename({"stability": "stability_merged", "excess": "excess_merged", "selected": "selected_merged"}), on="k", how="full", coalesce=True
+    table = headline.selection.rename({"stability": "stability_ids", "excess": "excess_ids", "selected": "selected_ids"}).join(
+        merged.selection.rename({"stability": "stability_merged", "excess": "excess_merged", "selected": "selected_merged"}), on="k", how="full", coalesce=True
     ).sort("k").with_columns(
         (pl.col("stability_merged") - pl.col("stability_ids")).alias("stability_diff"), (pl.col("excess_merged") - pl.col("excess_ids")).alias("excess_diff")
     ).select("k", "stability_ids", "stability_merged", "stability_diff", "excess_ids", "excess_merged", "excess_diff", "selected_ids", "selected_merged")
@@ -209,18 +183,14 @@ def main() -> None:
         handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(out / "run.log", mode="a")],
     )
     log.info(f"---- crosscheck {args.parts}: resolution {resolution} (from {args.counts}), run {args.run}, configuration {args.config}")
-    configs, _ = load_configs(args.configs)
-    if args.config not in configs:
-        raise SystemExit(f"FAILED {args.configs} has no configuration {args.config}")
-    options = asdict(configs[args.config])
     try:
-        headline = read_select(root / args.run / args.config, options)
+        headline = read_selected(root / args.run, args.config, args.configs)
         if "betasim" in args.parts:
             ks = list(range(args.ks[0], args.ks[1] + 1))
             log.info(f"betasim: methods {METHODS}, k={ks[0]}-{ks[-1]}, seeds {args.seeds}, {args.shuffles} shuffles, ids passed")
-            betasim(root / args.run, args.config, headline, ks, args.seeds, args.shuffles, args.more_shuffles, args.seed_floor, out)
+            betasim(root / args.run, headline, ks, args.seeds, args.shuffles, args.more_shuffles, args.seed_floor, out)
         if "names" in args.parts:
-            names(root, args.run, args.merged or f"{args.run}-{MERGED_SUFFIX}", args.config, options, headline, out)
+            names(root, args.run, args.merged or f"{args.run}-{MERGED_SUFFIX}", args.config, args.configs, headline, out)
     except (ValueError, FileNotFoundError) as error:
         raise SystemExit(f"FAILED {error}") from error
 

@@ -2,8 +2,8 @@
 
 `uv run python -I scripts/circularity.py --counts data/gbif/<key>`
 
-Reads the select stage of one configuration (`--config`, default `mt080`) of each run, `results/explore/res<r>/<run>/<config>/`, at the resolution
-of the counts' `_COMPLETE` marker; the grid and the TDWG level 3 regions come from the references' manifest. Writes to `res<r>/circularity/`:
+Reads the select stage of one configuration (`--config`, default `mt080`) of each run, `results/explore/res<r>/<run>/<config>/select/`, at the resolution
+of the counts' `_COMPLETE` marker, with `explore.read_selected` (which refuses a result that is not current); the grid and the TDWG level 3 regions come from the references' manifest. Writes to `res<r>/circularity/`:
 
 - `runs.csv`: each run's selected k, its stability and whether it fell short of 0.8, its parts, and its land and sea boundary km at that k.
 - `pairs.csv`: for every pair of runs, the V-measure at each run's selected k and at the common k (`circularity.common_k`), the parts both hold
@@ -25,7 +25,6 @@ import json
 import logging
 import sys
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 import geopandas as gpd
@@ -35,7 +34,6 @@ from realms.boundaries import boundary, edge_adjacency, edge_lengths, edge_share
 from realms.circularity import (
     BASE,
     centre_regions,
-    check_select_stamp,
     common_k,
     compare,
     headline,
@@ -45,7 +43,7 @@ from realms.circularity import (
     moves_by_region,
     near_by_region,
 )
-from realms.explore import _manifest_path, load_configs, read_stamp
+from realms.explore import manifest_path, read_selected
 from realms.grid import read_centres
 from realms.natives import TDWG_LEVEL3_CODE
 from realms.occurrences import IncompleteIngest, resolution_of
@@ -60,23 +58,15 @@ def tolerance_name(tolerance: float | None) -> str:
 log = logging.getLogger("circularity")
 
 
-def read_run(directory: Path, options: dict) -> dict:
-    """The selected map of one run and its candidate ks, after checking that the files are the select stage's with these Infomap options, and
-    that `selected.json` and `parts.parquet` agree."""
-    check_select_stamp(read_stamp(directory, "stage-select"), options, str(directory))
-    chosen = json.loads((directory / "selected.json").read_text())
-    if chosen.get("degenerate"):
-        raise ValueError(f"{directory} is degenerate: {chosen}")
-    parts = pl.read_parquet(directory / "parts.parquet")
-    flagged = parts.filter(pl.col("selected"))["k"].unique().to_list()
-    if flagged != [chosen["k"]]:
-        raise ValueError(f"{directory}: selected.json says k={chosen['k']}, parts.parquet marks {flagged}")
+def read_run(run_dir: Path, config: str, configs: Path) -> dict:
+    """The selected map of one run and its candidate ks: the current select result (`explore.read_selected`), whose parts must be the same at every k."""
+    found = read_selected(run_dir, config, configs)
+    parts = found.parts
     sets = {frozenset(group["part"]) for _, group in parts.group_by("k")}
     if len(sets) != 1:
-        raise ValueError(f"{directory}: parts.parquet holds other parts at different k")
-    selection = pl.read_csv(directory / "selection.csv")
-    stability = selection.filter(pl.col("k") == chosen["k"])["stability"].item()
-    return {"parts": parts, "k": chosen["k"], "fell_short": chosen["fell_short"], "stability": stability, "candidates": sorted(parts["k"].unique().to_list())}
+        raise ValueError(f"{found.directory}: parts.parquet holds other parts at different k")
+    stability = found.selection.filter(pl.col("k") == found.k)["stability"].item()
+    return {"parts": parts, "k": found.k, "fell_short": found.fell_short, "stability": stability, "candidates": sorted(parts["k"].unique().to_list())}
 
 
 def main() -> None:
@@ -112,19 +102,15 @@ def main() -> None:
         log.info(f"{name}: {timings[name]} s")
         return time.perf_counter()
 
-    gpkg = _manifest_path(args.reference, f"isea3h_{resolution}")
-    level3 = _manifest_path(args.reference, "wgsrpd_level3")
-    land = _manifest_path(args.reference, "natural_earth_land")
+    gpkg = manifest_path(args.reference, f"isea3h_{resolution}")
+    level3 = manifest_path(args.reference, "wgsrpd_level3")
+    land = manifest_path(args.reference, "natural_earth_land")
     log.info(f"resolution {resolution} (from {args.counts}), configuration {args.config}, grid {gpkg}, regions {level3}, land {land}")
     log.info(f"runs {args.runs}, base {BASE}, {args.rotations} rotations, seed {args.seed}")
 
     t = time.perf_counter()
-    configs, _ = load_configs(args.configs)
-    if args.config not in configs:
-        raise SystemExit(f"FAILED {args.configs} has no configuration {args.config}")
-    options = asdict(configs[args.config])
     try:
-        runs = {run: read_run(root / run / args.config, options) for run in args.runs}
+        runs = {run: read_run(root / run, args.config, args.configs) for run in args.runs}
     except (ValueError, FileNotFoundError) as error:
         raise SystemExit(f"FAILED {error}") from error
     k = common_k({run: r["candidates"] for run, r in runs.items()}, {run: r["k"] for run, r in runs.items()})

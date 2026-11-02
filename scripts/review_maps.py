@@ -3,7 +3,8 @@
 `uv run python -I scripts/review_maps.py --counts data/gbif/<key>`
 
 Reads the select stage of one configuration (`--config`, default `mt080`) of the headline run (`--run`, default `native_only`) and of the base
-run (`--base`, default `off`) in `results/explore/res<r>/`, at the resolution of the counts' `_COMPLETE` marker; the grid, the land and the TDWG
+run (`--base`, default `off`) in `results/explore/res<r>/<run>/<config>/select/`, with `explore.read_selected` (which refuses a result that is not
+current), at the resolution of the counts' `_COMPLETE` marker; the grid, the land and the TDWG
 level 3 regions come from the references' manifest. Writes to `res<r>/review/`, with `run.log` and its timings:
 
 - `k<k>.png` and `.gpkg` (`hexmaps.plot_parts`) for the selected k and the candidates either side, with sub-realm outlines, imputed parts
@@ -23,11 +24,9 @@ Half A only: it reads the explore runs' outputs, which are half A's, and loads n
 """
 
 import argparse
-import json
 import logging
 import sys
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 import geopandas as gpd
@@ -36,9 +35,8 @@ import shapely
 
 from realms.boundaries import boundary, edge_adjacency, edge_lengths
 from realms.candidates import apply_size_floor, merge_sequence
-from realms.circularity import attribute, centre_regions, check_select_stamp
-from realms.cluster import Partition
-from realms.explore import UNITS, _manifest_path, _part_rows, assigned_only, load_configs, network_matrix, peak_gb, read_light_grid, read_stamp, read_units
+from realms.circularity import attribute, centre_regions
+from realms.explore import UNITS, assigned_only, manifest_path, network_matrix, part_rows, peak_gb, read_light_grid, read_selected, read_units
 from realms.grid import read_centres
 from realms.hexmaps import part_geometries, plot_parts
 from realms.natives import TDWG_LEVEL3_CODE
@@ -64,26 +62,6 @@ from realms.units import TDWG_LEVEL1, TDWG_LEVEL1_CODE
 
 log = logging.getLogger("review")
 REGION_VIEW = {"Northern America": ((-180.0, 12.0, -10.0, 84.0), "+proj=laea +lat_0=50 +lon_0=-95 +datum=WGS84")}
-
-
-def read_select(directory: Path, options: dict) -> dict:
-    """The select stage of a configuration, checked: its stamp, selected k, parts, candidates and selection table."""
-    stamp = read_stamp(directory, "stage-select")
-    check_select_stamp(stamp, options, str(directory))
-    chosen = json.loads((directory / "selected.json").read_text())
-    if chosen.get("degenerate"):
-        raise ValueError(f"{directory} is degenerate: {chosen}")
-    parts = pl.read_parquet(directory / "parts.parquet")
-    flagged = parts.filter(pl.col("selected"))["k"].unique().to_list()
-    if flagged != [chosen["k"]]:
-        raise ValueError(f"{directory}: selected.json says k={chosen['k']}, parts.parquet marks {flagged}")
-    units_hash = read_stamp(directory.parent / UNITS).get("hash")
-    if stamp["inputs"]["units"] != units_hash:
-        raise ValueError(f"{directory}: the select stamp is of units {stamp['inputs']['units']}, the units stage is {units_hash}")
-    return {
-        "stamp": stamp, "k": chosen["k"], "fell_short": chosen["fell_short"], "parts": parts, "candidates": pl.read_parquet(directory / "candidates.parquet"),
-        "selection": pl.read_csv(directory / "selection.csv"), "merged": bool(stamp["inputs"].get("merge_duplicate_names")),
-    }
 
 
 def at(table: pl.DataFrame, k: int) -> pl.DataFrame:
@@ -133,29 +111,25 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
         log.info(f"{name}: {timings[name]} s, peak {peak_gb():.1f} GB")
         return time.perf_counter()
 
-    gpkg = _manifest_path(args.reference, f"isea3h_{resolution}")
-    land = _manifest_path(args.reference, "natural_earth_land")
-    level3 = _manifest_path(args.reference, "wgsrpd_level3")
+    gpkg = manifest_path(args.reference, f"isea3h_{resolution}")
+    land = manifest_path(args.reference, "natural_earth_land")
+    level3 = manifest_path(args.reference, "wgsrpd_level3")
     log.info(f"---- review: resolution {resolution} (from {args.counts}), run {args.run} against {args.base}, configuration {args.config}")
     log.info(f"grid {gpkg}, land {land}, regions {level3}")
-    configs, _ = load_configs(args.configs)
-    if args.config not in configs:
-        raise ValueError(f"{args.configs} has no configuration {args.config}")
-    options = asdict(configs[args.config])
     run_dir = root / args.run
-    head = read_select(run_dir / args.config, options)
-    base = read_select(root / args.base / args.config, options)
-    params = head["stamp"]["inputs"]["params"]
-    k_sel = head["k"]
-    ks = [k for k in (k_sel - 1, k_sel, k_sel + 1) if k in set(head["parts"]["k"].to_list())]
-    log.info(f"{args.run}: selected k={k_sel} (fell short: {head['fell_short']}), candidates k={sorted(head['parts']['k'].unique())}; drawn k={ks}")
-    log.info(f"{args.base}: selected k={base['k']} (fell short: {base['fell_short']})")
+    head = read_selected(run_dir, args.config, args.configs)
+    base = read_selected(root / args.base, args.config, args.configs)
+    params = head.stamp["inputs"]["params"]
+    k_sel = head.k
+    ks = [k for k in (k_sel - 1, k_sel, k_sel + 1) if k in set(head.parts["k"].to_list())]
+    log.info(f"{args.run}: selected k={k_sel} (fell short: {head.fell_short}), candidates k={sorted(head.parts['k'].unique())}; drawn k={ks}")
+    log.info(f"{args.base}: selected k={base.k} (fell short: {base.fell_short})")
     units = read_units(run_dir)
     cells = pl.read_parquet(run_dir / UNITS / "cells.parquet")
     areas = part_areas(cells)
     t = lap("read the runs", time.perf_counter())
 
-    wanted = set(head["parts"]["part"]) | set(base["parts"]["part"])
+    wanted = set(head.parts["part"]) | set(base.parts["part"])
     geoms = part_geometries(gpkg, land, wanted)
     edges = edge_lengths(gpkg)
     adjacency = part_neighbours(wanted, edge_adjacency(edges))
@@ -165,7 +139,7 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
     t = lap("part geometries and adjacency", t)
 
     # ---- the selected map and its neighbours, one colour per realm across them
-    labels = {k: dict(at(head["parts"], k).select("part", "realm").iter_rows()) for k in ks}
+    labels = {k: dict(at(head.parts, k).select("part", "realm").iter_rows()) for k in ks}
     neighbours = {k: realm_neighbours(labels[k], adjacency) for k in ks}
     colours = {k_sel: distinct_colours(labels[k_sel], areas)}
     for k in ks:
@@ -173,8 +147,8 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
             colours[k] = match_colours(labels[k_sel], colours[k_sel], labels[k], areas, neighbours[k])
     for k in ks:
         log.info(f"k={k} colours: " + ", ".join(f"{r} {c}" for r, c in sorted(colours[k].items())))
-        rows = at(head["parts"], k)
-        subs = dict(at(head["candidates"], k).filter(pl.col("sub_realm").is_not_null()).select("unit", "sub_realm").iter_rows())
+        rows = at(head.parts, k)
+        subs = dict(at(head.candidates, k).filter(pl.col("sub_realm").is_not_null()).select("unit", "sub_realm").iter_rows())
         sub_realms = {p: subs[u] for p, u in rows.select("part", "unit").iter_rows() if u in subs}
         imputed = set(rows.filter(pl.col("imputed"))["part"])
         tag = "selected" if k == k_sel else "candidate"
@@ -183,12 +157,8 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
         t = lap(f"map k={k}", t)
 
     # ---- the matrix the select stage scored, the floor checked against the candidates, and the maps without the floor
-    ct = network_matrix(run_dir, units, head["merged"])
-    table = pl.read_parquet(run_dir / args.config / "partition.parquet")
-    partition = Partition(
-        paths={u: (top, leaf) for u, leaf, top in table.filter(pl.col("leaf").is_not_null()).iter_rows()},
-        unassigned=sorted(table.filter(pl.col("leaf").is_null())["unit"].to_list()),
-    )
+    ct = network_matrix(run_dir, units, head.merged)
+    partition = head.partition
     scored = assigned_only(partition, ct, units)
     del ct
     log.info(f"matrix: {len(scored.ct.cells)} units, {len(scored.ct.taxa)} taxa, {len(partition.unassigned)} unassigned; {len(set(partition.leaf_labels().values()))} modules")
@@ -202,10 +172,10 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
     floored, sub_of = apply_size_floor(resolved, scored.areas, scored.ct, params["floor_km2"])
     again = merge_sequence(floored, scored.ct, params["k_max"], params["k_min"])
     for k, found in again.items():
-        direct = dict(at(head["candidates"], k).select("unit", "realm").iter_rows())
+        direct = dict(at(head.candidates, k).select("unit", "realm").iter_rows())
         if found != direct:
             raise ValueError(f"the modules floored again do not give candidates.parquet at k={k}")
-    direct_subs = dict(head["candidates"].filter((pl.col("k") == k_sel) & pl.col("sub_realm").is_not_null()).select("unit", "sub_realm").iter_rows())
+    direct_subs = dict(head.candidates.filter((pl.col("k") == k_sel) & pl.col("sub_realm").is_not_null()).select("unit", "sub_realm").iter_rows())
     if direct_subs != {u: m for u, m in resolved.items() if m in sub_of}:
         raise ValueError("the modules floored again do not give the sub-realms of candidates.parquet")
     log.info(f"check: the resolved modules, floored at {params['floor_km2']:,.0f} km2 and merged, give candidates.parquet at k={sorted(again)} and its {len(sub_of)} sub-realms")
@@ -213,7 +183,7 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
 
     no_floor_parts: pl.DataFrame | None = None
     if no_floor:
-        frames = _part_rows(no_floor, units, read_light_grid(run_dir), None)
+        frames = part_rows(no_floor, units, read_light_grid(run_dir), None)
         no_floor_parts = pl.concat(frames).drop("selected")
         no_floor_parts.write_parquet(out / "no_floor_parts.parquet")
         cells_sorted = sorted(resolved)
@@ -246,12 +216,12 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
             t = lap(f"map k={k} without the floor", t)
 
     # ---- the per-realm tables at the selected k
-    unit_labels = dict(at(head["candidates"], k_sel).select("unit", "realm").iter_rows())
+    unit_labels = dict(at(head.candidates, k_sel).select("unit", "realm").iter_rows())
     endemic = endemic_species(unit_labels, scored.ct, args.tolerance)
     t = lap("endemic species", t)
-    realms = realm_table(at(head["parts"], k_sel), at(head["candidates"], k_sel), areas, scored.areas, endemic)
+    realms = realm_table(at(head.parts, k_sel), at(head.candidates, k_sel), areas, scored.areas, endemic)
     realms.write_csv(out / f"realms-k{k_sel}.csv")
-    subs = sub_realm_table(at(head["candidates"], k_sel), scored.areas)
+    subs = sub_realm_table(at(head.candidates, k_sel), scored.areas)
     subs.write_csv(out / f"sub_realms-k{k_sel}.csv")
     total = realms["area_km2"].sum()
     log.info(f"k={k_sel}: {realms.height} realms, {total:,.0f} km2 of parts ({realms['land_km2'].sum():,.0f} land, {realms['sea_km2'].sum():,.0f} sea); {subs.height} sub-realms")
@@ -270,9 +240,9 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
 
     summary = []
     for k in ks:
-        row = at(head["selection"], k).row(0, named=True)
+        row = at(head.selection, k).row(0, named=True)
         summary.append({"k": k, "floor": "with the size floor", "realms": len(set(labels[k].values())), "stability": row["stability"], "excess": row["excess"],
-                        "selected": k == k_sel, **sizes_of(at(head["parts"], k), dict(at(head["candidates"], k).select("unit", "realm").iter_rows()))})
+                        "selected": k == k_sel, **sizes_of(at(head.parts, k), dict(at(head.candidates, k).select("unit", "realm").iter_rows()))})
     if no_floor_parts is not None:
         for k in sorted(no_floor):
             summary.append({"k": k, "floor": "without the size floor", "realms": len(set(no_floor[k].values())), "stability": None, "excess": None,
@@ -283,20 +253,20 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
     summary_table.write_csv(out / "summary.csv")
 
     # ---- each realm of the selected map, its sub-realms and imputed parts
-    top = max(head["candidates"]["k"].to_list())
-    above = dict(at(head["candidates"], top).select("unit", "realm").iter_rows())
+    top = max(head.candidates["k"].to_list())
+    above = dict(at(head.candidates, top).select("unit", "realm").iter_rows())
     for r in realms["realm"].to_list():
         row = realms.filter(pl.col("realm") == r).row(0, named=True)
         title = (f"Realm {r} of k = {k_sel} ({args.run}, {args.config}): {row['area_km2'] / 1e6:.1f}M km2 of parts, imputed included "
                  f"({row['unit_km2'] / 1e6:.1f}M km2 of units), {row['units']:,} units, {row['sub_realms']} sub-realms, {row['imputed_parts']:,} imputed parts")
-        drawn = plot_realm(geoms, at(head["parts"], k_sel), at(head["candidates"], k_sel), r, colours[k_sel][r], out / f"realm-{r}-k{k_sel}", title, floored=above)
+        drawn = plot_realm(geoms, at(head.parts, k_sel), at(head.candidates, k_sel), r, colours[k_sel][r], out / f"realm-{r}-k{k_sel}", title, floored=above)
         log.info(f"realm {r} panel: {drawn}")
     t = lap("realm panels", t)
 
     # ---- the land boundary of the run against the base, in one region
     regions = gpd.read_file(level3).sort_values(TDWG_LEVEL3_CODE, kind="stable")
     region_of = centre_regions(read_centres(gpkg), regions)
-    base_labels = dict(at(base["parts"], k_sel).select("part", "realm").iter_rows())
+    base_labels = dict(at(base.parts, k_sel).select("part", "realm").iter_rows())
     changes = attribute(edge_changes(boundary(base_labels, "land", edges), boundary(labels[k_sel], "land", edges)), region_of)
     here = changes.filter(pl.col("region") == args.region)
     slug = args.region.lower().replace(" ", "-")
