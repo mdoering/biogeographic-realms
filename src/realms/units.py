@@ -44,10 +44,11 @@ _GROUPS = {
 MAJOR_GROUPS = {group: major for major, groups in _GROUPS.items() for group in groups}
 NOT_COUNTED = ("algae", "protists", "bacteria", "archaea", "viruses", "eukaryotes", "pseudofungi", "prokaryotes")
 CHORDATES = "chordates"  # COL's one `taxGroup` for the chordates, which `CHORDATE_CLASSES` splits
-# The classes of the 92,927 chordates of COL release 315557 (20 of them, and some chordates with no class), as the extended export gives them. COL's
-# `taxGroup` has one group for the chordates, but the gate needs land vertebrates, fish and the invertebrate chordates (tunicates and lancelets)
-# apart. A chordate is a species of phylum Chordata whatever its group: 149 are grouped as `animals`, which would make fish and reptiles into
-# other invertebrates. A chordate of a class in none of these lists, or of no class, is not counted.
+# The 19 classes of the 93,076 chordates of COL release 315557, as the extended export gives them: 92,927 have the taxGroup `chordates` and 149
+# have `animals`, and 633 of the 93,076 have no class. COL's `taxGroup` has one group for the chordates, but the gate needs land vertebrates,
+# fish and the invertebrate chordates (tunicates and lancelets) apart. A chordate is a species of phylum Chordata whatever its group, as the 149
+# grouped as `animals` would otherwise make fish and reptiles into other invertebrates. A chordate of no class is not counted, and one of a class
+# in none of these lists is not counted either, and `major_groups` warns of it.
 CHORDATE_CLASSES = {
     "land vertebrates": ("Mammalia", "Aves", "Reptilia", "Amphibia"),
     "fish": (
@@ -197,7 +198,8 @@ def major_groups(taxa: pl.DataFrame, groups: pl.DataFrame) -> pl.DataFrame:
 
     `taxa` is `References.taxa` (it needs `species_id`, `phylum` and `class`) and `groups` is `References.groups` (`species_id`, `tax_group`).
     A species of no group, or of a group that is not counted (algae, protists, bacteria...), is left out, as is a chordate whose class is in
-    none of `CHORDATE_CLASSES`. A `taxGroup` that is in neither list is an error rather than a species quietly not counted.
+    none of `CHORDATE_CLASSES`, which it warns of (a chordate with no class at all is expected, 633 in release 315557, and is not warned of).
+    A `taxGroup` that is in neither list is an error rather than a species quietly not counted.
     """
     joined = taxa.select("species_id", "phylum", "class").join(groups.select("species_id", "tax_group"), on="species_id", how="left")
     known = {*MAJOR_GROUPS, *NOT_COUNTED, CHORDATES}
@@ -205,6 +207,11 @@ def major_groups(taxa: pl.DataFrame, groups: pl.DataFrame) -> pl.DataFrame:
     if unknown:
         raise ValueError(f"COL taxGroups that are not in the major groups: {unknown}, add them to units.MAJOR_GROUPS or NOT_COUNTED")
     chordate = (pl.col("tax_group") == CHORDATES) | (pl.col("phylum") == "Chordata")
+    unmapped = joined.filter(chordate, pl.col("class").is_not_null(), ~pl.col("class").is_in(list(CHORDATE_MAJOR)))
+    if unmapped.height:
+        classes = unmapped.group_by("class").len().sort("len", "class", descending=[True, False])
+        shown = ", ".join(f"{c} ({n})" for c, n in classes.head(5).iter_rows())
+        log.warning("%d chordate species are of %d classes that are in no CHORDATE_CLASSES list and are not counted: %s", unmapped.height, classes.height, shown)
     return (
         joined.with_columns(
             pl.when(chordate)
@@ -218,12 +225,19 @@ def major_groups(taxa: pl.DataFrame, groups: pl.DataFrame) -> pl.DataFrame:
 
 
 def _coarse_cells(grid: Grid, coarse: Grid, coarse_gpkg: Path | None, cells: list[str]) -> dict[str, str]:
-    """For each of `cells` of the fine grid, the coarse cell that holds its centre."""
+    """For each of `cells` of the fine grid, the coarse cell that holds its centre.
+
+    A centre on an edge between coarse cells, or at a vertex shared by three, goes to the lowest cell id as text (so "10" is before "9", and a
+    negative id before a positive one), because the coarse cells are sorted by that before `locate`, which takes the lowest index. That settles
+    only exact ties. At resolution 7 and 5 about 12.9% of the centres (2,826 of 21,872) lie on a coarse edge or vertex, since the res-6 centres sit
+    on the vertices of res 5, and for those the noise in the file's own vertices (about 1e-8 degrees) can decide which polygon contains them, so
+    the assignment of a centre there is stable but not meaningful. A centre in no polygon takes the nearest one.
+    """
     if not cells:
         return {}
     shapes = _cell_shapes(coarse, _gpkg(coarse, coarse_gpkg))
     ids = coarse.cells["cell"].to_numpy()
-    order = np.argsort(ids, kind="stable")  # so that a centre on an edge between cells goes to the lowest id
+    order = np.argsort(ids, kind="stable")  # by id as text, so that a centre on an edge between cells goes to the lowest id as text
     centres = grid.cells.filter(pl.col("cell").is_in(cells)).sort("cell")
     found = locate(centres["lon"].to_numpy(), centres["lat"].to_numpy(), shapes[order])
     return dict(zip(centres["cell"].to_list(), ids[order][found].tolist(), strict=True))
@@ -311,7 +325,7 @@ def impute(labels: Mapping[str, int], units: Units, grid: Grid) -> tuple[dict[st
     `labels` gives the realm of each unit of the network (and of no other). A part of a unit has its unit's realm. An excluded part gets the
     majority realm of its `units.settings.impute_k` nearest parts of the network of the same kind, nearest by great-circle distance between
     the cells' centres, and every part of a coarse unit is one such part with its own cell's centre. A tie of votes goes to the lowest realm
-    id, and a tie in distance at the edge of the k to the lower part id. The set is the parts that were imputed.
+    id (a number), and a tie in distance at the edge of the k to the lower part id as text. The set is the parts that were imputed.
     """
     network = set(units.areas)
     if set(labels) != network:

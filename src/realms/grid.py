@@ -227,8 +227,9 @@ def locate(lon: np.ndarray, lat: np.ndarray, shapes: np.ndarray) -> np.ndarray:
     The shapes are drawn as `load_grid` draws cells, in the 360 degrees around their own centre, so one that straddles the antimeridian
     may lie 360 degrees from a point that is in it: each point is tried a turn of longitude to either side as well. A point on the edge
     between shapes, or at a vertex shared by three, goes to the one with the lowest index, so sort the shapes by the key that settles
-    such a point. Where no shape holds a point the nearest is found in degrees, which is only meant for points a hair outside, or on a
-    coastline that another scheme draws elsewhere.
+    such a point (`network_units` sorts its coarse cells by id as text, so the lowest id as text wins). That only settles exact ties, and a
+    point that is only almost on an edge goes to whichever polygon the noise in its vertices puts it in. Where no shape holds a point the
+    nearest is found in degrees, which is only meant for points a hair outside, or on a coastline that another scheme draws elsewhere.
     """
     lon, lat = np.asarray(lon, dtype=float), np.asarray(lat, dtype=float)
     if not len(shapes):

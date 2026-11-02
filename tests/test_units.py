@@ -1,10 +1,12 @@
+import logging
+
 import geopandas as gpd
 import numpy as np
 import polars as pl
 import pytest
-from shapely import MultiPolygon, box
+from shapely import MultiPolygon, Polygon, box
 
-from realms.grid import Grid, cell_of, locate
+from realms.grid import Grid, cell_of, locate, parts
 from realms.units import (
     MAJOR_GROUPS,
     Units,
@@ -27,13 +29,13 @@ LAND, SEA = 100.0, 40.0
 SMALL = UnitSettings(min_coverage=0.5, min_species=3, min_group_species=1, min_groups=1, impute_k=2)
 
 
-def fine_grid(lons=None, resolution=7) -> Grid:
+def fine_grid(lons=None, resolution=7, lats=None) -> Grid:
     lons = lons or FINE
     ids = list(lons)
     cells = pl.DataFrame(
         {
             "cell": ids,
-            "lat": [0.0] * len(ids),
+            "lat": [(lats or {}).get(c, 0.0) for c in ids],
             "lon": [lons[c] for c in ids],
             "area_km2": [LAND + SEA] * len(ids),
             "land_km2": [LAND] * len(ids),
@@ -121,6 +123,29 @@ def test_good_turing_coverage():
     assert (c["records"], c["species"], c["singletons"], c["coverage"], c["kind"]) == (0, 0, 0, 0.0, "sea")
 
 
+def test_a_part_with_enough_species_but_low_coverage_is_sparse(tmp_path):
+    # four species, which passes `min_species` of 3, but three of them are singletons: coverage is 1 - 3 / 5 = 0.4
+    low = {"p1": 1, "p2": 1, "p3": 1, "p4": 2}
+    assert part_stats(presence(("101:land", low)), MAJOR).row(0, named=True)["coverage"] == pytest.approx(0.4)
+    units = run(tmp_path, ("101:land", low), ("103:land", good("p1", "p2", "p3")))
+    assert units.members == {"103:land": "103:land"}
+    assert units.excluded.select("part", "reason", "tried_unit").rows() == [("101:land", "sparse", "r5:C1:land")]
+    # it is the coverage and not the species count that did it, which the unit's own row shows
+    row = units.stats.filter(pl.col("unit") == "r5:C1:land").row(0, named=True)
+    assert row["species"] >= SMALL.min_species and row["coverage"] < SMALL.min_coverage and row["status"] == "sparse"
+
+
+def test_a_part_at_exactly_the_minimum_coverage_is_not_sparse(tmp_path):
+    # three species, two of them singletons, in 4 records: coverage is 1 - 2 / 4 = 0.5, and the criterion is "under" 0.5
+    edge = {"p1": 1, "p2": 1, "p3": 2}
+    assert part_stats(presence(("101:land", edge)), MAJOR).row(0, named=True)["coverage"] == 0.5
+    units = run(tmp_path, ("101:land", edge))
+    assert units.members == {"101:land": "101:land"} and units.excluded.is_empty()
+    # one record fewer in the last species and it is under
+    units = run(tmp_path, ("101:land", {"p1": 1, "p2": 1, "p3": 1}))
+    assert units.members == {} and units.excluded["reason"].to_list() == ["sparse"]
+
+
 def test_clean_records_are_n_less_human_text_when_there_is_no_records_column():
     rows = pl.DataFrame(
         {"species_id": ["p1", "p2", "p3"], "part": ["a:land"] * 3, "n": [3, 2, 4], "n_human_text": [2, 0, 4]}
@@ -135,6 +160,15 @@ def test_groups_sampled_counts_the_major_groups_with_enough_species():
     settings = UnitSettings(min_group_species=2)
     assert part_stats(rows, MAJOR, settings).row(0, named=True)["groups_sampled"] == 2  # plants and insects, not the one vertebrate
     assert part_stats(rows, MAJOR, UnitSettings(min_group_species=1)).row(0, named=True)["groups_sampled"] == 3
+
+
+def test_a_species_with_no_major_group_still_counts_as_a_species_and_is_in_the_presence(tmp_path):
+    # x1 is in no group of MAJOR. It is the third species, which is what lets the part past `min_species`
+    units = run(tmp_path, ("101:land", {**good("p1", "p2"), "x1": 5}))
+    assert units.members == {"101:land": "101:land"}
+    row = units.stats.row(0, named=True)
+    assert (row["species"], row["groups_sampled"], row["records"]) == (3, 1, 15)
+    assert units.presence.filter(pl.col("species_id") == "x1").rows() == [("x1", "101:land", 5)]
 
 
 # ------------------------------------------------------------------ coarsening
@@ -209,6 +243,11 @@ def test_fine_and_coarse_ids_never_collide(tmp_path):
     # read as a part id, a coarse unit has a "cell" that is not a cell of the fine grid
     parsed = pl.select(cell_of(pl.lit(coarse))).item()
     assert parsed == "r5:C1" and parsed not in fine_grid().adjacency
+    with pytest.raises(ValueError, match="r5:C1"):
+        parts(fine_grid(), [coarse])  # a coarse id is not a part id of the fine grid
+    coarse_grid_, gpkg = two_coarse(tmp_path)
+    with pytest.raises(ValueError, match="r5:C1"):  # nor can one be in the presence
+        network_units(presence((coarse, {"p1": 1})), fine_grid(), coarse_grid_, MAJOR, SMALL, coarse_gpkg=gpkg)
     # the resolution is the setting's, never a literal
     assert coarse_id(4, "C1", "sea") == "r4:C1:sea"
 
@@ -219,7 +258,6 @@ def test_fine_and_coarse_ids_never_collide(tmp_path):
 
     # a fine cell whose name could be read as a coarse unit is refused, so the two can never meet
     clash = fine_grid({"r5:C1": 0.0, "102": 1.0})
-    coarse_grid_, gpkg = two_coarse(tmp_path)
     with pytest.raises(ValueError, match="r5:C1"):
         network_units(presence(("r5:C1:land", {"p1": 1})), clash, coarse_grid_, MAJOR, SMALL, coarse_gpkg=gpkg)
 
@@ -285,6 +323,40 @@ def test_a_cell_across_the_antimeridian_finds_its_resolution_5_cell(tmp_path):
         "202:land": "r5:A:land",  # at -175, on the other side of the line from where A's polygon is drawn
         "203:land": "r5:B:land",
         "204:land": "r5:A:land",
+    }
+
+
+@pytest.mark.parametrize("listed", [["9", "10"], ["10", "9"]])
+def test_a_centre_on_the_edge_between_coarse_cells_goes_to_the_lowest_id_as_text(tmp_path, listed):
+    # the cells share the edge at longitude 2.5. "10" is before "9" as text, and that is the order, whichever way the file lists them
+    squares = {"9": ("9", 1.0, 0.0, box(-0.5, -1, 2.5, 1)), "10": ("10", 4.0, 0.0, box(2.5, -1, 5.5, 1))}
+    coarse, gpkg = coarse_grid(tmp_path, [squares[c] for c in listed])
+    grid = fine_grid({"301": 2.5, "302": 1.0, "303": 4.0})
+    units = network_units(presence(*((f"{c}:land", {"p1": 1}) for c in grid.adjacency)), grid, coarse, MAJOR, SMALL, coarse_gpkg=gpkg)
+    assert dict(units.excluded.select("part", "tried_unit").iter_rows()) == {"301:land": "r5:10:land", "302:land": "r5:9:land", "303:land": "r5:10:land"}
+
+
+# The two cells either side of the north pole at resolution 5, as the file draws them (see test_grid): both have an edge along 88.8 N from
+# lon -168.75 to 11.25 that really runs over the pole, and the second is drawn the long way round, so it crosses itself.
+V0 = (-168.75, 88.7955)
+POLE_A = Polygon([V0, (-124.608, 86.6306), (-93.283, 85.1627), (-64.217, 85.1627), (-32.892, 86.6306), (11.25, 88.7955)])
+POLE_B = Polygon([V0, (11.25, 88.7955), (55.392, 86.6306), (86.717, 85.1627), (115.783, 85.1627), (147.108, 86.6306)])
+
+
+def test_a_cell_near_the_pole_finds_its_resolution_5_cell(tmp_path):
+    coarse, gpkg = coarse_grid(tmp_path, [("A", -78.75, 87.655, POLE_A), ("B", 101.25, 87.655, POLE_B)])
+    grid = fine_grid(
+        {"401": -78.75, "402": 101.25, "403": -170.0, "404": 5.0, "405": 20.0},
+        lats={"401": 89.5, "402": 89.5, "403": 89.0, "404": 89.9, "405": 89.9},
+    )
+    units = network_units(presence(*((f"{c}:land", {"p1": 1}) for c in grid.adjacency)), grid, coarse, MAJOR, SMALL, coarse_gpkg=gpkg)
+    # 403 is both over the pole and across the antimeridian from where B is drawn, and 404 and 405 are either side of the pole edge
+    assert dict(units.excluded.select("part", "tried_unit").iter_rows()) == {
+        "401:land": "r5:A:land",
+        "402:land": "r5:B:land",
+        "403:land": "r5:B:land",
+        "404:land": "r5:A:land",
+        "405:land": "r5:B:land",
     }
 
 
@@ -453,6 +525,20 @@ def test_major_groups_follow_the_tax_group_and_the_class_of_chordates():
         "lamprey": "fish",
         "odd fish": "fish",
     }  # a chordate of no class, algae and a species with no group are not counted
+
+
+def test_a_chordate_class_that_is_in_no_list_is_warned_of_and_a_missing_class_is_not(caplog):
+    t = taxa([("cod", "Chordata", "Teleostei"), ("new1", "Chordata", "Novaclass"), ("new2", "Chordata", "Novaclass"), ("odd", "Chordata", "Otherclass"), ("none", "Chordata", None)])
+    g = pl.DataFrame({"species_id": ["cod", "new1", "new2", "odd", "none"], "tax_group": ["chordates"] * 5})
+    with caplog.at_level(logging.WARNING, logger="realms.units"):
+        found = dict(major_groups(t, g).iter_rows())
+    assert found == {"cod": "fish"}
+    (warning,) = [r.getMessage() for r in caplog.records]
+    assert warning.startswith("3 chordate species are of 2 classes") and "Novaclass (2)" in warning and "Otherclass (1)" in warning
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="realms.units"):
+        major_groups(t.head(1), g.head(1))
+    assert not caplog.records
 
 
 def test_every_tax_group_in_the_brief_maps_and_an_unknown_one_is_refused():
