@@ -1,8 +1,13 @@
 import numpy as np
+import polars as pl
 import pytest
 from scipy.sparse import csr_matrix
+from scipy.spatial.distance import squareform
+from sklearn.metrics import v_measure_score
 
-from realms.betasim import anosim_r, beta_sim, hierarchical_labels
+from realms.betasim import Consensus, anosim_r, beta_sim, consensus, hierarchical_labels, rank_beta_sim
+from realms.matrix import cell_taxa
+from realms.synth import planted_network
 
 
 def test_beta_sim_nested_is_zero():
@@ -66,3 +71,146 @@ def test_anosim_matches_vegan_hand_example():
 def test_anosim_ties_use_average_ranks():
     # all equal: every rank is 3.5, so no difference between within and between
     assert anosim_r(np.ones(6), LABELS) == pytest.approx(0.0)
+
+
+def ranked(rows, lineage):
+    """The cell-taxon matrix of `(cell, species)` rows, where `lineage` gives each species' `(genus, family)`."""
+    presence = pl.DataFrame(rows, schema={"cell": pl.String, "species_id": pl.String}, orient="row")
+    taxa = pl.DataFrame(
+        [(s, g, f) for s, (g, f) in lineage.items()],
+        schema={"species_id": pl.String, "genus_id": pl.String, "family_id": pl.String},
+        orient="row",
+    )
+    return cell_taxa(presence, taxa)
+
+
+LINEAGE = {"s1": ("g1", "f1"), "s2": ("g1", "f1"), "s3": ("g2", "f1"), "s4": ("g3", "f2")}
+ROWS = [("A", "s1"), ("A", "s2"), ("B", "s1"), ("B", "s3"), ("C", "s4")]
+
+
+def test_rank_beta_sim_is_the_mean_of_the_three_ranks():
+    # A holds s1 s2 / g1 / f1, B holds s1 s3 / g1 g2 / f1, C holds s4 / g3 / f2
+    # A-B: species 1 - 1/2, genus 1 - 1/1 (A's g1 is within B's), family 1 - 1/1; A-C and B-C are disjoint at every rank
+    d = rank_beta_sim(ranked(ROWS, LINEAGE), ["A", "B", "C"])
+    assert d.dtype == np.float32 and d.shape == (3, 3)
+    assert d[0, 1] == pytest.approx((0.5 + 0.0 + 0.0) / 3)
+    assert d[0, 2] == d[1, 2] == 1.0
+    assert np.array_equal(d, d.T) and not d.diagonal().any()
+
+
+def test_rank_beta_sim_matches_beta_sim_rank_by_rank():
+    presence, taxa, _ = planted_network(n_realms=3, cells_per_realm=8, endemic_species=15, widespread_species=5)
+    ct = cell_taxa(presence, taxa)
+    d = rank_beta_sim(ct, ct.cells)
+    each = [squareform(beta_sim(ct.select([r]).x), checks=False) for r in ("species", "genus", "family")]
+    assert d == pytest.approx(sum(each) / 3, abs=1e-6)
+
+
+def test_rank_beta_sim_follows_the_units_asked_for():
+    ct = ranked(ROWS, LINEAGE)
+    d = rank_beta_sim(ct, ["A", "B", "C"])
+    assert np.array_equal(rank_beta_sim(ct, ["C", "A", "B"]), d[np.ix_([2, 0, 1], [2, 0, 1])])
+    assert np.array_equal(rank_beta_sim(ct, ["B", "A"]), d[np.ix_([1, 0], [1, 0])])
+
+
+def test_rank_beta_sim_unknown_unit_raises():
+    with pytest.raises(ValueError, match="Z"):
+        rank_beta_sim(ranked(ROWS, LINEAGE), ["A", "Z"])
+
+
+def test_rank_beta_sim_unit_without_taxa_at_a_rank_is_fully_dissimilar():
+    # D has a species but its genus and family are unknown, so at those ranks D is a 0/0 against everything: distance 1 there
+    lineage = {**LINEAGE, "s5": (None, None)}
+    d = rank_beta_sim(ranked(ROWS + [("D", "s5"), ("E", "s5")], lineage), ["A", "B", "D", "E"])
+    assert d[0, 2] == 1.0
+    assert d[2, 3] == pytest.approx(2 / 3)  # D and E share their one species, so 0 there and 1 at the two empty ranks
+    assert not d.diagonal().any()
+
+
+def test_rank_beta_sim_needs_all_three_ranks():
+    species_only = cell_taxa(pl.DataFrame({"cell": ["A", "B"], "species_id": ["s1", "s1"]}), None)
+    with pytest.raises(ValueError, match="genus"):
+        rank_beta_sim(species_only, ["A", "B"])
+
+
+def planted_distances(**kwargs):
+    presence, taxa, truth = planted_network(**kwargs)
+    ct = cell_taxa(presence, taxa)
+    return rank_beta_sim(ct, ct.cells), [truth[c] for c in ct.cells]
+
+
+@pytest.mark.parametrize("method", ["ward", "average"])
+def test_consensus_recovers_planted_realms(method):
+    dist, truth = planted_distances(n_realms=4, cells_per_realm=30, endemic_species=60, widespread_species=10)
+    result = consensus(dist, method, [4], shuffles=8)
+    assert isinstance(result[4], Consensus)
+    assert v_measure_score(truth, result[4].labels) >= 0.95
+    assert len(set(result[4].labels.tolist())) == 4
+
+
+@pytest.mark.parametrize("method", ["ward", "average"])
+def test_consensus_does_not_depend_on_the_input_order(method):
+    dist, _ = planted_distances(n_realms=4, cells_per_realm=30, endemic_species=60, widespread_species=10)
+    order = np.random.default_rng(7).permutation(len(dist))
+    straight = consensus(dist, method, [3, 4], shuffles=8)
+    moved = consensus(dist[np.ix_(order, order)], method, [3, 4], shuffles=8)
+    for k in (3, 4):
+        back = np.empty(len(order), dtype=int)
+        back[order] = moved[k].labels
+        assert v_measure_score(straight[k].labels, back) == pytest.approx(1.0)
+
+
+def blocks(sizes, within=0.1, between=0.9, seed=3):
+    """Distances that are small inside each block and large between them, with no ties among the within-block pairs."""
+    rng = np.random.default_rng(seed)
+    block = np.repeat(np.arange(len(sizes)), sizes)
+    dist = np.where(block[:, None] == block[None, :], within, between) + rng.random((len(block), len(block))) * 0.01
+    dist = np.triu(dist, 1)
+    dist = (dist + dist.T).astype(np.float32)
+    return dist, block
+
+
+@pytest.mark.parametrize("method", ["ward", "average"])
+def test_spread_is_one_when_every_shuffle_agrees(method):
+    dist, block = blocks([10, 15, 20])
+    result = consensus(dist, method, [3], shuffles=6)[3]
+    assert result.spread == pytest.approx(1.0)
+    assert v_measure_score(block, result.labels) == pytest.approx(1.0)
+
+
+def test_spread_drops_when_the_order_decides():
+    # every pair equally far: which units end up together is only the order they come in, so the shuffles disagree
+    dist = (1 - np.eye(40)).astype(np.float32)
+    assert consensus(dist, "ward", [4], shuffles=6)[4].spread < 0.9
+
+
+def test_consensus_labels_number_groups_by_first_appearance():
+    dist, _ = blocks([6, 6, 6])
+    order = np.random.default_rng(1).permutation(len(dist))
+    labels = consensus(dist[np.ix_(order, order)], "ward", [3], shuffles=4)[3].labels
+    assert labels.dtype.kind == "i"
+    assert labels[0] == 0
+    assert list(dict.fromkeys(labels.tolist())) == [0, 1, 2]
+
+
+def test_consensus_is_reproducible_and_seeded():
+    dist = np.random.default_rng(2).integers(0, 3, (60, 60)).astype(np.float32)  # three values, so the order decides much
+    dist = np.triu(dist, 1) + np.triu(dist, 1).T
+    a, b = consensus(dist, "ward", [3, 5], shuffles=5, seed=4), consensus(dist, "ward", [3, 5], shuffles=5, seed=4)
+    assert all(np.array_equal(a[k].labels, b[k].labels) and a[k].spread == b[k].spread for k in (3, 5))
+    assert list(a) == [3, 5] and all(a[k].k == k for k in a)
+    assert consensus(dist, "ward", [3], shuffles=5, seed=5)[3].spread != a[3].spread
+
+
+def test_consensus_refuses_what_it_cannot_do():
+    dist, _ = blocks([5, 5])
+    with pytest.raises(ValueError, match="method"):
+        consensus(dist, "single", [2])
+    with pytest.raises(ValueError, match="k"):
+        consensus(dist, "ward", [11])
+    with pytest.raises(ValueError, match="shuffles"):
+        consensus(dist, "ward", [2], shuffles=1)
+    with pytest.raises(ValueError, match="square"):
+        consensus(dist[:, :5], "ward", [2])
+    with pytest.raises(ValueError, match="symmetric"):
+        consensus(np.triu(dist), "ward", [2])
