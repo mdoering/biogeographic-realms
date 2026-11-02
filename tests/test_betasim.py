@@ -148,16 +148,78 @@ def test_consensus_recovers_planted_realms(method):
     assert len(set(result[4].labels.tolist())) == 4
 
 
+def tie_heavy(n=240, realms=6, pool=30, per=4, wide=2, wide_pool=100, seed=0):
+    """Beta-sim of cells that each hold `per` species of their realm's pool and `wide` of a shared pool, so most pairs tie at 1.
+
+    Returns the distances (88% of the pairs at 1 by default), the planted realm of each cell and the cell ids.
+    """
+    rng = np.random.default_rng(seed)
+    realm = np.repeat(np.arange(realms), n // realms)
+    rows, cols = [], []
+    for i in range(n):
+        held = np.concatenate([realm[i] * pool + rng.choice(pool, per, replace=False), realms * pool + rng.integers(0, wide_pool, wide)])
+        rows += [i] * len(held)
+        cols += held.tolist()
+    x = csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, realms * pool + wide_pool))
+    return squareform(beta_sim(x)).astype(np.float32), realm, [f"u{i:04d}" for i in range(n)]
+
+
+def together(labels):
+    return labels[:, None] == labels[None, :]
+
+
+def test_tie_heavy_matrix_makes_a_single_tree_depend_on_the_order():
+    # guards the order test below: on this matrix a single tree does change with the order, so a test that it doesn't would fail
+    dist, _, _ = tie_heavy(per=3, pool=60)
+    assert (dist[np.triu_indices(len(dist), 1)] == 1).mean() > 0.8
+    trees = []
+    for seed in range(5):
+        order = np.random.default_rng(seed).permutation(len(dist))
+        labels = hierarchical_labels(squareform(dist[np.ix_(order, order)], checks=False), "ward", 6)
+        back = np.empty(len(order), dtype=int)
+        back[order] = labels
+        trees.append(back)
+    assert min(v_measure_score(trees[0], other) for other in trees[1:]) < 0.99
+
+
 @pytest.mark.parametrize("method", ["ward", "average"])
 def test_consensus_does_not_depend_on_the_input_order(method):
-    dist, _ = planted_distances(n_realms=4, cells_per_realm=30, endemic_species=60, widespread_species=10)
-    order = np.random.default_rng(7).permutation(len(dist))
-    straight = consensus(dist, method, [3, 4], shuffles=8)
-    moved = consensus(dist[np.ix_(order, order)], method, [3, 4], shuffles=8)
-    for k in (3, 4):
-        back = np.empty(len(order), dtype=int)
-        back[order] = moved[k].labels
-        assert v_measure_score(straight[k].labels, back) == pytest.approx(1.0)
+    dist, _, ids = tie_heavy(per=3, pool=60)  # 94% of the pairs at 1, too many for the shuffles alone to settle the groups
+    straight = consensus(dist, method, [4, 6], shuffles=10, ids=ids)
+    for seed in range(3):
+        order = np.random.default_rng(seed).permutation(len(dist))
+        moved = consensus(dist[np.ix_(order, order)], method, [4, 6], shuffles=10, ids=[ids[i] for i in order])
+        for k in (4, 6):
+            back = np.empty(len(order), dtype=int)
+            back[order] = moved[k].labels
+            # exactly the same groups (the numbers differ, as they follow the first appearance in each input order), and spread
+            assert np.array_equal(together(back), together(straight[k].labels))
+            assert moved[k].spread == straight[k].spread
+
+
+@pytest.mark.parametrize("method", ["ward", "average"])
+def test_without_ids_the_input_order_reaches_the_groups(method):
+    # the contrast to the test above, and what the docstring says: with no ids the input order is the canonical one
+    dist, _, _ = tie_heavy(per=3, pool=60)
+    straight = consensus(dist, method, [6], shuffles=10)[6].labels
+    order = np.random.default_rng(0).permutation(len(dist))
+    back = np.empty(len(order), dtype=int)
+    back[order] = consensus(dist[np.ix_(order, order)], method, [6], shuffles=10)[6].labels
+    assert not np.array_equal(together(back), together(straight))
+
+
+@pytest.mark.parametrize("method", ["ward", "average"])
+def test_consensus_recovers_planted_realms_among_ties(method):
+    dist, realm, ids = tie_heavy()
+    result = consensus(dist, method, [6], shuffles=10, ids=ids)[6]
+    assert v_measure_score(realm, result.labels) >= 0.95
+
+
+def test_labels_without_ids_are_numbered_by_first_appearance_in_the_input_order():
+    dist, _, ids = tie_heavy(n=60, realms=3)
+    order = np.random.default_rng(3).permutation(len(dist))
+    labels = consensus(dist[np.ix_(order, order)], "ward", [3], shuffles=4, ids=[ids[i] for i in order])[3].labels
+    assert labels[0] == 0 and list(dict.fromkeys(labels.tolist())) == [0, 1, 2]
 
 
 def blocks(sizes, within=0.1, between=0.9, seed=3):
@@ -214,3 +276,7 @@ def test_consensus_refuses_what_it_cannot_do():
         consensus(dist[:, :5], "ward", [2])
     with pytest.raises(ValueError, match="symmetric"):
         consensus(np.triu(dist), "ward", [2])
+    with pytest.raises(ValueError, match="ids"):
+        consensus(dist, "ward", [2], ids=list("abc"))
+    with pytest.raises(ValueError, match="unique"):
+        consensus(dist, "ward", [2], ids=list("abcdefghia"))

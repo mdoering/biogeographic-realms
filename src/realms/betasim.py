@@ -98,15 +98,19 @@ class Consensus:
     spread: float
 
 
-def _condensed(square: np.ndarray, order: np.ndarray | None = None) -> np.ndarray:
-    """The upper triangle of `square[order][:, order]` as a float64 vector, row by row, without ever copying the square."""
+def _condensed(square: np.ndarray, order: np.ndarray | None = None, share_of: int | None = None) -> np.ndarray:
+    """The upper triangle of `square[order][:, order]` as a float64 vector, row by row, without ever copying the square.
+
+    With `share_of`, the square holds counts out of that many, and the vector is one minus their share.
+    """
     n = len(square)
     order = np.arange(n) if order is None else order
     out = np.empty(n * (n - 1) // 2, dtype=np.float64)
     at = 0
     for i in range(n - 1):
         length = n - 1 - i
-        out[at : at + length] = square[order[i]][order[i + 1 :]]
+        row = square[order[i]][order[i + 1 :]]
+        out[at : at + length] = row if share_of is None else 1 - row / share_of
         at += length
     return out
 
@@ -117,7 +121,12 @@ def _by_first_appearance(labels: np.ndarray) -> np.ndarray:
 
 
 def consensus(
-    dist: np.ndarray, method: Literal["ward", "average"], ks: Sequence[int], shuffles: int = 20, seed: int = 1
+    dist: np.ndarray,
+    method: Literal["ward", "average"],
+    ks: Sequence[int],
+    shuffles: int = 20,
+    seed: int = 1,
+    ids: Sequence[str] | None = None,
 ) -> dict[int, Consensus]:
     """A grouping at each k that does not depend on the order of the units, from Ward or UPGMA trees over shuffled orders.
 
@@ -127,9 +136,14 @@ def consensus(
     that put units i and j in the same group, and the groups are an average linkage of `1 - co` cut at k. The `spread` of
     a k is how much the shuffles agree with each other there, the mean V-measure over all pairs of them.
 
-    `dist` is the square matrix of `rank_beta_sim`. The input order still reaches the answer through the shuffles that are
-    drawn for it and the ties of the last linkage, so a reordering gives the same partition when the structure is clear,
-    which is what the consensus is for, but not bit for bit.
+    `dist` is the square matrix of `rank_beta_sim`.
+
+    **The order of the units.** With `ids`, the unique id of each row of `dist`, the units are first put in the order of their
+    sorted ids, and the shuffles, every linkage and all their tie-breaks run in that order, which ids settle because they never
+    tie. The labels are then exactly the same for any order of `dist` and `ids` together, and are numbered by first appearance
+    in the order given. Without `ids` the input order is the canonical one, so the groups depend on it through the shuffles drawn
+    for it and the tie-breaks of the linkages, more the more of `dist` is tied. The shuffles themselves leave noise too: another
+    `seed` gives other groups, which `spread` and a run with a few seeds show.
 
     The counts of every k are held at once, one n x n uint8 matrix each (127 MB per k at 11,292 units), and the last linkage
     for a k frees its own.
@@ -149,11 +163,20 @@ def consensus(
         if not np.array_equal(dist[start : start + 2048], dist[:, start : start + 2048].T):
             raise ValueError("dist must be symmetric")
 
+    if ids is None:
+        canonical = np.arange(n)
+    else:
+        if len(ids) != n:
+            raise ValueError(f"{len(ids)} ids for {n} units")
+        if len(set(ids)) != n:
+            raise ValueError("ids must be unique")
+        canonical = np.argsort(np.asarray(ids, dtype=str), kind="stable")  # canonical[j] is the row of the j-th unit by id
+
     rng = np.random.default_rng(seed)
     counts = {k: np.zeros((n, n), dtype=np.uint8) for k in ks}
     shuffled = {k: [] for k in ks}
     for _ in range(shuffles):
-        order = rng.permutation(n)
+        order = canonical[rng.permutation(n)]  # rows of dist, shuffled within the canonical order
         tree = linkage(_condensed(dist, order), method=method)
         cut = cut_tree(tree, n_clusters=ks)  # n x len(ks), in the shuffled order
         del tree
@@ -167,14 +190,12 @@ def consensus(
     result = {}
     for k in ks:
         co = counts.pop(k)
-        distance = np.empty(n * (n - 1) // 2, dtype=np.float64)
-        at = 0
-        for i in range(n - 1):
-            length = n - 1 - i
-            distance[at : at + length] = 1 - co[i, i + 1 :] / shuffles
-            at += length
+        distance = _condensed(co, canonical, shuffles)
         del co
-        labels = _by_first_appearance(cut_tree(linkage(distance, method="average"), n_clusters=k).ravel())
+        cut = cut_tree(linkage(distance, method="average"), n_clusters=k).ravel()  # in the canonical order
+        labels = np.empty(n, dtype=np.int64)
+        labels[canonical] = cut
+        labels = _by_first_appearance(labels)
         del distance
         pairs = [v_measure_score(a, b) for i, a in enumerate(shuffled[k]) for b in shuffled[k][i + 1 :]]
         result[k] = Consensus(k=k, labels=labels, spread=float(np.mean(pairs)))
