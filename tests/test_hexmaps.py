@@ -237,3 +237,44 @@ def test_the_part_that_segmentize_emptied_is_drawn_and_would_be_refused(tmp_path
     monkeypatch.setattr(hexmaps, "_densified", lambda shape, step=hexmaps.SEGMENT: shapely.segmentize(shape, step))
     with pytest.raises(ValueError, match=f"vanish.*{VANISHED}"):
         plot_parts(geoms, {VANISHED: 1}, tmp_path / "lost", "One part")
+
+
+def test_colours_given_are_used_and_must_cover_every_realm(coastal, tmp_path, monkeypatch):
+    import realms.hexmaps as hexmaps
+
+    grid_file, land = coastal
+    geoms = part_geometries(grid_file, land, list(LABELS))
+
+    def never(*_):
+        raise AssertionError("the colours were given")
+
+    monkeypatch.setattr(hexmaps, "_separating_colours", never)
+    plot_parts(geoms, LABELS, tmp_path / "given", "Realms", colours={1: "#2a78d6", 2: "#eb6834", 3: "#1baf7a"})
+    assert (tmp_path / "given.png").exists()
+    with pytest.raises(ValueError, match="no colour"):
+        plot_parts(geoms, LABELS, tmp_path / "short", "Realms", colours={1: "#2a78d6", 2: "#eb6834"})
+
+
+def test_slivers_of_no_area_are_left_out_of_a_part():
+    """Taking the land from a cell can leave a sliver along the cell's edge, which the map would draw as a tick into the land."""
+    from realms.hexmaps import _without_slivers
+
+    square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+    sliver = Polygon([(2, 0), (3, 0), (3, 1e-12), (2, 1e-12)])
+    assert list(shapely.get_parts(_without_slivers(shapely.MultiPolygon([square, sliver])))) == [square]
+    assert _without_slivers(sliver).is_empty
+
+
+def test_the_repair_of_a_projected_part_drops_its_slivers_and_keeps_small_islands():
+    from realms.hexmaps import _repaired
+
+    # a bow tie (invalid), as projection makes of a coast along a cell's edge, beside a small round island and a thin sliver
+    bow = Polygon([(0, 0), (4000, 4000), (4000, 0), (0, 4000)])  # two triangles of 4 km2
+    island = shapely.Point(10_000, 0).buffer(300)  # 0.28 km2, round
+    sliver = Polygon([(20_000, 0), (40_000, 0), (40_000, 1), (20_000, 1)])  # 0.02 km2, 1 m wide
+    found = sorted(p.area for p in shapely.get_parts(_repaired(shapely.GeometryCollection([bow, island, sliver]))))
+    assert found == pytest.approx([island.area, 4e6, 4e6])
+    # a part that is only a thin strip keeps its largest piece, so the guard of plot_parts is not set off by the repair
+    strip = Polygon([(0, 0), (20_000, 0), (20_000, 20), (10_000, -20), (0, 20)])  # invalid, two thin triangles
+    kept = list(shapely.get_parts(_repaired(strip)))
+    assert len(kept) == 1 and kept[0].area == pytest.approx(max(p.area for p in shapely.get_parts(shapely.make_valid(strip))))

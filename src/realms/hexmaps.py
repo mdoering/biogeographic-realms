@@ -34,6 +34,8 @@ SEGMENT = 0.25
 GLOBE = "#eceae4"
 OUTLINE = "#52514e"
 DPI = 200
+SLIVER_M2 = 1e6  # m2 on the map: a piece the repair of a projected part leaves that is smaller, and thin, is dropped
+SLIVER_SHAPE = 0.05  # 4 pi area / perimeter^2 under which a small piece counts as thin
 
 
 def _polygons(geometry) -> list[Polygon]:
@@ -53,6 +55,16 @@ def _part_of(polygons: list[Polygon]) -> MultiPolygon:
     """The polygons as one geometry, empty if there is no area worth the name."""
     shape = MultiPolygon(polygons)
     return shape if _km2(shape) >= ZERO_KM2 else MultiPolygon()
+
+
+def _without_slivers(shape) -> MultiPolygon:
+    """The polygons of a part, within -180 and 180, that have an area worth the name, as one geometry.
+
+    Taking the land from a cell leaves slivers of no area along the cell's edges where the coast crosses them, which the map would draw as
+    short ticks of the sea's colour reaching into the land. Measured after the cut at the antimeridian, where the geodesic area is that of
+    the shape (beyond 180 degrees a sliver can measure as a hundred km2).
+    """
+    return MultiPolygon([p for p in _polygons(shape) if _km2(p) >= ZERO_KM2])
 
 
 def _cut_at_antimeridian(shape) -> MultiPolygon:
@@ -79,7 +91,7 @@ def part_geometries(gpkg: Path, land_zip: Path, parts: Iterable[str]) -> gpd.Geo
     """`part` and `geometry` (EPSG:4326) of the given parts, sorted by id, each a MultiPolygon that no edge of runs round the globe.
 
     A land part is its cell where it meets Natural Earth land and a sea part is the cell without that land. A part with less than
-    `ZERO_KM2` of area, such as the sea part of a cell wholly on land, is empty.
+    `ZERO_KM2` of area, such as the sea part of a cell wholly on land, is empty, and so is any polygon of a part with less than that.
     """
     wanted = {}
     for part in sorted(set(parts)):
@@ -108,7 +120,7 @@ def part_geometries(gpkg: Path, land_zip: Path, parts: Iterable[str]) -> gpd.Geo
         rows[part_id(cell, "sea")] = _part_of(_polygons(shapely.difference(shape, land)))
     chosen = sorted(part for group in wanted.values() for part in group)
     return gpd.GeoDataFrame(
-        {"part": chosen}, geometry=[_cut_at_antimeridian(rows[part]) for part in chosen], crs=WGS84
+        {"part": chosen}, geometry=[_without_slivers(_cut_at_antimeridian(rows[part])) for part in chosen], crs=WGS84
     )
 
 
@@ -156,12 +168,27 @@ def _densified(shape, step: float = SEGMENT) -> MultiPolygon:
     )
 
 
+def _repaired(flat) -> MultiPolygon:
+    """A projected shape made valid, without the slivers the repair cuts off.
+
+    Where a coast runs along a cell's edge, the two are cut into short edges at different points, and the projected chords of one curve
+    cross each other. `make_valid` then leaves thin slivers between them, metres wide, which the map draws as lines of the part's colour
+    into its neighbour. A piece under `SLIVER_M2` that is thin (`SLIVER_SHAPE`, 1 for a circle) is such a sliver and is dropped, unless it
+    is the largest piece: a part that is itself a thin strip of sea along a coast keeps that strip.
+    """
+    pieces = _polygons(shapely.make_valid(flat))
+    if not pieces:
+        return MultiPolygon()
+    largest = max(pieces, key=lambda p: p.area)
+    return MultiPolygon([p for p in pieces if p is largest or p.area >= SLIVER_M2 or 4 * np.pi * p.area / p.length**2 >= SLIVER_SHAPE])
+
+
 def _projected(shape):
     """The shape on the map. Projecting bends edges that lay along each other, such as a coast that follows the cell's edge, across each other."""
     flat = gpd.GeoSeries([_densified(shape)], crs=WGS84).to_crs(EQUAL_EARTH).iloc[0]
     if flat.is_valid:
         return flat
-    return MultiPolygon(_polygons(shapely.make_valid(flat)))
+    return _repaired(flat)
 
 
 def _flag(imputed: Collection[str] | Mapping[str, bool] | None) -> set[str]:
@@ -178,6 +205,7 @@ def plot_parts(
     sub_realms: Mapping[str, int] | None = None,
     imputed: Collection[str] | Mapping[str, bool] | None = None,
     adjacency: Mapping[str, Collection[str]] | None = None,
+    colours: Mapping[int, str] | None = None,
 ) -> None:
     """An Equal Earth map of `geoms` (from `part_geometries`) coloured by the realm in `labels`, written to `<out>.png`, with `<out>.gpkg`.
 
@@ -185,6 +213,7 @@ def plot_parts(
     - `sub_realms` maps parts to a sub-realm, which is outlined; parts it leaves out have none.
     - `imputed` is the parts, or a mapping of part to flag, whose realm was imputed rather than found; they are hatched.
     - `adjacency` is which parts are next to which, as `grid.part_adjacency` gives it; by default the parts that touch on the map.
+    - `colours` gives each realm its colour, to keep one realm's colour across maps; by default they only tell neighbours apart.
 
     A part with area that comes out empty on the map raises `ValueError`, before anything is written.
 
@@ -232,9 +261,13 @@ def plot_parts(
     table.to_file(gpkg, layer="parts", driver="GPKG")
     dissolved[["realm", "geometry", "dissolved"]].to_file(gpkg, layer="realms", driver="GPKG")
 
-    near = adjacency if adjacency is not None else _touching(table)
-    neighbours = _realm_neighbours(realm_of, near)
-    colours = _separating_colours(realms, defaultdict(set, neighbours))
+    if colours is not None:
+        uncoloured = [r for r in realms if r not in colours]
+        if uncoloured:
+            raise ValueError(f"{len(uncoloured)} realms have no colour, such as {uncoloured[0]}")
+    else:
+        near = adjacency if adjacency is not None else _touching(table)
+        colours = _separating_colours(realms, defaultdict(set, _realm_neighbours(realm_of, near)))
 
     fig, ax = plt.subplots(figsize=(14, 7.4), facecolor=SURFACE)
     globe = _projected(shapely.box(-180, -90, 180, 90))
@@ -251,8 +284,9 @@ def plot_parts(
     outlines.boundary.plot(ax=ax, color=SURFACE, linewidth=0.6, aspect=None, zorder=3)
     if sub_of:
         keyed = table[table["sub_realm"].notna()]
-        for _, group in keyed.groupby(["realm", "sub_realm"]):
-            gpd.GeoSeries([_projected(_dissolve(group.geometry))], crs=EQUAL_EARTH).boundary.plot(ax=ax, color=TEXT, linewidth=0.9, aspect=None, zorder=4)
+        # one plot call: geopandas draws the whole figure again after every call, which is minutes for hundreds of sub-realms
+        subs = [_projected(_dissolve(group.geometry)) for _, group in keyed.groupby(["realm", "sub_realm"])]
+        gpd.GeoSeries(subs, crs=EQUAL_EARTH).boundary.plot(ax=ax, color=TEXT, linewidth=0.9, aspect=None, zorder=4)
 
     for realm, shape in zip(realms, outlines, strict=True):
         biggest = max(shapely.get_parts(shape), key=lambda p: p.area)
@@ -262,13 +296,12 @@ def plot_parts(
             path_effects=[withStroke(linewidth=3, foreground=SURFACE)],
         )
 
-    keys = []
+    keys = [Patch(facecolor=GLOBE, edgecolor=OUTLINE, linewidth=0.3, label="not in the map")]
     if sub_of:
         keys.append(Line2D([], [], color=TEXT, linewidth=0.9, label="sub-realm outline"))
     if flat["imputed"].any():
         keys.append(Patch(facecolor="none", edgecolor="#0b0b0bb0", hatch="//////", label="imputed"))
-    if keys:
-        ax.legend(handles=keys, loc="lower left", frameon=False, fontsize=9, labelcolor=TEXT)
+    ax.legend(handles=keys, loc="lower left", frameon=False, fontsize=9, labelcolor=TEXT)
 
     ax.set_aspect("equal")
     ax.axis("off")
