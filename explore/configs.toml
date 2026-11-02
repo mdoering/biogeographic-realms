@@ -1,0 +1,8 @@
+# The named Infomap configurations of scripts/explore.py: each [configs.<name>] table holds the fields of
+# realms.cluster.InfomapOptions that differ from Infomap's defaults, so an empty table is the defaults.
+# The screen runs Infomap with trials_screen trials and judges every k against n_null_screen null maps.
+# Selection does not take its figures from here: it uses the design's, 10 trials, 20 bootstraps of 3 trials and 99 null maps.
+trials_screen = 3
+n_null_screen = 19
+
+[configs.default]
