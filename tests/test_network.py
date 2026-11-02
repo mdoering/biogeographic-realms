@@ -168,16 +168,23 @@ def leaf_modules(partition):
 
 DEFAULT_LINE = "--flow-model undirected --seed 1 --num-trials 10 --silent"
 
-# the value to set for each option and the flags it adds to the command line, which are those of infomap 2.16
+# what to set for each option, with the switch that its damping or strength needs, and the flags that adds to the command line,
+# which are those of infomap 2.16
 EACH_OPTION = {
-    "markov_time": (0.5, "--markov-time 0.5"),
-    "variable_markov_time": (True, "--variable-markov-time"),
-    "variable_markov_damping": (0.5, "--variable-markov-damping 0.5"),
-    "regularized": (True, "--regularized"),
-    "regularization_strength": (2.0, "--regularization-strength 2.0"),
-    "entropy_corrected": (True, "--entropy-corrected"),
-    "entropy_correction_strength": (2.0, "--entropy-correction-strength 2.0"),
-    "recurse_share": (0.5, ""),  # the recursion is ours: Infomap is not told about it
+    "markov_time": ({"markov_time": 0.5}, "--markov-time 0.5"),
+    "variable_markov_time": ({"variable_markov_time": True}, "--variable-markov-time"),
+    "variable_markov_damping": (
+        {"variable_markov_time": True, "variable_markov_damping": 0.5},
+        "--variable-markov-time --variable-markov-damping 0.5",
+    ),
+    "regularized": ({"regularized": True}, "--regularized"),
+    "regularization_strength": ({"regularized": True, "regularization_strength": 2.0}, "--regularized --regularization-strength 2.0"),
+    "entropy_corrected": ({"entropy_corrected": True}, "--entropy-corrected"),
+    "entropy_correction_strength": (
+        {"entropy_corrected": True, "entropy_correction_strength": 2.0},
+        "--entropy-corrected --entropy-correction-strength 2.0",
+    ),
+    "recurse_share": ({"recurse_share": 0.5}, ""),  # the recursion is ours: Infomap is not told about it
 }
 
 
@@ -213,16 +220,43 @@ def test_every_option_has_a_case_below():
 
 @pytest.mark.parametrize("field", list(EACH_OPTION))
 def test_each_option_adds_exactly_its_flag(field, command_lines):
-    value, flag = EACH_OPTION[field]
-    options = InfomapOptions(**{field: value})
-    assert options.args() == flag
+    settings, flags = EACH_OPTION[field]
+    options = InfomapOptions(**settings)
+    assert options.args() == flags
     run_infomap(planted_net(), options=options)  # Infomap accepts it
-    assert set(command_lines) == {DEFAULT_LINE + (f" {flag}" if flag else "")}
+    assert set(command_lines) == {DEFAULT_LINE + (f" {flags}" if flags else "")}
 
 
 def test_the_options_together_keep_the_order_of_their_flags():
-    options = InfomapOptions(*(EACH_OPTION[f.name][0] for f in fields(InfomapOptions)))
-    assert options.args() == " ".join(flag for _, flag in EACH_OPTION.values() if flag)
+    options = InfomapOptions(**{name: value for settings, _ in EACH_OPTION.values() for name, value in settings.items()})
+    assert options.args() == (
+        "--markov-time 0.5 --variable-markov-time --variable-markov-damping 0.5 --regularized --regularization-strength 2.0 "
+        "--entropy-corrected --entropy-correction-strength 2.0"
+    )
+
+
+@pytest.mark.parametrize(
+    "settings, message",
+    [
+        ({"recurse_share": 0.0}, "recurse_share"),
+        ({"recurse_share": 1.0}, "recurse_share"),
+        ({"recurse_share": -0.1}, "recurse_share"),
+        ({"recurse_share": 1.5}, "recurse_share"),
+        ({"recurse_share": float("nan")}, "recurse_share"),
+        ({"variable_markov_damping": 0.5}, "variable_markov_time"),
+        ({"regularization_strength": 2.0}, "regularized"),
+        ({"entropy_correction_strength": 2.0}, "entropy_corrected"),
+        ({"variable_markov_time": True, "regularization_strength": 2.0}, "regularized"),  # another option's switch does not do
+    ],
+)
+def test_options_that_would_silently_change_nothing_are_refused(settings, message):
+    with pytest.raises(ValueError, match=message):
+        InfomapOptions(**settings)
+
+
+def test_a_share_just_inside_the_range_is_accepted():
+    assert InfomapOptions(recurse_share=0.001).recurse_share == 0.001
+    assert InfomapOptions(recurse_share=0.999).recurse_share == 0.999
 
 
 def test_markov_time_below_one_gives_more_modules():
@@ -238,10 +272,18 @@ def groups(labels, cells):
     return {frozenset(g) for g in found.values()}
 
 
+def in_label_order(labels, cells):
+    """The groups of `cells`, by the label that they have."""
+    return sorted(groups(labels, cells), key=lambda group: labels[next(iter(group))])
+
+
 @pytest.fixture
 def giant_module():
-    """Eight planted realms of ten cells. At Markov time 3 Infomap makes two of them modules of their own and merges the other six."""
+    """Eight planted realms of ten cells, and a cell with no species. At Markov time 3 Infomap makes two of the realms modules of their
+    own and merges the other five. The cell without species counts in the weights, so this is not the partition of the network
+    without it."""
     presence, taxa, _ = planted_network(n_realms=8, cells_per_realm=10, endemic_species=50, widespread_species=8)
+    presence = pl.concat([presence, pl.DataFrame({"cell": ["zz-empty"], "species_id": [None]}, schema=presence.schema)])  # sorts last
     ct = cell_taxa(presence, taxa)
     options = InfomapOptions(markov_time=3.0)
     plain = run_infomap(network_from(ct), options=options)
@@ -259,18 +301,20 @@ def test_recursion_splits_a_planted_giant_module_and_leaves_the_rest(giant_modul
     top = plain.top_labels()
     giant = the_giant(top)
     rest = set(top) - giant
-    assert (len(giant), len(top)) == (60, 80)  # 75% of the units in one module, which is a single leaf
+    assert (len(giant), len(top)) == (50, 80)  # 62% of the 81 units in one module, which is a single leaf
+    assert plain.unassigned == ["zz-empty"]
     before = plain.leaf_labels()
-    assert len(groups(before, giant)) == 1 and len(groups(before, rest)) == 2
+    assert len(groups(before, giant)) == 1 and len(groups(before, rest)) == 3
 
     recursed = run_infomap(network_from(ct), options=replace(options, recurse_share=0.5))
     after = recursed.leaf_labels()
     assert len(groups(after, giant)) > 1  # the giant module is split
-    assert groups(after, rest) == groups(before, rest)  # and the other two stay as they were
+    assert groups(after, rest) == groups(before, rest)  # and the other three stay as they were
+    assert in_label_order(before, rest) == in_label_order(after, rest)  # in the same order, though their integers may be higher
     assert {after[c] for c in giant}.isdisjoint({after[c] for c in rest})  # labels stay unique
-    assert len(set(after.values())) == len(groups(after, giant)) + 2
+    assert len(set(after.values())) == len(groups(after, giant)) + 3
     assert recursed.top_labels() == top  # the top modules are what they were: the sub-run goes inside them
-    assert recursed.unassigned == plain.unassigned
+    assert recursed.unassigned == ["zz-empty"]
     assert set(recursed.paths) == set(plain.paths)
 
 
@@ -308,7 +352,11 @@ def test_recursion_keeps_a_module_that_the_sub_run_does_not_split():
 
 def test_recursion_leaves_every_module_alone_below_the_share(giant_module):
     ct, options, plain = giant_module
-    assert run_infomap(network_from(ct), options=replace(options, recurse_share=0.75)) == plain  # the giant has exactly 75%, not more
+    net = network_from(ct)
+    assert len(net.cells) == 81  # the giant has 50 of them
+    assert run_infomap(net, options=replace(options, recurse_share=50 / 81)) == plain  # exactly its share, not more than that
+    assert run_infomap(net, options=replace(options, recurse_share=0.62)) == plain  # 50 of the 81 cells, which is less, and not 50 of the 80 linked
+    assert run_infomap(net, options=replace(options, recurse_share=0.61)) != plain  # a little under its share, so it is split
 
 
 def test_a_recursed_partition_goes_through_candidate_maps(giant_module):

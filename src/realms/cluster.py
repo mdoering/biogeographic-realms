@@ -34,10 +34,11 @@ class InfomapOptions:
     to reduce overpartitioning in sparse areas while keeping the resolution in dense ones, and `variable_markov_damping` sets the
     damping between the local effective degree (0) and the local entropy (1). `regularized` adds a Bayesian prior network against
     overfitting to missing links, and `entropy_corrected` corrects for the entropy bias in small samples, both with a strength to
-    scale them by. A damping or strength is only read by Infomap together with its switch.
+    scale them by. Infomap ignores a damping or strength without its switch, so setting one alone is a `ValueError` here: a
+    configuration that silently does nothing is a mistake.
 
     `recurse_share` is not Infomap's: every top module holding more than this share of the cells is clustered again on its own,
-    as `run_infomap` says.
+    as `run_infomap` says. It lies strictly between 0 and 1.
     """
 
     markov_time: float = 1.0
@@ -48,6 +49,17 @@ class InfomapOptions:
     entropy_corrected: bool = False
     entropy_correction_strength: float | None = None
     recurse_share: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.recurse_share is not None and not 0 < self.recurse_share < 1:
+            raise ValueError(f"recurse_share is a share of the cells, strictly between 0 and 1, not {self.recurse_share}")
+        for value, name, switch in (
+            (self.variable_markov_damping, "variable_markov_damping", "variable_markov_time"),
+            (self.regularization_strength, "regularization_strength", "regularized"),
+            (self.entropy_correction_strength, "entropy_correction_strength", "entropy_corrected"),
+        ):
+            if value is not None and not getattr(self, switch):
+                raise ValueError(f"{name} is ignored by Infomap without {switch}, so it would change nothing")
 
     def args(self) -> str:
         """The flags that differ from the defaults, for the end of Infomap's command line. Nothing at all for the defaults."""
@@ -126,6 +138,10 @@ def _recurse(net: Network, partition: Partition, seed: int, trials: int, options
     The sub-network keeps the original link weights. The run has the seed, trials and options of the first one, with the recursion
     off. If it finds several modules, they replace the module's, below its top label, so that the top modules stay what they were
     and every leaf has a path of its own, and so a label of its own. A module it leaves whole keeps its paths.
+
+    `Partition.leaf_labels` numbers the leaves in sorted path order, so the leaf integers of the modules after a recursed one can
+    shift up, by the leaves that the recursion added before them. Their relative order, their grouping and `top_labels()` stay as
+    they were, and those are what the labels are used for: they are ids.
     """
     top = partition.top_labels()
     big = sorted(module for module, n in Counter(top.values()).items() if n / len(net.cells) > options.recurse_share)
