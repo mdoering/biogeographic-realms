@@ -239,9 +239,9 @@ def test_rotations_keep_the_land_length_within_tolerance():
     unrotated = boundary_km_over_land(regions, land=land)
     assert unrotated == pytest.approx(exact_km_over_land(regions, land), rel=1e-3)
 
-    kept = rotations(regions, 5, seed=3, land=land)
+    kept = rotations(regions, 5, seed=3, land_tolerance=0.2, land=land)
     assert len(kept) == 5
-    assert kept == rotations(regions, 5, seed=3, land=land)
+    assert kept == rotations(regions, 5, seed=3, land_tolerance=0.2, land=land)
     for rotation in kept:
         assert 0 <= rotation.shift_deg < 360 and 0 <= rotation.tilt_deg <= 30
         assert abs(rotation.land_km - unrotated) <= 0.2 * unrotated
@@ -256,7 +256,7 @@ def test_rotations_keep_the_land_length_within_tolerance():
     assert len(within) < len(every)
 
     with pytest.raises(ValueError, match="only"):
-        rotations(regions, 5, seed=3, land=land, max_attempts=4)
+        rotations(regions, 5, seed=3, land_tolerance=0.2, land=land, max_attempts=4)
 
 
 # A world for the gate: the grid of resolution 5, every cell on land, and reference regions in sectors of uneven width, each cut at
@@ -333,3 +333,19 @@ def test_the_gate_needs_its_base_and_a_rotation(tmp_path):
         gate(maps, "off", regions, [Rotation.of(10, 0, 5)], edges=edges, gpkg=gpkg, adjacency=edge_adjacency(edges))
     with pytest.raises(ValueError, match="rotation"):
         gate(maps | {"off": maps["native_only"]}, "off", regions, [], edges=edges, gpkg=gpkg, adjacency=edge_adjacency(edges))
+
+
+def test_without_a_land_tolerance_every_draw_is_kept_and_no_land_is_read(tmp_path):
+    regions = regions_of([shapely.box(0, 0, 20, 20), shapely.box(20, 0, 40, 20)])
+    land = shapely.box(-30, -10, 70, 60)
+    every = rotations(regions, 7, seed=5, land_tolerance=math.inf, land=land)
+    unfiltered = rotations(regions, 7, seed=5, land_tolerance=None, land=tmp_path / "no such land.zip")
+    assert [r.matrix for r in unfiltered] == [r.matrix for r in every]
+    assert all(math.isnan(r.land_km) for r in unfiltered)
+
+
+def test_the_starting_land_tolerance_is_one_half():
+    import inspect
+
+    assert inspect.signature(rotations).parameters["land_tolerance"].default == 0.5
+    assert inspect.signature(rotations).parameters["max_tilt_deg"].default == 30.0

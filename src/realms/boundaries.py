@@ -464,7 +464,7 @@ def rotations(
     n: int,
     seed: int,
     max_tilt_deg: float = 30.0,
-    land_tolerance: float = 0.2,
+    land_tolerance: float | None = 0.5,
     *,
     land=LAND,
     max_attempts: int | None = None,
@@ -475,21 +475,32 @@ def rotations(
     angle that puts the rotated pole uniformly on the cap within `max_tilt_deg` of where it was. It is kept when
     `|rotated - unrotated| <= land_tolerance * unrotated`, with the lengths of `boundary_km_over_land`. Draws stop when `n` are kept, or
     after `max_attempts` (by default 50 * n), when too few were kept and that is an error. The same seed gives the same rotations.
+
+    The starting tolerance is 0.5: the regions are land, and rotated their boundary over land is 0.31 to 0.83 of what it is unrotated
+    (median 0.49), so 0.5 keeps the more land-like half of the draws. A rotation with little land shrinks the null raises and makes the
+    gate stricter, so loosening the tolerance does not make a mode pass more easily. `land_tolerance=None` keeps every draw, leaving the
+    land bias to the pairing alone; the land is then not read, and `land_km` is NaN.
     """
     if n < 1:
         raise ValueError(f"n is at least 1, not {n}")
+    rng = np.random.default_rng(seed)
+    lowest = math.cos(math.radians(max_tilt_deg))
+
+    def draw() -> Rotation:
+        shift, axis, cos_tilt = rng.uniform(0.0, 360.0), rng.uniform(0.0, 360.0), rng.uniform(lowest, 1.0)
+        return Rotation.of(shift, axis, math.degrees(math.acos(min(1.0, cos_tilt))))
+
+    if land_tolerance is None:
+        return [draw() for _ in range(n)]
     samples = _boundary_samples(regions)
     where = _land(land)
     unrotated = _over_land(samples, where, None)
     if not unrotated > 0:
         raise ValueError("no boundary of the regions lies over land")
     attempts = max_attempts if max_attempts is not None else 50 * n
-    rng = np.random.default_rng(seed)
-    lowest = math.cos(math.radians(max_tilt_deg))
     kept: list[Rotation] = []
     for _ in range(attempts):
-        shift, axis, cos_tilt = rng.uniform(0.0, 360.0), rng.uniform(0.0, 360.0), rng.uniform(lowest, 1.0)
-        rotation = Rotation.of(shift, axis, math.degrees(math.acos(min(1.0, cos_tilt))))
+        rotation = draw()
         km = _over_land(samples, where, rotation)
         if abs(km - unrotated) <= land_tolerance * unrotated:
             kept.append(replace(rotation, land_km=km))
