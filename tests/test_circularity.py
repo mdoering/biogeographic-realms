@@ -4,7 +4,19 @@ import pytest
 import shapely
 
 from realms.boundaries import EDGE_SCHEMA, boundary
-from realms.circularity import NONE, centre_regions, common_k, compare, headline, labels_at, moved, moves_by_region
+from realms.circularity import (
+    NONE,
+    centre_regions,
+    check_select_stamp,
+    common_k,
+    compare,
+    headline,
+    labels_at,
+    land_edges,
+    moved,
+    moves_by_region,
+    near_by_region,
+)
 
 # five cells in a row, a - b - c - d - e, each with a land and a sea part; every shared edge is 10 km, except d-e at 5 km
 EDGES = {("a", "b"): 10.0, ("b", "c"): 10.0, ("c", "d"): 10.0, ("d", "e"): 5.0}
@@ -84,3 +96,33 @@ def test_headline_is_the_strongest_wcvp_mode_that_passes():
     assert headline({"introduced": False, "native_only": False, "native_only-no-griis-no-griis_subnational": True}) == "off"
     with pytest.raises(ValueError, match="introduced"):
         headline({"native_only": False})
+
+
+def test_land_edges_are_those_between_two_land_parts_whatever_the_realms():
+    labels = {"a:land": 0, "b:land": 0, "c:sea": 1, "d:land": 2, "d:sea": 2, "e:land": 2}
+    assert land_edges(EDGES, labels).rows() == [("a", "b", 10.0), ("d", "e", 5.0)]
+    assert land_edges(EDGES, labels).schema == pl.Schema(EDGE_SCHEMA)
+
+
+def test_near_by_region_counts_an_edge_near_when_either_cell_is():
+    edges = pl.DataFrame([("a", "b", 10.0), ("b", "c", 4.0), ("c", "d", 3.0), ("d", "e", 1.0)], schema=EDGE_SCHEMA, orient="row")
+    region_of = {"a": "Europe", "b": "Europe", "c": "Africa", "d": "Europe"}
+    near = {"b", "e"}
+    found = near_by_region(edges, near, region_of)
+    assert found.columns == ["region", "km", "near_km", "near_share"]
+    # a-b and b-c by their first cell (Europe, Europe), c-d Africa, d-e Europe; near: a-b (b), b-c (b), d-e (e)
+    assert found.rows() == [("Africa", 3.0, 0.0, 0.0), ("Europe", 15.0, 15.0, 1.0)]
+    # with both centres in one region only a-b qualifies (b-c, c-d cross; e is in none)
+    assert near_by_region(edges, near, region_of, both=True).rows() == [("Europe", 10.0, 10.0, 1.0)]
+    assert near_by_region(edges.head(0), near, region_of).height == 0
+
+
+def test_check_select_stamp_wants_the_select_stage_of_the_configuration():
+    options = {"markov_time": 0.8, "regularized": False}
+    check_select_stamp({"inputs": {"stage": "select", "options": dict(options)}}, options)
+    with pytest.raises(ValueError, match="not select"):
+        check_select_stamp({"inputs": {"stage": "screen", "options": dict(options)}}, options)
+    with pytest.raises(ValueError, match="options"):
+        check_select_stamp({"inputs": {"stage": "select", "options": {"markov_time": 0.75, "regularized": False}}}, options)
+    with pytest.raises(ValueError, match="not select"):
+        check_select_stamp({}, options)

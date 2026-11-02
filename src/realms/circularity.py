@@ -23,6 +23,7 @@ NONE = "none"  # a moved edge with neither cell's centre in a region
 WCVP_ORDER = ("native_only", "introduced")  # the WCVP modes the headline may take, strongest first; `off` when none passes
 BASE = "off"
 REGION_SCHEMA = {"region": pl.String, "km": pl.Float64, "edges": pl.Int64}
+NEAR_SCHEMA = {"region": pl.String, "km": pl.Float64, "near_km": pl.Float64, "near_share": pl.Float64}
 
 
 def labels_at(parts: pl.DataFrame, k: int) -> dict[str, int]:
@@ -60,20 +61,66 @@ def moved(a: pl.DataFrame, b: pl.DataFrame) -> pl.DataFrame:
     return pl.concat([only_a, only_b]).cast(EDGE_SCHEMA).sort(key)
 
 
-def moves_by_region(edges: pl.DataFrame, region_of: Mapping[str, str | None]) -> pl.DataFrame:
-    """`region`, `km`, `edges`: moved edges by the region of the centre of their first cell (`cell_a`), else their second, else `NONE`.
+def attribute(edges: pl.DataFrame, region_of: Mapping[str, str | None]) -> pl.DataFrame:
+    """The edges with `region`: that of the centre of their first cell (`cell_a`), else of their second, else `NONE`.
 
-    `region_of` is cell to region, as `centre_regions` gives it; a cell missing from it is in no region. Sorted by km, largest first.
+    `region_of` is cell to region, as `centre_regions` gives it; a cell missing from it is in no region.
     """
     regions = [region_of.get(a) or region_of.get(b) or NONE for a, b in zip(edges["cell_a"], edges["cell_b"], strict=True)]
+    return edges.with_columns(pl.Series("region", regions, dtype=pl.String))
+
+
+def moves_by_region(edges: pl.DataFrame, region_of: Mapping[str, str | None]) -> pl.DataFrame:
+    """`region`, `km`, `edges`: moved edges by region (`attribute`), sorted by km, largest first."""
     return (
-        edges.with_columns(pl.Series("region", regions, dtype=pl.String))
+        attribute(edges, region_of)
         .group_by("region")
         .agg(pl.col("km").sum(), pl.len().cast(pl.Int64).alias("edges"))
         .cast(REGION_SCHEMA)
         .select(list(REGION_SCHEMA))
         .sort(["km", "region"], descending=[True, False])
     )
+
+
+def land_edges(edges: Mapping[tuple[str, str], float], labels: Iterable[str]) -> pl.DataFrame:
+    """Every edge (`boundaries.edge_lengths`) between two cells that both have a land part among `labels` (part ids), whatever their realms:
+    where a land boundary could run. Sorted by `cell_a`, `cell_b`."""
+    land = {part[: -len(":land")] for part in labels if part.endswith(":land")}
+    rows = [(a, b, km) for (a, b), km in edges.items() if a in land and b in land]
+    return pl.DataFrame(sorted(rows), schema=EDGE_SCHEMA, orient="row")
+
+
+def near_by_region(edges: pl.DataFrame, near: Iterable[str], region_of: Mapping[str, str | None], *, both: bool = False) -> pl.DataFrame:
+    """`region`, `km`, `near_km`, `near_share`: the km of edges by region (`attribute`), and how much of it is near, as `boundaries.edge_share`
+    counts it (either cell in `near`). Sorted by region.
+
+    With `both`, only edges whose two cell centres are in the same region count, under that region: a base rate that no coast or neighbouring
+    region enters. `near_share` is NaN where a region has no km.
+    """
+    near = set(near)
+    table = attribute(edges, region_of).with_columns(
+        pl.Series("close", [a in near or b in near for a, b in zip(edges["cell_a"], edges["cell_b"], strict=True)], dtype=pl.Boolean)
+    )
+    if both:
+        same = [region_of.get(a) is not None and region_of.get(a) == region_of.get(b) for a, b in zip(edges["cell_a"], edges["cell_b"], strict=True)]
+        table = table.filter(pl.Series(same, dtype=pl.Boolean))
+    return (
+        table.group_by("region")
+        .agg(pl.col("km").sum(), pl.col("km").filter(pl.col("close")).sum().alias("near_km"))
+        .with_columns(pl.when(pl.col("km") > 0).then(pl.col("near_km") / pl.col("km")).otherwise(float("nan")).alias("near_share"))
+        .cast(NEAR_SCHEMA)
+        .select(list(NEAR_SCHEMA))
+        .sort("region")
+    )
+
+
+def check_select_stamp(stamp: Mapping, options: Mapping, where: str = "") -> None:
+    """Raise unless `stamp` (a configuration's `stage-select.json`) is of the select stage with these Infomap `options` (`asdict` of them)."""
+    inputs = stamp.get("inputs") or {}
+    if inputs.get("stage") != "select":
+        raise ValueError(f"{where}: the stamp is of stage {inputs.get('stage')!r}, not select")
+    if dict(inputs.get("options") or {}) != dict(options):
+        raise ValueError(f"{where}: the stamp's Infomap options {inputs.get('options')} are not the configuration's {dict(options)}")
 
 
 def centre_regions(centres: pl.DataFrame, regions: gpd.GeoDataFrame) -> dict[str, str | None]:

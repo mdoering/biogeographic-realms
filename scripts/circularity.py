@@ -9,6 +9,9 @@ of the counts' `_COMPLETE` marker; the grid and the TDWG level 3 regions come fr
 - `pairs.csv`: for every pair of runs, the V-measure at each run's selected k and at the common k (`circularity.common_k`), the parts both hold
   and those only one holds, and the km of land and sea boundary that moves (`circularity.moved`) at both.
 - `moves.csv`: the moved land boundary of every pair by TDWG level 1 region (`circularity.moves_by_region`), at the selected and the common k.
+- `near_by_region.csv`: by TDWG level 1 region, the km of land edges and the share near TDWG edges (`circularity.near_by_region`): every edge
+  between two land parts of the base (`land edges`, and `land edges, both centres` for those with both centres in the region), each run's
+  boundary at its selected k, and what each mode's boundary adds to and removes from the base's.
 - `gate.csv`: `boundaries.gate` with the first run as the base, every other run a mode, TDWG level 3 regions, each map at its selected k, read
   twice: rotations kept within `land_tolerance=0.5` of the regions' boundary over land, and every rotation (`land_tolerance=None`).
 - `run.log`: what was read, the headline mode (`circularity.headline`, on the 0.5 reading) and the timings.
@@ -22,26 +25,45 @@ import json
 import logging
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import geopandas as gpd
 import polars as pl
 
 from realms.boundaries import boundary, edge_adjacency, edge_lengths, edge_share, gate, near_cells, rotations
-from realms.circularity import BASE, centre_regions, common_k, compare, headline, labels_at, moved, moves_by_region
-from realms.explore import _manifest_path
+from realms.circularity import (
+    BASE,
+    centre_regions,
+    check_select_stamp,
+    common_k,
+    compare,
+    headline,
+    labels_at,
+    land_edges,
+    moved,
+    moves_by_region,
+    near_by_region,
+)
+from realms.explore import _manifest_path, load_configs, read_stamp
 from realms.grid import read_centres
 from realms.natives import TDWG_LEVEL3_CODE
 from realms.occurrences import IncompleteIngest, resolution_of
 
 RUNS = ("off", "introduced", "native_only", "native_only-no-extinct-no-no_wild_range", "native_only-no-griis-no-griis_subnational")
-TOLERANCES = (0.5, None)
+TOLERANCES = (0.5, None)  # the first is the reading the headline rests on
+
+
+def tolerance_name(tolerance: float | None) -> str:
+    return "none" if tolerance is None else f"{tolerance:g}"
 
 log = logging.getLogger("circularity")
 
 
-def read_run(directory: Path) -> dict:
-    """The selected map of one run and its candidate ks, after checking that `selected.json` and `parts.parquet` agree."""
+def read_run(directory: Path, options: dict) -> dict:
+    """The selected map of one run and its candidate ks, after checking that the files are the select stage's with these Infomap options, and
+    that `selected.json` and `parts.parquet` agree."""
+    check_select_stamp(read_stamp(directory, "stage-select"), options, str(directory))
     chosen = json.loads((directory / "selected.json").read_text())
     if chosen.get("degenerate"):
         raise ValueError(f"{directory} is degenerate: {chosen}")
@@ -58,9 +80,10 @@ def read_run(directory: Path) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--counts", type=Path, required=True, help="the ingested download the runs were cleaned from, data/gbif/<key>: its marker gives the resolution")
     parser.add_argument("--config", default="mt080", help="the Infomap configuration of the runs, default mt080 (DECISIONS, Infomap's scale)")
+    parser.add_argument("--configs", type=Path, default=Path("explore/configs.toml"), help="the named Infomap configurations, default explore/configs.toml")
     parser.add_argument("--runs", nargs="+", default=list(RUNS), help="the runs, the base (WCVP off) first")
     parser.add_argument("--rotations", type=int, default=99)
     parser.add_argument("--seed", type=int, default=1)
@@ -96,7 +119,14 @@ def main() -> None:
     log.info(f"runs {args.runs}, base {BASE}, {args.rotations} rotations, seed {args.seed}")
 
     t = time.perf_counter()
-    runs = {run: read_run(root / run / args.config) for run in args.runs}
+    configs, _ = load_configs(args.configs)
+    if args.config not in configs:
+        raise SystemExit(f"FAILED {args.configs} has no configuration {args.config}")
+    options = asdict(configs[args.config])
+    try:
+        runs = {run: read_run(root / run / args.config, options) for run in args.runs}
+    except (ValueError, FileNotFoundError) as error:
+        raise SystemExit(f"FAILED {error}") from error
     k = common_k({run: r["candidates"] for run, r in runs.items()}, {run: r["k"] for run, r in runs.items()})
     for run, r in runs.items():
         log.info(f"{run}: selected k={r['k']}, stability {r['stability']:.3f}, fell short {r['fell_short']}, candidates {r['candidates']}, {r['parts']['part'].n_unique()} parts")
@@ -152,10 +182,25 @@ def main() -> None:
     pl.concat(moves).select("run_a", "run_b", "at", "region", "km", "edges", "share").write_csv(out / "moves.csv")
     t = lap("pairs and moves", t)
 
-    base_share = edge_share(lines[("selected", "land", BASE)], near_cells(regions, gpkg, adjacency))
+    # how near the TDWG edges the land boundaries are, by region: the base rate of every edge between two land parts, each run's boundary at
+    # its selected k, and what each mode adds to and removes from the base's boundary
+    near = near_cells(regions, gpkg, adjacency)
+    key = ["cell_a", "cell_b"]
+    base_line = lines[("selected", "land", BASE)]
+    possible = land_edges(edges, selected[BASE])
+    tables = [("land edges", BASE, near_by_region(possible, near, region_of)), ("land edges, both centres", BASE, near_by_region(possible, near, region_of, both=True))]
+    tables += [("boundary", run, near_by_region(lines[("selected", "land", run)], near, region_of)) for run in args.runs]
+    for run in args.runs[1:]:
+        line = lines[("selected", "land", run)]
+        tables.append(("added", run, near_by_region(line.join(base_line.select(key), on=key, how="anti"), near, region_of)))
+        tables.append(("removed", run, near_by_region(base_line.join(line.select(key), on=key, how="anti"), near, region_of)))
+    pl.concat([table.select(pl.lit(what).alias("what"), pl.lit(run).alias("run"), pl.all()) for what, run, table in tables]).write_csv(out / "near_by_region.csv")
+    t = lap("near by region", t)
+
+    base_share = edge_share(base_line, near)
     readings = []
     for tolerance in TOLERANCES:
-        name = "none" if tolerance is None else f"{tolerance:g}"
+        name = tolerance_name(tolerance)
         turns = rotations(regions, args.rotations, args.seed, land_tolerance=tolerance, land=land)
         t = lap(f"rotations, land_tolerance={name}", t)
         rows = gate(selected, BASE, regions, turns, edges=edges, gpkg=gpkg, adjacency=adjacency)
@@ -166,11 +211,14 @@ def main() -> None:
     gates = pl.concat(readings).select("land_tolerance", "rotations", "mode", "share", "base_share", "raise", "null_q95", "passes")
     gates.write_csv(out / "gate.csv")
 
-    verdicts = {name: dict(gates.filter(pl.col("land_tolerance") == name).select("mode", "passes").iter_rows()) for name in gates["land_tolerance"].unique(maintain_order=True)}
-    differ = [mode for mode in verdicts["0.5"] if verdicts["0.5"][mode] != verdicts["none"][mode]]
-    if differ:
-        log.info(f"THE READINGS DIFFER for {differ}: 0.5 {[verdicts['0.5'][m] for m in differ]}, none {[verdicts['none'][m] for m in differ]}")
-    log.info(f"headline mode (land_tolerance=0.5): {headline(verdicts['0.5'])}; with every rotation it would be {headline(verdicts['none'])}")
+    names = [tolerance_name(tolerance) for tolerance in TOLERANCES]
+    verdicts = {name: dict(gates.filter(pl.col("land_tolerance") == name).select("mode", "passes").iter_rows()) for name in names}
+    first = names[0]
+    for other in names[1:]:
+        differ = [mode for mode in verdicts[first] if verdicts[first][mode] != verdicts[other][mode]]
+        if differ:
+            log.info(f"THE READINGS DIFFER for {differ}: {first} {[verdicts[first][m] for m in differ]}, {other} {[verdicts[other][m] for m in differ]}")
+    log.info(f"headline mode (land_tolerance={first}): {headline(verdicts[first])}; " + ", ".join(f"at land_tolerance={n} it would be {headline(verdicts[n])}" for n in names[1:]))
     timings["total"] = round(time.perf_counter() - started, 1)
     log.info(f"timings {json.dumps(timings)}")
 
