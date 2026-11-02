@@ -231,7 +231,7 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
 
     def sizes_of(part_rows: pl.DataFrame, unit_realm: dict[str, int]) -> dict:
         """The smallest realm by its parts (imputed included), and the largest realm's share of the map by parts and by units alone."""
-        by_part = part_rows.with_columns(pl.col("part").replace_strict(areas, return_dtype=pl.Float64).alias("km2")).group_by("realm").agg(pl.col("km2").sum())["km2"]
+        by_part = part_rows.with_columns(pl.col("part").replace_strict(areas, return_dtype=pl.Float64).alias("km2")).group_by("realm", maintain_order=True).agg(pl.col("km2").sum())["km2"]
         by_unit: dict[int, float] = {}
         for unit, realm in unit_realm.items():
             by_unit[realm] = by_unit.get(realm, 0.0) + scored.areas[unit]
