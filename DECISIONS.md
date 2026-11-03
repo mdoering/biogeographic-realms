@@ -2377,3 +2377,44 @@ The table gives each configuration's most stable map; `across.csv` has every k.
   - `mt080`'s South American realm (3) is split: 994 parts stay in the Neotropical realm (2), and the south of South America becomes its own realm 9 (102 parts, centres from 23 to 57°S).
   - The ocean realm, Africa, Australia and the tropical and eastern Asian realm are the same up to a few hundred parts.
 - **Not yet redone on `mt090`.** The circularity gate (which settled `native_only`), the cross-checks and the review maps were all run on `mt080`. Until they are redone, the headline mode rests on `mt080`'s gate. Redoing them needs select on `mt090` for the four other cleaning runs and for the merged-names run.
+
+### The gate, the cross-checks and the review on `mt090` (2026-11-03)
+
+At Markus's request, everything that had been run on `mt080` was run again on `mt090`. First, select on `mt090` at seed 1 for the four other cleaning runs and for the merged-names run (`results/explore/res7/mt090-runs.log`, 1 h 29 min). Then `scripts/circularity.py`, `scripts/crosscheck.py` and `scripts/review_maps.py`, whose default configuration is now `mt090`. These scripts read the headline with `seeds.read_headline`, which replaces seed 1's own selection (k = 6, stability 0.770, fell short) with the k chosen over five seeds (k = 7). The other runs keep their seed-1 selection. The `mt080` outputs were kept as `circularity-mt080/`, `crosscheck-mt080/` and `review-mt080/`.
+
+**The circularity gate passes for every mode, under both readings, and the headline mode stays `native_only`.** The base `off` has 0.773 of its land boundary near a TDWG edge, against 0.833 under `mt080`. The raises against it:
+
+| run | k (seed 1) | stability (seed 1) | raise | null q95 (0.5 / none) |
+|---|---|---|---|---|
+| off | 7 | 0.806 | base | |
+| introduced | 7 | 0.733 (short) | +0.010 | 0.064 / 0.072 |
+| native_only | 7 (over seeds) | 0.761 (seed 1; median 0.809) | +0.003 | 0.059 / 0.056 |
+| native_only, no extinct / no wild range | 6 | 0.806 | −0.026 | 0.057 / 0.077 |
+| native_only, no GRIIS | 8 | 0.766 (short) | +0.051 | 0.063 / 0.065 |
+
+- At k = 7, `native_only` and `off` agree at V 0.729, and `native_only` and `introduced` at V 0.945.
+- The no-GRIIS run passes closest to its threshold (0.051 against 0.063). It is not a candidate for the headline mode.
+- **Northern America is no longer an open point.** Under `mt090`, Northern America is in realm 0 in both runs. The land boundary that `native_only` adds there against `off` is 187 km (2 edges), and it removes 484 km. Under `mt080` it added 10,363 km. The one boundary left runs across northern Mexico.
+
+**Cross-checks at k = 7.**
+- The beta-sim consensus against Infomap gives V 0.554 to 0.571 with Ward and 0.455 with UPGMA, against 0.586 and 0.463 on `mt080`.
+- The share of area on which they agree is 0.610 to 0.621 (Ward) and 0.765 (UPGMA), against 0.593 and 0.723.
+- The consensus is stable across seeds: Ward 0.974 to 0.999, UPGMA 1.0.
+- As before, it agrees on the split between ocean and land, not on the land realms.
+- The merged-names run is further from the run on ids than on `mt080`: V 0.836 at k = 7, against 0.888. At seed 1 it selects k = 5, stable at 0.803.
+
+**The review package** (`review/`) has k = 6 and 7, but not k = 8, because `mt090` has no map with more than seven realms. It also has k = 19 and 30 without the floor (now merged from 122 modules), a panel per realm and the Northern American boundary.
+- `review_maps.py` does not remove the outputs of an earlier run, so `k8.png`, `k8.gpkg` and `realm-6-k7.png` from `mt080` were deleted by hand. Copies are in `review-mt080/`.
+- The realm areas are on the units' basis; on the parts' basis, imputed parts included, the ocean realm is 68.9%.
+
+| realm | mostly | unit Mkm² | unit share | endemic species at 95% |
+|---|---|---|---|---|
+| 1 | the oceans, with New Guinea | 175.21 | 57.8% | 86,375 of 141,850 |
+| 0 | Eurasia, North Africa, North America to northern Mexico, Greenland, New Zealand, the Antarctic coast | 60.75 | 20.0% | 146,218 of 194,056 |
+| 4 | Africa south of the Sahara, Madagascar, southern Arabia | 22.75 | 7.5% | 64,466 of 80,388 |
+| 2 | Mexico, Central America, the Caribbean, South America north of the southern Andes | 18.35 | 6.1% | 106,206 of 136,584 |
+| 3 | South and East Asia, the Philippines, Wallacea | 16.83 | 5.6% | 72,347 of 101,593 |
+| 5 | Australia | 7.72 | 2.5% | 28,705 of 44,737 |
+| 9 | the southern Andes and Patagonia | 1.43 | 0.5% | 4,534 of 9,365 |
+
+- **The review's figures are seed 1's.** `summary.csv` gives seed 1's stability and excess (k = 7: 0.761, 0.136). The medians over the seeds are in `native_only/seeds/across.csv` (k = 7: 0.809, 0.148).
