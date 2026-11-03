@@ -2,7 +2,7 @@
 
 `uv run python -I scripts/review_maps.py --counts data/gbif/<key>`
 
-Reads the select stage of one configuration (`--config`, default `mt080`) of the headline run (`--run`, default `native_only`) and of the base
+Reads the select stage of one configuration (`--config`, default `mt090`) of the headline run (`--run`, default `native_only`) and of the base
 run (`--base`, default `off`) in `results/explore/res<r>/<run>/<config>/select/`, with `explore.read_selected` (which refuses a result that is not
 current), at the resolution of the counts' `_COMPLETE` marker; the grid, the land and the TDWG
 level 3 regions come from the references' manifest. Writes to `res<r>/review/`, with `run.log` and its timings:
@@ -76,7 +76,7 @@ def main() -> None:
     parser.add_argument("--counts", type=Path, required=True, help="the ingested download the runs were cleaned from, data/gbif/<key>: its marker gives the resolution")
     parser.add_argument("--run", default="native_only", help="the headline run, default native_only (DECISIONS, the circularity gate)")
     parser.add_argument("--base", default="off", help="the run whose boundary the headline's is set against, default off")
-    parser.add_argument("--config", default="mt080", help="the Infomap configuration, default mt080 (DECISIONS, Infomap's scale)")
+    parser.add_argument("--config", default="mt090", help="the Infomap configuration, default mt090 (DECISIONS, over five seeds, 2026-11-03)")
     parser.add_argument("--configs", type=Path, default=Path("explore/configs.toml"))
     parser.add_argument("--no-floor-ks", type=int, nargs="*", default=[19, 30], help="maps without the size floor, for M4 only")
     parser.add_argument("--region", default="Northern America", choices=sorted(REGION_VIEW), help="the TDWG level 1 region of the boundary figure")

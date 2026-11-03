@@ -2,7 +2,7 @@
 
 `uv run python -I scripts/circularity.py --counts data/gbif/<key>`
 
-Reads the select stage of one configuration (`--config`, default `mt080`) of each run, `results/explore/res<r>/<run>/<config>/select/`, at the resolution
+Reads the select stage of one configuration (`--config`, default `mt090`) of each run, `results/explore/res<r>/<run>/<config>/select/`, at the resolution
 of the counts' `_COMPLETE` marker, with `explore.read_selected` (which refuses a result that is not current); the grid and the TDWG level 3 regions come from the references' manifest. Writes to `res<r>/circularity/`:
 
 - `runs.csv`: each run's selected k, its stability and whether it fell short of 0.8, its parts, and its land and sea boundary km at that k.
@@ -72,7 +72,7 @@ def read_run(run_dir: Path, config: str, configs: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--counts", type=Path, required=True, help="the ingested download the runs were cleaned from, data/gbif/<key>: its marker gives the resolution")
-    parser.add_argument("--config", default="mt080", help="the Infomap configuration of the runs, default mt080 (DECISIONS, Infomap's scale)")
+    parser.add_argument("--config", default="mt090", help="the Infomap configuration of the runs, default mt090 (DECISIONS, over five seeds, 2026-11-03)")
     parser.add_argument("--configs", type=Path, default=Path("explore/configs.toml"), help="the named Infomap configurations, default explore/configs.toml")
     parser.add_argument("--runs", nargs="+", default=list(RUNS), help="the runs, the base (WCVP off) first")
     parser.add_argument("--rotations", type=int, default=99)

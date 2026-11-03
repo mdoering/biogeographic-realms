@@ -2,7 +2,7 @@
 
 `uv run python -I scripts/crosscheck.py --counts data/gbif/<key> --parts betasim names`
 
-Reads the select stage of one configuration (`--config`, default `mt080`) of the headline run (`--run`, default `native_only`) in
+Reads the select stage of one configuration (`--config`, default `mt090`) of the headline run (`--run`, default `native_only`) in
 `results/explore/res<r>/<run>/<config>/select/`, at the resolution of the counts' `_COMPLETE` marker, with `explore.read_selected` (which refuses a result
 that is not current). Writes to `res<r>/crosscheck/`, and appends to its `run.log`:
 
@@ -161,7 +161,7 @@ def main() -> None:
     parser.add_argument("--parts", nargs="+", choices=("betasim", "names"), default=["betasim", "names"])
     parser.add_argument("--run", default="native_only", help="the headline run, default native_only (DECISIONS, the circularity gate)")
     parser.add_argument("--merged", default=None, help="the run that merges duplicate names, default <run>-merged-names")
-    parser.add_argument("--config", default="mt080", help="the Infomap configuration, default mt080 (DECISIONS, Infomap's scale)")
+    parser.add_argument("--config", default="mt090", help="the Infomap configuration, default mt090 (DECISIONS, over five seeds, 2026-11-03)")
     parser.add_argument("--configs", type=Path, default=Path("explore/configs.toml"))
     parser.add_argument("--ks", type=int, nargs=2, default=(5, 12), metavar=("FIRST", "LAST"), help="the consensus's k, default 5 to 12")
     parser.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
