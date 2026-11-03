@@ -2348,3 +2348,32 @@ Markus's ruling after the second seed (above): stability is judged over seeds, a
 - **The choice.** The bar stays 0.8 and the tie stays 0.01. `select.select_level`'s rule is applied to the pooled table of every configuration and k: of the maps whose median stability is at least 0.8, the one with the highest median excess, the coarser map within 0.01. A tie in k goes to the higher median excess. If no map reaches 0.8, the most stable one is reported as falling short, and the choice goes back to Markus.
 - **The headline map** is seed 1's map of the chosen configuration at the chosen k. Its V-measure against the other four seeds' maps at that k is reported beside it.
 - **Unchanged.** The headline mode stays `native_only`. If it changes, the configuration has to be chosen again on that mode, as before. Cost: 27 more screen-and-select runs at about 17 minutes each, about 8 hours. Seed 2 of `mt080` is already done.
+
+### Over five seeds, `mt090` at k = 7 (2026-11-03)
+
+The rule of "Stability over five seeds" was applied as fixed above (`scripts/seeds.py`; `results/explore/res7/native_only/seeds/`: `per_seed.csv`, `across.csv`, `choice.json`, `agreement.csv`). Seeds 2 to 5 of the seven configurations ran on 2026-11-03, 27 screen-and-select runs in 7 h 44 min, none failing.
+
+**Chosen: `mt090` (Markov time 0.90) at k = 7.** Its median stability is 0.809 and its median excess 0.148. It is the only map of the 46 whose median stability reaches 0.8.
+
+| config | k | median stability | lowest-highest over seeds | median excess |
+|---|---|---|---|---|
+| mt090 | 7 | **0.809** | 0.736-0.880 | 0.148 |
+| mt090 | 6 | 0.789 | 0.728-0.869 | 0.149 |
+| default | 6 | 0.767 | 0.674-0.778 | 0.176 |
+| mt080 | 9 | 0.765 | 0.737-0.814 | 0.146 |
+| mt095 | 8 | 0.756 | 0.709-0.798 | 0.154 |
+| mt080 | 7 | 0.752 | 0.739-0.806 | 0.150 |
+| mt085 | 8 | 0.730 | 0.706-0.776 | 0.160 |
+| mt075 | 11 | 0.701 | 0-0.722 | 0.172 |
+| regularized | 12 | 0.630 | 0.617-0.673 | 0.149 |
+
+The table gives each configuration's most stable map; `across.csv` has every k.
+
+- **`mt090`'s map does not depend on the seed.** Infomap at 10 trials finds the same 122 modules at all five seeds; the partitions are identical, and so are the maps at k = 5, 6 and 7 (V 1.0). The seeds change only the bootstraps and the null maps. `mt080`'s partition changes with the seed: 853 modules at seed 1, 889 at seeds 2 and 3.
+- **The margin is small again.** Over the five seeds the stability at k = 7 ranges from 0.736 to 0.880. The median clears the bar by 0.009, and that median is what the rule asks for. No other map comes within 0.02.
+- **`mt090` has only k = 5 to 7.** Seven of its modules clear the size floor, so it has no map with more realms.
+- **The map against `mt080`'s** at k = 7: V 0.892 by part. Two realms differ (named by the TDWG level 1 regions of their land parts' centres):
+  - `mt080`'s Northern American realm (2) is inside `mt090`'s realm 0, with Eurasia and North Africa.
+  - `mt080`'s South American realm (3) is split: 994 parts stay in the Neotropical realm (2), and the south of South America becomes its own realm 9 (102 parts, centres from 23 to 57°S).
+  - The ocean realm, Africa, Australia and the tropical and eastern Asian realm are the same up to a few hundred parts.
+- **Not yet redone on `mt090`.** The circularity gate (which settled `native_only`), the cross-checks and the review maps were all run on `mt080`. Until they are redone, the headline mode rests on `mt080`'s gate. Redoing them needs select on `mt090` for the four other cleaning runs and for the merged-names run.
