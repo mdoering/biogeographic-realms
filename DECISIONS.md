@@ -2336,3 +2336,15 @@ At Markus's request, `native_only/mt080` was run again at seed 2 (`--seed 2`, `m
 - **The maps barely move.** Infomap finds 889 modules against seed 1's 853 (unit V 0.964). At every k both seeds have (5 to 9), the maps agree at V 0.966 to 0.973 over all 22,147 parts. At k = 7 the realms are the same seven: 122 parts (0.55%, 20 of them imputed) change realm, most between realms 4 and 1, 5 and 0, and 0 and 4.
 - **The stability does not hold the bar.** At seed 2 no map reaches 0.8: k = 5 to 9 score 0.683, 0.640, 0.752, 0.753 and 0.765 (seed 1: 0.763, 0.738, 0.806, 0.793, 0.814). Select picks k = 9 and marks it fell short. The excess is lower too, 0.143 to 0.160 against 0.153 to 0.174. Seed 2 has no k = 10 map, because only nine units clear the size floor.
 - **What it means.** Between two seeds the stability of k = 7 moves by 0.054, while the reference maps agree at V 0.97. So most of the difference comes from the 20 bootstraps, not from the map. A gap of that size is larger than mt080's margin over the bar (0.006), and larger than the gaps that separated mt080 from mt090 (0.770), mt095 (0.759) and the default (0.674) at seed 1. The choice of mt080 in "Infomap's scale" therefore rests on one draw of the bootstraps. How to read the stability across seeds is left to Markus; no rule is changed here.
+
+## 2026-11-03
+
+### Stability over five seeds (2026-11-03)
+
+Markus's ruling after the second seed (above): stability is judged over seeds, and every configuration is judged the same way. The rule is fixed here, before any further seed is run.
+
+- **Seeds.** Every one of the seven distinct non-degenerate configurations of "Infomap's scale" (`default`, `mt075`, `mt080`, `mt085`, `mt090`, `mt095`, `regularized`) is run through screen and select at seeds 1 to 5 on `native_only`, half A, resolution 7. The design's figures stay the same for each seed: 10 trials, 20 bootstraps of 3 trials and 99 null maps.
+- **Per k.** For each configuration and k, the stability is the median of the five seeds' stabilities. A seed that has no map at that k (its units above the size floor give fewer realms) counts as 0 there. The excess is the median over the seeds that have the map.
+- **The choice.** The bar stays 0.8 and the tie stays 0.01. `select.select_level`'s rule is applied to the pooled table of every configuration and k: of the maps whose median stability is at least 0.8, the one with the highest median excess, the coarser map within 0.01. A tie in k goes to the higher median excess. If no map reaches 0.8, the most stable one is reported as falling short, and the choice goes back to Markus.
+- **The headline map** is seed 1's map of the chosen configuration at the chosen k. Its V-measure against the other four seeds' maps at that k is reported beside it.
+- **Unchanged.** The headline mode stays `native_only`. If it changes, the configuration has to be chosen again on that mode, as before. Cost: 27 more screen-and-select runs at about 17 minutes each, about 8 hours. Seed 2 of `mt080` is already done.
