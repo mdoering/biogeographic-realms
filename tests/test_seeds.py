@@ -57,3 +57,36 @@ def test_choose_without_a_stable_map_reports_the_most_stable_one_as_falling_shor
     got = choose({"a": summary([(6, 0.70, 0.3), (7, 0.76, 0.1)]), "b": summary([(5, 0.76, 0.2)])})
     assert (got.config, got.k, got.fell_short) == ("b", 5, True)  # a tie in stability goes to the coarser map
     assert "no map reached" in got.reason
+
+
+def selected(k=6, fell_short=True, ks=(5, 6, 7)):
+    from pathlib import Path
+
+    from realms.explore import Partition, Selected
+
+    parts = pl.DataFrame({"part": [f"p{k_}" for k_ in ks], "k": list(ks), "realm": [0] * len(ks), "selected": [k_ == k for k_ in ks]})
+    return Selected(directory=Path("run/mt090/select"), stamp={}, k=k, fell_short=fell_short, parts=parts, candidates=pl.DataFrame(),
+                    selection=pl.DataFrame(), partition=Partition(paths={}, unassigned=[]), merged=False)
+
+
+def test_apply_choice_puts_the_k_chosen_over_seeds_in_place_of_seed_one():
+    from realms.seeds import apply_choice
+
+    got = apply_choice(selected(), {"config": "mt090", "k": 7, "fell_short": False}, "mt090")
+    assert (got.k, got.fell_short) == (7, False)
+    assert got.parts.filter(pl.col("selected"))["k"].unique().to_list() == [7]
+
+
+def test_apply_choice_leaves_another_configuration_or_no_choice_alone():
+    from realms.seeds import apply_choice
+
+    found = selected()
+    assert apply_choice(found, {"config": "mt080", "k": 7, "fell_short": False}, "mt090") is found
+    assert apply_choice(found, None, "mt090") is found
+
+
+def test_apply_choice_refuses_a_k_the_result_has_no_map_of():
+    from realms.seeds import apply_choice
+
+    with pytest.raises(ValueError, match="k=9"):
+        apply_choice(selected(), {"config": "mt090", "k": 9, "fell_short": False}, "mt090")

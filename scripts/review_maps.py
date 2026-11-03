@@ -3,8 +3,8 @@
 `uv run python -I scripts/review_maps.py --counts data/gbif/<key>`
 
 Reads the select stage of one configuration (`--config`, default `mt090`) of the headline run (`--run`, default `native_only`) and of the base
-run (`--base`, default `off`) in `results/explore/res<r>/<run>/<config>/select/`, with `explore.read_selected` (which refuses a result that is not
-current), at the resolution of the counts' `_COMPLETE` marker; the grid, the land and the TDWG
+run (`--base`, default `off`) in `results/explore/res<r>/<run>/<config>/select/`, with `seeds.read_headline` (`explore.read_selected`, which refuses a result that is not
+current, with the k chosen over five seeds in `<run>/seeds/choice.json` where it names the configuration), at the resolution of the counts' `_COMPLETE` marker; the grid, the land and the TDWG
 level 3 regions come from the references' manifest. Writes to `res<r>/review/`, with `run.log` and its timings:
 
 - `k<k>.png` and `.gpkg` (`hexmaps.plot_parts`) for the selected k and the candidates either side, with sub-realm outlines, imputed parts
@@ -36,7 +36,8 @@ import shapely
 from realms.boundaries import boundary, edge_adjacency, edge_lengths
 from realms.candidates import apply_size_floor, merge_sequence
 from realms.circularity import attribute, centre_regions
-from realms.explore import UNITS, assigned_only, manifest_path, network_matrix, part_rows, peak_gb, read_light_grid, read_selected, read_units
+from realms.seeds import read_headline
+from realms.explore import UNITS, assigned_only, manifest_path, network_matrix, part_rows, peak_gb, read_light_grid, read_units
 from realms.grid import read_centres
 from realms.hexmaps import part_geometries, plot_parts
 from realms.natives import TDWG_LEVEL3_CODE
@@ -117,8 +118,8 @@ def run(args: argparse.Namespace, resolution: int, root: Path, out: Path) -> Non
     log.info(f"---- review: resolution {resolution} (from {args.counts}), run {args.run} against {args.base}, configuration {args.config}")
     log.info(f"grid {gpkg}, land {land}, regions {level3}")
     run_dir = root / args.run
-    head = read_selected(run_dir, args.config, args.configs)
-    base = read_selected(root / args.base, args.config, args.configs)
+    head = read_headline(run_dir, args.config, args.configs)
+    base = read_headline(root / args.base, args.config, args.configs)
     params = head.stamp["inputs"]["params"]
     k_sel = head.k
     ks = [k for k in (k_sel - 1, k_sel, k_sel + 1) if k in set(head.parts["k"].to_list())]

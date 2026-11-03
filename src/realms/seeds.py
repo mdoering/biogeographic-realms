@@ -4,14 +4,23 @@ Twenty bootstraps give a stability that moved by 0.054 between two seeds of the 
 So each configuration is selected at several seeds, and `across_seeds` takes the median of their `selection.csv` tables per k: a seed with no
 map at a k counts as stability 0 there, and the excess is the median over the seeds that have the map. `choose` then applies
 `select.select_level`'s rule to the pooled maps of every configuration.
+
+`scripts/seeds.py` writes that choice to `<run>/seeds/choice.json`. `read_headline` is `explore.read_selected` with the choice applied: where it names
+the configuration, its k (and whether it fell short) replace those the select stage chose at seed 1, so the gate, the cross-checks and the review
+draw the map chosen over seeds.
 """
 
+import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import polars as pl
 
+from realms.explore import Selected, read_selected
 from realms.select import MIN_STABILITY, TIE
+
+CHOICE = Path("seeds") / "choice.json"
 
 
 def across_seeds(tables: Mapping[int, pl.DataFrame]) -> pl.DataFrame:
@@ -56,3 +65,24 @@ def choose(summaries: Mapping[str, pl.DataFrame]) -> Choice:
     best = eligible.filter(pl.col("excess") >= top - TIE).sort(["k", "excess"], descending=[False, True]).row(0, named=True)
     return Choice(best["config"], int(best["k"]), False,
                   f"{best['config']} at k={best['k']} has excess within {TIE} of the highest, {top:.3f}, among {eligible.height} stable maps")
+
+
+def apply_choice(found: Selected, choice: Mapping | None, config: str) -> Selected:
+    """`found` with the k and `fell_short` of `choice` (a `choice.json`) if it names `config`, its parts' `selected` column marking that k; else `found`."""
+    if not choice or choice["config"] != config:
+        return found
+    k = int(choice["k"])
+    if k not in set(found.parts["k"].unique().to_list()):
+        raise ValueError(f"the choice over seeds is k={k} of {config}, but {found.directory} has maps at k={sorted(found.parts['k'].unique())}")
+    return replace(found, k=k, fell_short=bool(choice["fell_short"]), parts=found.parts.with_columns((pl.col("k") == k).alias("selected")))
+
+
+def read_choice(run_dir: Path) -> dict | None:
+    """The `choice.json` that `scripts/seeds.py` wrote for the run `run_dir`, or None if it has none."""
+    path = Path(run_dir) / CHOICE
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def read_headline(run_dir: Path, config: str, configs_path: Path, **kwargs) -> Selected:
+    """`explore.read_selected` at seed 1 with the run's choice over seeds applied (`apply_choice`)."""
+    return apply_choice(read_selected(run_dir, config, configs_path, **kwargs), read_choice(run_dir), config)

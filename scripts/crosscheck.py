@@ -3,8 +3,8 @@
 `uv run python -I scripts/crosscheck.py --counts data/gbif/<key> --parts betasim names`
 
 Reads the select stage of one configuration (`--config`, default `mt090`) of the headline run (`--run`, default `native_only`) in
-`results/explore/res<r>/<run>/<config>/select/`, at the resolution of the counts' `_COMPLETE` marker, with `explore.read_selected` (which refuses a result
-that is not current). Writes to `res<r>/crosscheck/`, and appends to its `run.log`:
+`results/explore/res<r>/<run>/<config>/select/`, at the resolution of the counts' `_COMPLETE` marker, with `seeds.read_headline` (`explore.read_selected`, which refuses a result
+that is not current, with the k chosen over five seeds in `<run>/seeds/choice.json` where it names the configuration). Writes to `res<r>/crosscheck/`, and appends to its `run.log`:
 
 - **betasim**: the matrix the select stage scored (`explore.network_matrix`, restricted by `explore.assigned_only` to the units Infomap gave a
   module), `betasim.rank_beta_sim` over its units and `betasim.consensus` with Ward and with UPGMA (`average`) at `--ks`, for each of `--seeds`,
@@ -37,7 +37,8 @@ import polars as pl
 from realms.betasim import consensus, rank_beta_sim
 from realms.circularity import compare, labels_at
 from realms.crosscheck import area_agreement, pairwise_v, unit_labels
-from realms.explore import CLEANED, MERGED_SUFFIX, UNITS, Selected, assigned_only, network_matrix, peak_gb, read_selected, read_units
+from realms.explore import CLEANED, MERGED_SUFFIX, UNITS, Selected, assigned_only, network_matrix, peak_gb, read_units
+from realms.seeds import read_headline
 from realms.matrix import duplicate_names
 from realms.occurrences import IncompleteIngest, resolution_of
 
@@ -119,7 +120,7 @@ def betasim(run_dir: Path, headline: Selected, ks: list[int], seeds: list[int], 
 
 
 def names(root: Path, run: str, merged_run: str, config: str, configs: Path, headline: Selected, out: Path) -> None:
-    merged = read_selected(root / merged_run, config, configs, merge_duplicate_names=True)
+    merged = read_headline(root / merged_run, config, configs, merge_duplicate_names=True)
     if headline.merged or not merged.merged:
         raise ValueError(f"{merged_run} must merge duplicate names and {run} must not: they say {merged.merged} and {headline.merged}")
     k_ids, k_merged, k_sel = headline.k, merged.k, headline.k
@@ -184,7 +185,7 @@ def main() -> None:
     )
     log.info(f"---- crosscheck {args.parts}: resolution {resolution} (from {args.counts}), run {args.run}, configuration {args.config}")
     try:
-        headline = read_selected(root / args.run, args.config, args.configs)
+        headline = read_headline(root / args.run, args.config, args.configs)
         if "betasim" in args.parts:
             ks = list(range(args.ks[0], args.ks[1] + 1))
             log.info(f"betasim: methods {METHODS}, k={ks[0]}-{ks[-1]}, seeds {args.seeds}, {args.shuffles} shuffles, ids passed")

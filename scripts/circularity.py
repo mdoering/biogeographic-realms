@@ -3,7 +3,7 @@
 `uv run python -I scripts/circularity.py --counts data/gbif/<key>`
 
 Reads the select stage of one configuration (`--config`, default `mt090`) of each run, `results/explore/res<r>/<run>/<config>/select/`, at the resolution
-of the counts' `_COMPLETE` marker, with `explore.read_selected` (which refuses a result that is not current); the grid and the TDWG level 3 regions come from the references' manifest. Writes to `res<r>/circularity/`:
+of the counts' `_COMPLETE` marker, with `explore.read_selected` (which refuses a result that is not current) and `seeds.read_headline`, which puts the k chosen over five seeds (`<run>/seeds/choice.json`) in place of seed 1's where the choice names the configuration; the grid and the TDWG level 3 regions come from the references' manifest. Writes to `res<r>/circularity/`:
 
 - `runs.csv`: each run's selected k, its stability and whether it fell short of 0.8, its parts, and its land and sea boundary km at that k.
 - `pairs.csv`: for every pair of runs, the V-measure at each run's selected k and at the common k (`circularity.common_k`), the parts both hold
@@ -43,7 +43,8 @@ from realms.circularity import (
     moves_by_region,
     near_by_region,
 )
-from realms.explore import manifest_path, read_selected
+from realms.explore import manifest_path
+from realms.seeds import read_headline
 from realms.grid import read_centres
 from realms.natives import TDWG_LEVEL3_CODE
 from realms.occurrences import IncompleteIngest, resolution_of
@@ -59,8 +60,8 @@ log = logging.getLogger("circularity")
 
 
 def read_run(run_dir: Path, config: str, configs: Path) -> dict:
-    """The selected map of one run and its candidate ks: the current select result (`explore.read_selected`), whose parts must be the same at every k."""
-    found = read_selected(run_dir, config, configs)
+    """The selected map of one run and its candidate ks: the current select result (`seeds.read_headline`), whose parts must be the same at every k."""
+    found = read_headline(run_dir, config, configs)
     parts = found.parts
     sets = {frozenset(group["part"]) for _, group in parts.group_by("k")}
     if len(sets) != 1:
