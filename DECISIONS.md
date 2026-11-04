@@ -2418,3 +2418,36 @@ At Markus's request, everything that had been run on `mt080` was run again on `m
 | 9 | the southern Andes and Patagonia | 1.43 | 0.5% | 4,534 of 9,365 |
 
 - **The review's figures are seed 1's.** `summary.csv` gives seed 1's stability and excess (k = 7: 0.761, 0.136). The medians over the seeds are in `native_only/seeds/across.csv` (k = 7: 0.809, 0.148).
+
+## 2026-11-04
+
+### Is there a natural k? (2026-11-04)
+
+**The question.** Markus asked whether the number of realms can be chosen from the data alone. The selection rule cannot answer that. On `mt090`, stability rises slowly (median 0.731, 0.789 and 0.809 at k = 5, 6 and 7) and excess falls slowly (0.161, 0.149 and 0.148). Neither peaks, and the steps between neighbouring k are smaller than the spread between seeds, so the 0.8 bar and the tie-break pick k = 7, not a feature of the data. Infomap does choose a number by itself, its modules (122 under `mt090`), but the step from modules to realms is a choice of scale: the Markov time, the 1M km2 floor and the merge sequence.
+
+**Two diagnostics, which choose nothing** (`realms.breaks`, `scripts/breaks.py`; half A, resolution 7, release 315557, `native_only`, every configuration at seed 1, 199 null maps). The script rebuilds the steps of `candidates.candidate_maps` from each select result. It checks that merging the floored units gives `candidates.parquet` at every k, which holds for all seven configurations. It then runs both diagnostics on the units without the floor (down to one realm) and on the floored ones. `candidates.py`, the selection and the Costello gate are unchanged. Outputs: `results/explore/res7/native_only/breaks/` (`heights.csv`, `splits.csv`, `run.log`).
+
+- **Merge heights** (`breaks.merge_heights`): the beta-sim of the pair merged at each step of `merge_sequence`. Under all six Markov-time configurations (`default` and `mt075` to `mt095`), the last four merges, from 5 units to 1, all happen at about the same beta-sim, 0.72 to 0.75. So the top of the hierarchy is a five-way tie, not a tree: five blocks are about equally distinct, and the data do not say which of them belong together. Under `mt090` the five are the Holarctic, the Neotropics, Africa south of the Sahara, South and East Asia, and the ocean block. Below five the merges get cheaper, steadily and without a clear gap:
+  - Madagascar and Australia at 0.66 and 0.65;
+  - New Zealand, the southern Andes and Patagonia, and New Guinea at 0.59, 0.54 and 0.52;
+  - then islands, from 0.45 down.
+
+  The largest step for k ≤ 10 is from Madagascar (0.657) to the five blocks (0.729), only a little larger than the steps of about 0.06 below it. `regularized` merges lower throughout (0.53 to 0.75) and has no such tie.
+
+  Two caveats:
+  - The tie may partly be a ceiling. The matrix holds genera and families, which unrelated continents share, so any two distinct biotas may sit near 0.72.
+  - Beta-sim divides by the poorer unit's taxa, so a small unit looks nested in the vast ocean block and tends to merge into it. That is why Madagascar and Australia join the ocean block rather than Africa or Asia.
+
+  Under `mt090` the floor keeps Patagonia (1.43M km2, 0.54) but absorbs Madagascar (0.82M km2, 0.66), which is more distinct by this measure, into Africa. The floor, an area rule, decides that, not the biota.
+
+- **Split tests** (`breaks.split_tests`): each split from k − 1 to k realms against 199 random splits of the same realm into contiguous regions with the same areas and number of pieces (`nullmodel.null_partitions`). Endemism is `nullmodel`'s, scored two ways.
+  - **Equal weight** (each side counts the same): every split beats every random one, with p = 0.005, the smallest possible. That holds at every k of every configuration down to k = 30 under `mt090`, including islands of a few thousand km2. A boundary the clustering drew from the data beats random boundaries almost by construction, so significance gives no place to stop. The gain over the null shrinks smoothly under `mt090`: 0.16 to 0.18 for k = 2 to 5, 0.156 at 6, 0.146 at 7, 0.115 at 8, about 0.10 at 9 and 10, then 0.03 to 0.10 for islands.
+  - **Area weight** (each side counts by its area): the larger side's share is high under any boundary, so in a lopsided split this score cannot tell a real boundary from a random one (z mostly below 2). It is reported but not read.
+
+**What the data say.** They give a floor and a nested order, not a single k:
+- five blocks, about equally distinct, so fewer than five realms is arbitrary;
+- then Madagascar and Australia;
+- then New Zealand, Patagonia and New Guinea;
+- then islands.
+
+The headline at k = 7 is the five blocks plus Australia plus Patagonia, with Madagascar left out by the floor. Nothing about the selection changes here. Whether to report the nested levels instead of one k, and whether the floor should yield to distinctness, is for Markus. Any such rule is to be fixed before M3 opens half B.
