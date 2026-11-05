@@ -2451,3 +2451,52 @@ At Markus's request, everything that had been run on `mt080` was run again on `m
 - then islands.
 
 The headline at k = 7 is the five blocks plus Australia plus Patagonia, with Madagascar left out by the floor. Nothing about the selection changes here. Whether to report the nested levels instead of one k, and whether the floor should yield to distinctness, is for Markus. Any such rule is to be fixed before M3 opens half B.
+
+## 2026-11-05
+
+### Where the oceans separate (2026-11-05)
+
+Markus asked at what point the oceans get separated. On half A at resolution 7 (release 315557, `native_only`, seed 1, before the layer 4 change below):
+- **Under `mt080` to `mt095` they never do.** All of the sea is a single Infomap module of 169 to 173M km², every unit in it a sea part. Merging only ever joins units, so no level of the hierarchy divides it. It joins land at the top (k = 3, beta-sim 0.73). The land in the k = 7 ocean realm (New Guinea, the Bismarcks and the Solomons) is put there by the size floor, not by Infomap.
+- **Under `mt075` the sea splits.** Its units are:
+  - the Indo-West Pacific, 41.8M km², which merges back at beta-sim 0.734, as distinct as a continent;
+  - the Caribbean and tropical West Atlantic, 7.2M km² (0.47);
+  - the North Pacific, 4.4M km² (0.42);
+  - New Zealand's waters, 2.6M km² (0.55);
+  - the tropical East Pacific, 1.9M km² (0.49).
+
+  The cold and temperate rest of the sea is one module with the Holarctic land: 62.6M km², half of it sea. `mt075` never reached a stability of 0.8, so these are hints only.
+
+### Terrestrial unless COL says marine (2026-11-05)
+
+**The leak.** The ocean realm acts as a sink in the merge sequence ("Is there a natural k?"). The cause is land species in the sea parts.
+- **At the leaf cut of 0.5 under `mt090`,** the ocean realm's sea parts hold 49,020 species with no environment in COL. These include 13,518 flowering plants, 12,579 insects, 2,359 monocots, 1,996 arachnids, 1,274 reptiles, 812 ferns, 703 mosses and 526 mammals.
+- **Of the 10,335 species Australia shares with the ocean realm,** 7,191 are only in its sea parts. Three-quarters of the shared species have no environment.
+- **Why layer 4 missed them.** It makes a species land only if COL says exactly terrestrial or 95% of its records are on land. These species have a median of 80% on land, and a quarter have less than a third.
+
+**What does not work.** Markus asked whether to query GBIF twice by shape (marine and terrestrial), or to ignore coastal cells.
+- **Shape queries:** cells are already cut into land and sea parts, and a record's side is GBIF's country assignment (no GADM country means sea). Two shape queries would do the same thing, so the geometry is not the problem.
+- **Ignoring coastal cells:** that would lose about 3,200 cells at resolution 7, and every island.
+- **Inferring the environment from relatives** (the genus, then the family, where at least 95% of the species with an environment agree): this decides only 9,888 of the 49,020.
+- **Inferring it from the class:** this fails too, because COL's environment is patchy by source. The only mammals with one are marine.
+
+**Ruling (Markus, 2026-11-05).** Two changes to layer 4 (`clean.Settings`, commit 0ffa897):
+- **`land_share` from 0.95 to two thirds.** Clearly more than half on one side is enough. Diatoms or red algae that are mostly at sea stay at sea.
+- **Terrestrial unless COL says marine.** A species with no environment in COL is taken as terrestrial, as if COL said so, if it is of a class of `clean.TERRESTRIAL_CLASSES`:
+  - insects, springtails, arachnids, centipedes, millipedes;
+  - amphibians, reptiles, mammals;
+  - the seed plants, ferns, lycophytes, mosses, liverworts and hornworts.
+
+  COL's environment, where it has one, still decides. Freshwater, brackish and all of Aves stay exempt.
+
+**The exceptions.** Markus expected WoRMS's marine flags to cover the marine members of these classes. They are complete in WoRMS but not in release 315557: COL's environment comes from the sector's source, and for these groups that source has none. No whale, seal, sea turtle, seagrass or sea skater is marked marine, and only 4 of 459 Elapidae are. So a short list, `clean.MARINE_EXCEPTIONS`, keeps the rule of their records (two thirds) for:
+- **Mammals:** the orders Cetacea and Sirenia; the families Phocidae, Otariidae and Odobenidae; the genera Enhydra, Lontra and Ursus.
+- **Reptiles:** the sea turtles (Cheloniidae, Dermochelyidae), the sea snakes (eight genera of Hydrophiinae and Laticauda), and Amblyrhynchus.
+- **Seagrasses:** Zosteraceae, Posidoniaceae, Cymodoceaceae, Halophila, Enhalus and Thalassia.
+- **Marine insects and arachnids:** Halobates, Hermatobatidae, Pontomyia, Clunio, Halacaridae, Pontarachnidae and Desis.
+
+Mangroves and salt-marsh plants are left as land. Folding their sea records into the land part of the same cell loses nothing. COL might want to carry WoRMS's flags into the environment of the merged checklist; that is a data question for COL, not for this analysis.
+
+**The calibration** of layer 5 ran on layer 4 as it was. It is sealed and is not run again. `calibrate.DESIGN` now pins layer 4 to what it ran with (95%, no land classes), so its recorded results still describe the code. Setting 132's thresholds now act on layer 4's new output, which differs from the one they were chosen on. How much is in the numbers below.
+
+**The Costello gate** is byte-identical after the change. The cleaning hash changes, so `native_only` is run again from the cleaning at seeds 1 to 5, followed by the choice over seeds and the breaks. The results before the change are kept in `results/explore/res7-before-layer4/`.
