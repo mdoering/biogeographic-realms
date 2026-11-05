@@ -2524,7 +2524,7 @@ Mangroves and salt-marsh plants are left as land. Folding their sea records into
 **The rule (`clean.Settings.worms_environment`, on):**
 - WoRMS's environment stands in for COL's where COL has none; COL's own is never overruled. Layer 4 then applies its rules as before: exactly marine is a sea species, exactly terrestrial a land species, freshwater or brackish exempt, mixed values left to the records.
 - Mangroves (*Rhizophora*, *Avicennia*), which WoRMS mostly calls marine, become sea species where COL has no environment.
-- `clean.Sides` counts the species WoRMS gave an environment as `environment_from_worms`.
+- `Cleaned.sides` counts the species WoRMS gave an environment as `environment_from_worms`.
 - The calibration's `DESIGN` pins the setting off, as it ran.
 
 **The rerun.** The rerun of `native_only` started for "Terrestrial unless COL says marine" was stopped during seed 1, before any select result, and started again with WoRMS's environment. A new manifest would have cleaned again in the middle of it. The Costello gate is byte-identical.
