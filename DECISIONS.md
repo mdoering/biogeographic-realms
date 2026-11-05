@@ -2491,7 +2491,7 @@ Markus asked at what point the oceans get separated. On half A at resolution 7 (
 
 **The exceptions.** Markus expected WoRMS's marine flags to cover the marine members of these classes. They are complete in WoRMS but not in release 315557: COL's environment comes from the sector's source, and for these groups that source has none. No whale, seal, sea turtle, seagrass or sea skater is marked marine, and only 4 of 459 Elapidae are. So a short list, `clean.MARINE_EXCEPTIONS`, keeps the rule of their records (two thirds) for:
 - **Mammals:** the orders Cetacea and Sirenia; the families Phocidae, Otariidae and Odobenidae; the genera Enhydra, Lontra and Ursus.
-- **Reptiles:** the sea turtles (Cheloniidae, Dermochelyidae), the sea snakes (eight genera of Hydrophiinae and Laticauda), and Amblyrhynchus.
+- **Reptiles:** the sea turtles (Cheloniidae, Dermochelyidae), the sea snakes (seven genera of Hydrophiinae, and Laticauda), and Amblyrhynchus.
 - **Seagrasses:** Zosteraceae, Posidoniaceae, Cymodoceaceae, Halophila, Enhalus and Thalassia.
 - **Marine insects and arachnids:** Halobates, Hermatobatidae, Pontomyia, Clunio, Halacaridae, Pontarachnidae and Desis.
 
