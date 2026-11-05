@@ -467,8 +467,9 @@ def test_the_pipeline_runs_the_stages_up_to_the_one_asked_for_and_skips_the_curr
 CODES = pl.DataFrame(schema={"country": pl.String, "subdivision": pl.String, "code": pl.String})
 # The hashes of these inputs, as they were before the option existed and as every run of M1 has them. Change them consciously: a new value reruns every stage of
 # every run, so a change of the hashed inputs that is not meant to change the results (a new option off by default) must keep them.
-# The cleaning hash changed on 2026-11-05 (was 4a21d1f2…): layer 4 takes two thirds of the records and the land classes (DECISIONS, "Terrestrial unless COL says marine").
-DEFAULT_CLEAN_HASH = "64c9ca78fc5542e8050b5015dae64c4f1d95a6b0f9b0fb72359b88e9cea4b6bc"
+# The cleaning hash changed on 2026-11-05 (was 4a21d1f2…): layer 4 takes two thirds of the records and the land classes (DECISIONS, "Terrestrial unless COL says marine"),
+# and WoRMS's environment where COL has none ("WoRMS's environment").
+DEFAULT_CLEAN_HASH = "0ea97c1fb4e3d104125f8b39cc5be4e18924b9efd428a36651fcdcb229ca9cfa"
 DEFAULT_SELECT_HASH = "92587114b47877aecdd749bb5dd9bb72b26a2a45b77d8ea082f22fec3ea75e96"
 
 

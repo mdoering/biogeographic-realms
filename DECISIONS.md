@@ -2500,3 +2500,31 @@ Mangroves and salt-marsh plants are left as land. Folding their sea records into
 **The calibration** of layer 5 ran on layer 4 as it was. It is sealed and is not run again. `calibrate.DESIGN` now pins layer 4 to what it ran with (95%, no land classes), so its recorded results still describe the code. Setting 132's thresholds now act on layer 4's new output, which differs from the one they were chosen on. How much is in the numbers below.
 
 **The Costello gate** is byte-identical after the change. The cleaning hash changes, so `native_only` is run again from the cleaning at seeds 1 to 5, followed by the choice over seeds and the breaks. The results before the change are kept in `results/explore/res7-before-layer4/`.
+
+### WoRMS's environment (2026-11-05)
+
+**Why.** Markus suggested filling COL's missing environment from WoRMS, mapped to COL ids, instead of the hand-made exceptions of "Terrestrial unless COL says marine". He will look into why release 315557 lacks the marine flags of those groups.
+
+**Inputs:**
+- **The match:** a ChecklistBank matching job of WoRMS (dataset 2011) against COL XR 315557, requested by Markus. Job `59fcfcc1-565c-470f-963e-57be8814a05d`, relaxed mode, synonyms on, 1,160,000 rows in 18 minutes.
+- **WoRMS's environment:** its extended ColDP export (version 2026-10-01, export of 2026-10-27), which holds `col:environment`.
+  - The plain export (the first redirect of `export.zip?format=ColDP`) has no environment column.
+- `scripts/worms_environment.py` builds `data/reference/worms_environment.parquet` and enters it in the reference manifest with its sha256. That changes the cleaning hash of every run.
+
+**The mapping:**
+- **Which WoRMS usages count:** a WoRMS species usage takes its own environment if accepted, its accepted name's if a synonym.
+- **Which matches count:** exact or variant matches to a COL name of rank species, accepted, provisionally accepted or a plain synonym. A synonym stands for its accepted species. Ambiguous synonyms and misapplied names are left out.
+- **Several usages per species:** their environments are joined. That happens for 194,270 species, mostly through synonyms.
+- **Result:** 470,752 COL species get a WoRMS environment.
+  - **Where COL has its own,** the two agree exactly for 423,947 of 433,989 (98%). Most of the rest differ only in COL's "brackish".
+  - **Where COL has none,** WoRMS fills 36,763 species: 14,017 marine, 13,798 terrestrial, 5,924 freshwater, and the rest mixed. In the land classes it marks 122 mammals, 87 reptiles, 402 insects and 144 arachnids as marine, the groups the exceptions were for.
+
+**What WoRMS lacks here.** No seagrass is in this WoRMS export. Its *Posidonia* and *Halophila* are fossil molluscs and bryozoans of the same names, and it has no *Zostera* or *Thalassia*. So `clean.MARINE_EXCEPTIONS` stays, as a net for marine species that neither COL nor WoRMS marks. It acts only on species with no environment from either.
+
+**The rule (`clean.Settings.worms_environment`, on):**
+- WoRMS's environment stands in for COL's where COL has none; COL's own is never overruled. Layer 4 then applies its rules as before: exactly marine is a sea species, exactly terrestrial a land species, freshwater or brackish exempt, mixed values left to the records.
+- Mangroves (*Rhizophora*, *Avicennia*), which WoRMS mostly calls marine, become sea species where COL has no environment.
+- `clean.Sides` counts the species WoRMS gave an environment as `environment_from_worms`.
+- The calibration's `DESIGN` pins the setting off, as it ran.
+
+**The rerun.** The rerun of `native_only` started for "Terrestrial unless COL says marine" was stopped during seed 1, before any select result, and started again with WoRMS's environment. A new manifest would have cleaned again in the middle of it. The Costello gate is byte-identical.

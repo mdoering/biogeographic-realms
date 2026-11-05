@@ -53,14 +53,14 @@ def test_default_settings_are_setting_132():
     assert (s.satellite_record_share, s.satellite_cell_share, s.under_rate_factor, s.group_min_records) == (0.02, 0.20, 0.005, 300)
     assert s != DESIGN_5
     assert (DESIGN_5.satellite_record_share, DESIGN_5.satellite_cell_share, DESIGN_5.under_rate_factor, DESIGN_5.group_min_records) == (0.01, 0.05, 0.01, 1000)
-    calibrated = ("satellite_record_share", "satellite_cell_share", "under_rate_factor", "group_min_records", "land_share", "land_classes")  # layer 4 as the calibration ran it too
+    calibrated = ("satellite_record_share", "satellite_cell_share", "under_rate_factor", "group_min_records", "land_share", "land_classes", "worms_environment")  # layer 4 as the calibration ran it too
     assert replace(s, **{k: getattr(DESIGN_5, k) for k in calibrated}) == DESIGN_5
 
 
 def test_settings_hold_the_design_values_but_for_the_layer_5_thresholds():
     s = Settings()
     assert (s.land_share, s.satellite_gap_km) == (2 / 3, 500)  # two thirds since 2026-11-05, 95% before
-    assert s.land_classes == TERRESTRIAL_CLASSES and s.marine_exceptions == MARINE_EXCEPTIONS
+    assert s.land_classes == TERRESTRIAL_CLASSES and s.marine_exceptions == MARINE_EXCEPTIONS and s.worms_environment
     assert (s.satellite_min_datasets, s.satellite_min_years) == (2, 3)
     assert (s.under_max_records, s.thin_max_records, s.thin_km) == (5, 5, 1000)
     assert (s.core_share, s.heuristic_min_records, s.wcvp_mode) == (0.9, 20, "native_only")
@@ -917,6 +917,17 @@ def test_a_marine_group_the_environment_misses_keeps_the_rule_of_its_records(ran
     out = clean(counts(row("x", "11:land", n=1), row("x", "11:sea", n=9)), r, L4)
     assert kept(out) == {("x", "11:sea"): 10}
     assert name in MARINE_EXCEPTIONS and cls in TERRESTRIAL_CLASSES
+
+
+def test_worms_environment_stands_in_where_col_has_none():
+    # a seal with no environment in COL would be terrestrial by its class; WoRMS says marine. COL's own value is never overruled.
+    base = [taxon("seal", cls="Mammalia"), taxon("bug", cls="Insecta", environment="terrestrial"), taxon("worm", cls="Polychaeta")]
+    r = replace(refs(base), worms_environment=pl.DataFrame({"species_id": ["seal", "bug", "worm"], "worms_environment": ["marine", "marine", "terrestrial"]}))
+    c = counts(*(row(s, "11:land", n=3) for s in ("seal", "bug", "worm")), *(row(s, "11:sea", n=7) for s in ("seal", "bug", "worm")))
+    out = clean(c, r, L4)
+    assert kept(out) == {("seal", "11:sea"): 10, ("bug", "11:land"): 10, ("worm", "11:land"): 10}
+    assert out.sides["environment_from_worms"] == 2
+    assert kept(clean(c, r, L4, settings=Settings(worms_environment=False))) == {("seal", "11:land"): 10, ("bug", "11:land"): 10, ("worm", "11:sea"): 10}
 
 
 def test_the_land_classes_are_a_setting():

@@ -13,7 +13,7 @@ from realms.occurrences import COUNTS, DISTINCT
 
 # the design's layer 5 thresholds, which were the defaults of `Settings` until setting 132 of the calibration became them (Markus, 2026-11-01). A test of
 # what the design's values do passes this, and does not lean on the defaults
-DESIGN_5 = Settings(satellite_record_share=0.01, satellite_cell_share=0.05, under_rate_factor=0.01, group_min_records=1000, land_share=0.95, land_classes=frozenset())
+DESIGN_5 = Settings(satellite_record_share=0.01, satellite_cell_share=0.05, under_rate_factor=0.01, group_min_records=1000, land_share=0.95, land_classes=frozenset(), worms_environment=False)
 
 
 def make_grid(cells: dict[str, tuple[float, float]], edges: list[tuple[str, str]] = (), centres: dict[str, tuple[float, float]] | None = None) -> Grid:

@@ -272,13 +272,13 @@ def test_the_grid_has_144_settings_in_a_stable_order():
     assert grid == settings_grid()  # the same order every time: a setting's number means the same thing in every table, report and scoring
     assert grid[0] == replace(DESIGN_5, satellite_record_share=0.005, satellite_cell_share=0.02, under_rate_factor=0.005, group_min_records=300)
     assert grid[143] == replace(DESIGN_5, satellite_record_share=0.02, satellite_cell_share=0.20, under_rate_factor=0.02, group_min_records=3000)
-    assert all((s.land_share, s.land_classes) == (0.95, frozenset()) for s in grid)  # layer 4 as the calibration ran it, whatever the defaults of `Settings`
+    assert all((s.land_share, s.land_classes, s.worms_environment) == (0.95, frozenset(), False) for s in grid)  # layer 4 as the calibration ran it, whatever the defaults of `Settings`
     assert grid[1].group_min_records == 1000 and grid[3].under_rate_factor == 0.01  # the last varies fastest
     assert grid[12].satellite_cell_share == 0.05 and grid[48].satellite_record_share == 0.01  # and the first slowest: 48 settings to a record share, 12 to a cell share
     assert grid[64] == DESIGN_5 == DESIGN and grid.index(DESIGN_5) == 64  # the design's setting is the second value of every threshold: 1 * 48 + 1 * 12 + 1 * 3 + 1
     # the defaults of `Settings` are setting 132, which Markus chose (2026-11-01): the grid has it too, as the third record share, the fourth cell share and the first of the others
     # (with layer 4 as the calibration ran it: the defaults have taken two thirds and the land classes since 2026-11-05)
-    chosen = replace(Settings(), land_share=0.95, land_classes=frozenset())
+    chosen = replace(Settings(), land_share=0.95, land_classes=frozenset(), worms_environment=False)
     assert grid[132] == chosen and grid.index(chosen) == 132 == 2 * 48 + 3 * 12 + 0 * 3 + 0
 
 

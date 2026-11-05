@@ -7,6 +7,7 @@ only, and never asks ChecklistBank for a new one.
 A name that fits several species of one standing is ambiguous and is never guessed. Nothing joins to it, and the counts say how many.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -670,6 +671,22 @@ class References:
     griis_name_only: pl.DataFrame = field(default_factory=lambda: pl.DataFrame(schema=GRIIS_PAIR_SCHEMA))
     griis_name_only_no_cells: pl.DataFrame = field(default_factory=lambda: pl.DataFrame(schema=GRIIS_PAIR_SCHEMA))
     griis_lists: pl.DataFrame = field(default_factory=lambda: pl.DataFrame(schema=GRIIS_LIST_SCHEMA))  # `griis_lists`: what each list holds, native entries and all
+    # `species_id`, `worms_environment`: WoRMS's environment of the COL species it matched (`scripts/worms_environment.py`), empty if the manifest has none
+    worms_environment: pl.DataFrame = field(default_factory=lambda: pl.DataFrame(schema=WORMS_ENVIRONMENT_SCHEMA))
+
+
+WORMS_ENVIRONMENT_SCHEMA = {"species_id": pl.String, "worms_environment": pl.String}
+
+
+def load_worms_environment(manifest: dict) -> pl.DataFrame:
+    """The manifest's `worms_environment` table (`species_id`, `worms_environment`), checked against its sha256, or an empty one if it has none."""
+    path = _manifest_path(manifest, "worms_environment")
+    if path is None:
+        return pl.DataFrame(schema=WORMS_ENVIRONMENT_SCHEMA)
+    expected = manifest["worms_environment"].get("sha256")
+    if expected and hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise ValueError(f"{path} does not have the sha256 the manifest gives it: run scripts/worms_environment.py again")
+    return pl.read_parquet(path).select(list(WORMS_ENVIRONMENT_SCHEMA))
 
 
 def griis_without_cells(griis: pl.DataFrame, cells: pl.DataFrame) -> pl.DataFrame:
@@ -781,4 +798,5 @@ def load_references(grid: Grid, reference_dir: Path = Path("data/reference")) ->
         griis_name_only=griis_name_only,
         griis_name_only_no_cells=griis_name_only_no_cells,
         griis_lists=lists,
+        worms_environment=load_worms_environment(manifest),
     )

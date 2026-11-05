@@ -131,7 +131,8 @@ class Settings:
     `land_share` is the share of a species' records on one side that makes it a land or a sea species, whichever it is: two thirds since
     2026-11-05, 95% before (DECISIONS, "Terrestrial unless COL says marine"). `land_classes` are the classes whose species with no environment in COL
     layer 4 takes as terrestrial, as if COL said so, but for those in an order, family or genus of `marine_exceptions`. The calibration pins
-    both to what it ran with (`realms.calibrate.DESIGN`): 95% and no classes. `wcvp_mode` is how
+    both to what it ran with (`realms.calibrate.DESIGN`): 95% and no classes. `worms_environment` lets WoRMS's environment stand in for COL's where
+    COL has none (`References.worms_environment`; DECISIONS, "WoRMS's environment", 2026-11-05); the calibration ran without it. `wcvp_mode` is how
     layer 3 uses WCVP (see `clean`): `native_only` is the design's rule, and which mode the analysis takes is decided in M1.
     `griis_without_status` is what layer 3 does with a GRIIS list whose export has no distribution table, so that nothing says which of its
     entries are introduced: `skip` (the rule, and the default) does not apply it, and `apply` applies it name-only, as every list was before
@@ -144,6 +145,7 @@ class Settings:
     land_share: float = 2 / 3
     land_classes: frozenset[str] = TERRESTRIAL_CLASSES
     marine_exceptions: frozenset[str] = MARINE_EXCEPTIONS
+    worms_environment: bool = True
     satellite_gap_km: int = 500
     satellite_record_share: float = 0.02
     satellite_cell_share: float = 0.20
@@ -566,20 +568,28 @@ def _layer_3(
         run.drop(_wcvp(judged(), refs, settings.wcvp_mode), rule)
 
 
-def _side_columns(taxa: pl.DataFrame) -> pl.DataFrame:
-    """What `_sides` reads of the taxa, one row per species: the environment, and the class, order, family and genus (null where the taxa lack the column)."""
+def _side_columns(taxa: pl.DataFrame, worms: pl.DataFrame | None = None) -> pl.DataFrame:
+    """What `_sides` reads of the taxa, one row per species: the environment, and the class, order, family and genus (null where the taxa lack the column).
+
+    With `worms` (`References.worms_environment`), WoRMS's environment stands in where COL has none, and `from_worms` says where it did."""
     ranks = [pl.col(c) if c in taxa.columns else pl.lit(None, dtype=pl.String).alias(c) for c in ("class", "order", "family", "genus")]
-    return taxa.select("species_id", "environment", *ranks).unique("species_id")
+    found = taxa.select("species_id", "environment", *ranks).unique("species_id")
+    if worms is None or worms.height == 0:
+        return found.with_columns(pl.lit(False).alias("from_worms"))
+    found = found.join(worms.unique("species_id"), on="species_id", how="left")
+    filled = pl.col("environment").is_null() & pl.col("worms_environment").is_not_null()
+    return found.with_columns(filled.alias("from_worms"), pl.coalesce("environment", "worms_environment").alias("environment")).drop("worms_environment")
 
 
-def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings: Settings) -> tuple[pl.DataFrame, dict[str, int]]:
+def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings: Settings, worms: pl.DataFrame | None = None) -> tuple[pl.DataFrame, dict[str, int]]:
     """`species_id` and `side` ("land", "sea" or null) of each species, from COL's environment and the side of its records, and the counts.
 
     A land species is exactly terrestrial in COL, or has no environment in COL and is of a class of `settings.land_classes` and of no order, family
     or genus of `settings.marine_exceptions`, or has at least `land_share` of its records on land parts. A sea species is exactly marine in COL or
     has at least `land_share` of its records on sea parts. Freshwater and brackish species and all of Aves are exempt. Where COL (or the class)
     and the records disagree, as for a species that is exactly marine with nearly all its records in land parts, `settings.side_conflict` says:
-    COL's environment decides, or the species is left alone. The counts are `Cleaned.sides`; `land_by_class` counts the species the class made land.
+    COL's environment decides, or the species is left alone. With `settings.worms_environment`, COL's environment is WoRMS's where COL has none
+    (`worms`). The counts are `Cleaned.sides`; `land_by_class` counts the species the class made land, `environment_from_worms` those WoRMS gave one.
     """
     share = (
         rows.join(meta.select("part", "kind"), on="part", how="left")
@@ -598,7 +608,7 @@ def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings:
     land_records, sea_records = pl.col("land") / pl.col("total") >= settings.land_share, pl.col("sea") / pl.col("total") >= settings.land_share
     none = pl.lit(None, dtype=pl.String)
     found = (
-        share.join(_side_columns(taxa), on="species_id", how="left")
+        share.join(_side_columns(taxa, worms if settings.worms_environment else None), on="species_id", how="left")
         .with_columns(exempt.alias("exempt"), by_class.alias("by_class"), land_env.alias("land_env"), sea_env.alias("sea_env"), land_records.alias("land_records"), sea_records.alias("sea_records"))
         .with_columns((pl.col("land_env") | pl.col("land_records")).alias("land_side"), (pl.col("sea_env") | pl.col("sea_records")).alias("sea_side"))
         .with_columns((~pl.col("exempt") & pl.col("land_side") & pl.col("sea_side")).alias("conflict"))
@@ -623,6 +633,7 @@ def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings:
         "sea": found.filter(pl.col("side") == "sea").height,
         "exempt": found.filter(pl.col("exempt")).height,
         "land_by_class": found.filter(pl.col("by_class") & (pl.col("side") == "land")).height,
+        "environment_from_worms": found.filter(pl.col("from_worms").fill_null(False)).height,
         "conflict": both.height,
         "conflict_terrestrial_at_sea": both.filter(pl.col("land_env") & pl.col("sea_records")).height,
         "conflict_marine_on_land": both.filter(pl.col("sea_env") & pl.col("land_records")).height,
@@ -632,7 +643,7 @@ def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings:
 
 def _layer_4(run: _Run, refs: References, grid: Grid, meta: pl.DataFrame, settings: Settings) -> pl.DataFrame:
     """Fold the rows on the wrong side (see `clean`), and return the keys (`KEY`) of the rows it moved, where they went."""
-    sides, run.sides = _sides(run.rows, refs.taxa, meta, settings)
+    sides, run.sides = _sides(run.rows, refs.taxa, meta, settings, refs.worms_environment)
     sides = sides.drop_nulls("side")
     places = meta.select("part", "cell", "kind", "other", "other_kind", "other_has_area")
     wrong = (
