@@ -219,7 +219,7 @@ def clean_inputs(
     if half != HALF and not split_sha256:
         raise ValueError(f"half {half!r} needs the sha256 of the split file in the hash")
     inputs = {
-        "settings": asdict(settings) | {"rules_off": sorted(settings.rules_off)},
+        "settings": asdict(settings) | {k: sorted(getattr(settings, k)) for k in ("rules_off", "land_classes", "marine_exceptions")},
         "layers": sorted(layers),
         "list_codes": digest(list_codes.sort(list_codes.columns).rows()),
         "counts": marker,

@@ -19,6 +19,8 @@ from realms.clean import (
     RULES,
     SWITCHABLE,
     LIST_CODES_SCHEMA,
+    MARINE_EXCEPTIONS,
+    TERRESTRIAL_CLASSES,
     Settings,
     _layer_3,
     _part_table,
@@ -41,18 +43,24 @@ ALL = frozenset(LAYERS)
 
 # ---- settings
 
+
+# layer 4 as it was before 2026-11-05 (95%, no land classes), for tests of other layers whose species would fold under the rules of now
+OLD_LAYER_4 = Settings(land_share=0.95, land_classes=frozenset())
+
 def test_default_settings_are_setting_132():
     # Markus chose setting 132 of the calibration's 144 on 2026-11-01: record share 2%, cell share 20%, rate factor 0.5%, group minimum 300
     s = Settings()
     assert (s.satellite_record_share, s.satellite_cell_share, s.under_rate_factor, s.group_min_records) == (0.02, 0.20, 0.005, 300)
     assert s != DESIGN_5
     assert (DESIGN_5.satellite_record_share, DESIGN_5.satellite_cell_share, DESIGN_5.under_rate_factor, DESIGN_5.group_min_records) == (0.01, 0.05, 0.01, 1000)
-    assert replace(s, **{k: getattr(DESIGN_5, k) for k in ("satellite_record_share", "satellite_cell_share", "under_rate_factor", "group_min_records")}) == DESIGN_5
+    calibrated = ("satellite_record_share", "satellite_cell_share", "under_rate_factor", "group_min_records", "land_share", "land_classes")  # layer 4 as the calibration ran it too
+    assert replace(s, **{k: getattr(DESIGN_5, k) for k in calibrated}) == DESIGN_5
 
 
 def test_settings_hold_the_design_values_but_for_the_layer_5_thresholds():
     s = Settings()
-    assert (s.land_share, s.satellite_gap_km) == (0.95, 500)
+    assert (s.land_share, s.satellite_gap_km) == (2 / 3, 500)  # two thirds since 2026-11-05, 95% before
+    assert s.land_classes == TERRESTRIAL_CLASSES and s.marine_exceptions == MARINE_EXCEPTIONS
     assert (s.satellite_min_datasets, s.satellite_min_years) == (2, 3)
     assert (s.under_max_records, s.thin_max_records, s.thin_km) == (5, 5, 1000)
     assert (s.core_share, s.heuristic_min_records, s.wcvp_mode) == (0.9, 20, "native_only")
@@ -112,7 +120,7 @@ def test_a_zero_area_part_folds_into_the_other_part_of_its_cell(layers):
 
 
 def test_a_cell_with_only_zero_area_parts_keeps_its_records():
-    out = clean(counts(row("s1", "20:land", n=5), row("s1", "20:sea", n=2)), refs(), ZERO)
+    out = clean(counts(row("s1", "20:land", n=5), row("s1", "20:sea", n=2)), refs(), ZERO, settings=OLD_LAYER_4)
     assert kept(out, "n") == {("s1", "20:land"): 5, ("s1", "20:sea"): 2}
     assert out.removed.height == 0
 
@@ -141,7 +149,7 @@ def test_excess_table_runs_on_maps_built_from_cleaned_presence():
     c = counts(*rows)
 
     # after the fold no part of zero area is left, and the map's realms all have area
-    cleaned = clean(c, refs(), grid)
+    cleaned = clean(c, refs(), grid, settings=OLD_LAYER_4)
     assert "20:land" not in set(cleaned.presence["part"]) and "20:sea" in set(cleaned.presence["part"])
     names = sorted(cleaned.presence["part"].unique())
     assert all(parts(grid, names)["area_km2"] >= ZERO_KM2)
@@ -216,16 +224,16 @@ def plant_refs(wcvp=(("p", "N", True), ("p", "I", False)), kingdom="Plantae"):
 def test_wcvp_modes():
     c = counts(*PLANT_ROWS)
 
-    native_only = clean(c, plant_refs(), WCVP_GRID, settings=Settings(wcvp_mode="native_only"))
+    native_only = clean(c, plant_refs(), WCVP_GRID, settings=Settings(land_share=0.95, land_classes=frozenset(), wcvp_mode="native_only"))
     # the introduced part, and the part WCVP does not mention. A border cell touching a native region counts as native.
     assert gone(native_only, 3, "wcvp_outside_native") == {("p", "11:land", "AA"), ("p", "13:land", "AA")}
     assert set(kept(native_only)) == {("p", "10:land"), ("p", "11:sea"), ("p", "14:land"), ("p", "15:land")}
 
-    introduced = clean(c, plant_refs(), WCVP_GRID, settings=Settings(wcvp_mode="introduced"))
+    introduced = clean(c, plant_refs(), WCVP_GRID, settings=Settings(land_share=0.95, land_classes=frozenset(), wcvp_mode="introduced"))
     assert gone(introduced, 3, "wcvp_introduced") == {("p", "11:land", "AA")}
     assert set(kept(introduced)) == {("p", "10:land"), ("p", "11:sea"), ("p", "13:land"), ("p", "14:land"), ("p", "15:land")}
 
-    off = clean(c, plant_refs(), WCVP_GRID, settings=Settings(wcvp_mode="off"))
+    off = clean(c, plant_refs(), WCVP_GRID, settings=Settings(land_share=0.95, land_classes=frozenset(), wcvp_mode="off"))
     assert off.removed.height == 0
     assert len(kept(off)) == len(PLANT_ROWS)
 
@@ -235,28 +243,28 @@ def test_the_default_wcvp_mode_is_native_only():
 
 
 def test_wcvp_never_touches_a_sea_part_or_a_land_part_without_a_region():
-    out = clean(counts(*PLANT_ROWS), plant_refs(), WCVP_GRID)
+    out = clean(counts(*PLANT_ROWS), plant_refs(), WCVP_GRID, settings=OLD_LAYER_4)
     assert ("p", "11:sea") in kept(out) and ("p", "15:land") in kept(out)
 
 
 def test_wcvp_applies_to_plants_only():
     c = counts(*PLANT_ROWS)
     for kingdom in ("Animalia", "Fungi", None):
-        out = clean(c, plant_refs(kingdom=kingdom), WCVP_GRID)
+        out = clean(c, plant_refs(kingdom=kingdom), WCVP_GRID, settings=OLD_LAYER_4)
         assert out.removed.height == 0, kingdom
 
 
 def test_wcvp_leaves_a_plant_with_no_native_region_alone_unless_the_mode_is_introduced():
     only_introduced = (("p", "I", False),)
     c = counts(*PLANT_ROWS)
-    assert clean(c, plant_refs(only_introduced), WCVP_GRID, settings=Settings(wcvp_mode="native_only")).removed.height == 0
-    out = clean(c, plant_refs(only_introduced), WCVP_GRID, settings=Settings(wcvp_mode="introduced"))
+    assert clean(c, plant_refs(only_introduced), WCVP_GRID, settings=Settings(land_share=0.95, land_classes=frozenset(), wcvp_mode="native_only")).removed.height == 0
+    out = clean(c, plant_refs(only_introduced), WCVP_GRID, settings=Settings(land_share=0.95, land_classes=frozenset(), wcvp_mode="introduced"))
     assert gone(out, 3, "wcvp_introduced") == {("p", "11:land", "AA"), ("p", "14:land", "AA")}  # 14 touches I and no native region now
 
 
 def test_wcvp_leaves_a_plant_it_does_not_list_alone():
     for mode in ("native_only", "introduced"):
-        assert clean(counts(*PLANT_ROWS), plant_refs(wcvp=()), WCVP_GRID, settings=Settings(wcvp_mode=mode)).removed.height == 0
+        assert clean(counts(*PLANT_ROWS), plant_refs(wcvp=()), WCVP_GRID, settings=Settings(land_share=0.95, land_classes=frozenset(), wcvp_mode=mode)).removed.height == 0
 
 
 def test_wcvp_removes_every_country_of_a_part():
@@ -292,7 +300,7 @@ def test_a_sub_national_list_applies_to_the_code_gbif_uses_in_its_cells_and_not_
         row("s1", "10:land", country="FR"),
         row("s1", "10:land", country="RE"),
     )
-    out = clean(c, r, GRID)
+    out = clean(c, r, GRID, settings=OLD_LAYER_4)
     assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "RE")}
     assert gone(out, 3, "griis") == set()
     assert set(kept(out)) == {("s1", "11:sea"), ("s1", "10:land"), ("s2", "11:land")}  # outside the cells, or another code, the list does not apply
@@ -353,7 +361,7 @@ def test_subnational_list_spares_the_neighbour_country_in_a_border_cell():
         row("s1", "12:sea", country="CA"),
         row("s1", "10:land", country="US"),  # a US row outside the list's cells
     )
-    out = clean(c, r, GRID)
+    out = clean(c, r, GRID, settings=OLD_LAYER_4)
     assert gone(out, 3, "griis_subnational") == {("s1", "11:land", "US"), ("s1", "11:sea", "US")}
     assert kept(out) == {("s1", "10:land"): 10, ("s1", "11:land"): 10, ("s1", "12:sea"): 10, ("s2", "11:land"): 10}
 
@@ -726,7 +734,7 @@ def test_what_task_10_could_not_place_is_not_applied_and_is_counted():
         wrims_no_country=[("s1", "a", "Open sea", None), ("absent", "a", "Open sea", None)],
     )
     c = counts(row("s1", "10:land", country="FR", n=5), row("s1", "11:sea", country="FR", n=2), row("s2", "10:land", country="FR", n=4))
-    out = clean(c, r, GRID)
+    out = clean(c, r, GRID, settings=OLD_LAYER_4)
     assert out.removed.height == 0 and kept(out) == {("s1", "10:land"): 5, ("s1", "11:sea"): 2, ("s2", "10:land"): 4}
     # only pairs of species that have records are counted, with the records they have
     unplaced = out.unplaced.sort("rule", "species_id")
@@ -760,7 +768,7 @@ def test_wrims_removes_a_species_from_the_sea_parts_of_the_countries_it_is_intro
         row("s1", "12:sea", country=None),
         row("s2", "11:sea", country="IT"),
     )
-    out = clean(c, r, GRID)
+    out = clean(c, r, GRID, settings=OLD_LAYER_4)
     assert gone(out, 3, "wrims") == {("s1", "11:sea", "IT")}
     assert set(kept(out)) == {("s1", "11:land"), ("s1", "11:sea"), ("s1", "12:sea"), ("s2", "11:sea")}
 
@@ -874,15 +882,48 @@ def test_exactly_terrestrial_is_enough_whatever_the_records_say():
     assert len(kept(clean(c, r, L4))) == 2
 
 
-def test_at_least_95_percent_of_records_on_one_side_makes_a_species_of_that_side():
+def test_at_least_two_thirds_of_records_on_one_side_makes_a_species_of_that_side():
     r = refs([taxon("land"), taxon("near"), taxon("sea")])
     c = counts(
-        row("land", "11:land", n=19), row("land", "11:sea", n=1),  # exactly 95%
-        row("near", "11:land", n=18), row("near", "11:sea", n=2),  # 90%
-        row("sea", "11:sea", n=95), row("sea", "11:land", n=5),
+        row("land", "11:land", n=2), row("land", "11:sea", n=1),  # exactly two thirds
+        row("near", "11:land", n=13), row("near", "11:sea", n=7),  # 65%
+        row("sea", "11:sea", n=70), row("sea", "11:land", n=30),
     )
     out = clean(c, r, L4)
-    assert kept(out) == {("land", "11:land"): 20, ("near", "11:land"): 18, ("near", "11:sea"): 2, ("sea", "11:sea"): 100}
+    assert kept(out) == {("land", "11:land"): 3, ("near", "11:land"): 13, ("near", "11:sea"): 7, ("sea", "11:sea"): 100}
+
+
+def test_with_no_environment_a_species_of_a_land_class_is_terrestrial_whatever_its_records_say():
+    # an insect with no environment and nine tenths of its records at sea, as on a small island with rough coordinates
+    r = refs([taxon("bug", cls="Insecta"), taxon("herb", kingdom="Plantae", cls="Magnoliopsida"), taxon("worm", cls="Polychaeta")])
+    c = counts(*(row(s, "11:land", n=1) for s in ("bug", "herb", "worm")), *(row(s, "11:sea", n=9) for s in ("bug", "herb", "worm")))
+    out = clean(c, r, L4)
+    assert kept(out) == {("bug", "11:land"): 10, ("herb", "11:land"): 10, ("worm", "11:sea"): 10}  # a polychaete is of no land class: its records decide
+    assert out.sides["land_by_class"] == 2
+
+
+def test_the_class_does_not_overrule_an_environment_in_col():
+    r = refs([taxon("mite", cls="Arachnida", environment="marine"), taxon("bug", cls="Insecta", environment="freshwater,terrestrial")])
+    c = counts(row("mite", "11:land", n=1), row("mite", "11:sea", n=9), row("bug", "11:land", n=5), row("bug", "11:sea", n=5))
+    out = clean(c, r, L4)
+    assert kept(out) == {("mite", "11:sea"): 10, ("bug", "11:land"): 5, ("bug", "11:sea"): 5}  # marine stays at sea, freshwater is exempt
+    assert out.sides["land_by_class"] == 0
+
+
+@pytest.mark.parametrize("rank, name", [("order", "Cetacea"), ("family", "Cheloniidae"), ("genus", "Hydrophis"), ("family", "Zosteraceae"), ("genus", "Halobates")])
+def test_a_marine_group_the_environment_misses_keeps_the_rule_of_its_records(rank, name):
+    cls = {"Cetacea": "Mammalia", "Cheloniidae": "Reptilia", "Hydrophis": "Reptilia", "Zosteraceae": "Liliopsida", "Halobates": "Insecta"}[name]
+    r = refs([taxon("x", cls=cls, **{rank: name})])
+    out = clean(counts(row("x", "11:land", n=1), row("x", "11:sea", n=9)), r, L4)
+    assert kept(out) == {("x", "11:sea"): 10}
+    assert name in MARINE_EXCEPTIONS and cls in TERRESTRIAL_CLASSES
+
+
+def test_the_land_classes_are_a_setting():
+    r = refs([taxon("bug", cls="Insecta")])
+    c = counts(row("bug", "11:land", n=1), row("bug", "11:sea", n=9))
+    assert kept(clean(c, r, L4, settings=Settings(land_classes=frozenset()))) == {("bug", "11:sea"): 10}
+    assert kept(clean(c, r, L4, settings=Settings(marine_exceptions=frozenset({"Insecta"})))) == {("bug", "11:land"): 10}  # a class name is no exception
 
 
 def test_the_share_is_a_setting():

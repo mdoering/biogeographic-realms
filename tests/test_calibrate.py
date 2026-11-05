@@ -270,19 +270,23 @@ def test_the_grid_has_144_settings_in_a_stable_order():
     }
     assert [(s.satellite_record_share, s.satellite_cell_share, s.under_rate_factor, s.group_min_records) for s in grid] == list(itertools.product(*THRESHOLDS.values()))
     assert grid == settings_grid()  # the same order every time: a setting's number means the same thing in every table, report and scoring
-    assert grid[0] == Settings(satellite_record_share=0.005, satellite_cell_share=0.02, under_rate_factor=0.005, group_min_records=300)
-    assert grid[143] == Settings(satellite_record_share=0.02, satellite_cell_share=0.20, under_rate_factor=0.02, group_min_records=3000)
+    assert grid[0] == replace(DESIGN_5, satellite_record_share=0.005, satellite_cell_share=0.02, under_rate_factor=0.005, group_min_records=300)
+    assert grid[143] == replace(DESIGN_5, satellite_record_share=0.02, satellite_cell_share=0.20, under_rate_factor=0.02, group_min_records=3000)
+    assert all((s.land_share, s.land_classes) == (0.95, frozenset()) for s in grid)  # layer 4 as the calibration ran it, whatever the defaults of `Settings`
     assert grid[1].group_min_records == 1000 and grid[3].under_rate_factor == 0.01  # the last varies fastest
     assert grid[12].satellite_cell_share == 0.05 and grid[48].satellite_record_share == 0.01  # and the first slowest: 48 settings to a record share, 12 to a cell share
     assert grid[64] == DESIGN_5 == DESIGN and grid.index(DESIGN_5) == 64  # the design's setting is the second value of every threshold: 1 * 48 + 1 * 12 + 1 * 3 + 1
     # the defaults of `Settings` are setting 132, which Markus chose (2026-11-01): the grid has it too, as the third record share, the fourth cell share and the first of the others
-    assert grid[132] == Settings() and grid.index(Settings()) == 132 == 2 * 48 + 3 * 12 + 0 * 3 + 0
+    # (with layer 4 as the calibration ran it: the defaults have taken two thirds and the land classes since 2026-11-05)
+    chosen = replace(Settings(), land_share=0.95, land_classes=frozenset())
+    assert grid[132] == chosen and grid.index(chosen) == 132 == 2 * 48 + 3 * 12 + 0 * 3 + 0
 
 
 def test_the_grid_does_not_depend_on_the_defaults_of_settings():
-    # the grid sets the four thresholds itself, so a base with any thresholds gives the same 144 settings, and the defaults of `Settings` may change without it
-    odd = Settings(satellite_record_share=0.9, satellite_cell_share=0.9, under_rate_factor=0.9, group_min_records=7)
-    assert settings_grid(odd) == settings_grid(DESIGN_5) == settings_grid(Settings()) == settings_grid()
+    # the grid sets the four thresholds itself, so a base with any thresholds gives the same 144 settings, and its default base (`DESIGN`) pins layer 4,
+    # so the defaults of `Settings` may change without it
+    odd = replace(DESIGN_5, satellite_record_share=0.9, satellite_cell_share=0.9, under_rate_factor=0.9, group_min_records=7)
+    assert settings_grid(odd) == settings_grid(DESIGN_5) == settings_grid()
     fixture = pl.read_csv(ROOT / "tests" / "fixtures" / "res7_grid144_settings.csv")
     assert [(s.satellite_record_share, s.satellite_cell_share, s.under_rate_factor, s.group_min_records) for s in settings_grid()] == list(
         zip(*(fixture[k].to_list() for k in THRESHOLDS), strict=True)

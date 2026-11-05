@@ -20,6 +20,7 @@ Order and attribution:
   A sub-national list applies to the rows in its cells that carry its **effective country code**: its own where GBIF uses that materially in those cells, otherwise the code GBIF mostly uses there. A decision made once and frozen (see `derive_list_codes`), so that two runs apply the same lists.
 - **Layer 4** folds a clearly land or clearly sea species' records on the wrong side to the right side. COL's environment is the surer
   word of the two ways to be clear, so where it disagrees with the records `Settings.side_conflict` lets it decide, or leaves the species be.
+  A species with no environment of a class of `Settings.land_classes` counts as terrestrial in COL, but for the marine groups of `Settings.marine_exceptions`.
   **Layer 3 then judges again every row that layer 4 moved, where it went**, with the same settings, and a row it takes is logged under the layer 3
   rule: layer 3's judgement is about a place, so a fold must not put back what it took out of the part a row is folded into (a marine crab that WRiMS
   takes out of a cell's sea part, refilled from the cell's land part). That holds for a fold into the neighbouring cell too.
@@ -96,6 +97,23 @@ REMOVED_SCHEMA = {
 UNPLACED_SCHEMA = {"rule": pl.String, "species_id": pl.String, "country": pl.String, "place": pl.String, "records": pl.Int64}
 # COL's environment is a sorted, comma-separated list ("brackish,freshwater,marine,terrestrial")
 FRESH_OR_BRACKISH = r"(^|,)(freshwater|brackish)(,|$)"
+# Layer 4 takes a species of these classes with no environment in COL as terrestrial (DECISIONS, "Terrestrial unless COL says marine", 2026-11-05).
+# On half A, 49,020 species with no environment were in the sea parts of the ocean realm, most of them flowering plants, insects, monocots, arachnids,
+# ferns, mosses and reptiles: land species on the coast that the share of their records did not make land species.
+TERRESTRIAL_CLASSES = frozenset({
+    "Insecta", "Collembola", "Arachnida", "Chilopoda", "Diplopoda", "Amphibia", "Reptilia", "Mammalia",
+    "Magnoliopsida", "Liliopsida", "Pinopsida", "Cycadopsida", "Gnetopsida", "Ginkgoopsida", "Polypodiopsida", "Lycopodiopsida",
+    "Bryopsida", "Sphagnopsida", "Polytrichopsida", "Andreaeopsida", "Jungermanniopsida", "Marchantiopsida", "Anthocerotopsida",
+})
+# Orders, families and genera of those classes that live in the sea or on the shore and that release 315557 does not mark marine (COL's environment
+# misses most of WoRMS's flags there: no whale, seal, sea turtle, sea snake, seagrass or sea skater is marked). Their species keep the rule of their records.
+MARINE_EXCEPTIONS = frozenset({
+    "Cetacea", "Sirenia", "Phocidae", "Otariidae", "Odobenidae", "Enhydra", "Lontra", "Ursus",
+    "Cheloniidae", "Dermochelyidae", "Hydrophis", "Laticauda", "Aipysurus", "Emydocephalus", "Hydrelaps", "Parahydrophis", "Ephalophis",
+    "Microcephalophis", "Amblyrhynchus",
+    "Zosteraceae", "Posidoniaceae", "Cymodoceaceae", "Halophila", "Enhalus", "Thalassia",
+    "Halobates", "Hermatobatidae", "Pontomyia", "Clunio", "Halacaridae", "Pontarachnidae", "Desis",
+})
 
 
 @dataclass(frozen=True)
@@ -110,7 +128,10 @@ class Settings:
     comparison that needs them says so (`tests/clean_helpers.DESIGN_5`, `realms.calibrate.DESIGN`). The calibration's grid sets those four itself, so
     that these defaults can change without it changing.
 
-    `land_share` is the share of a species' records on one side that makes it a land or a sea species, whichever it is. `wcvp_mode` is how
+    `land_share` is the share of a species' records on one side that makes it a land or a sea species, whichever it is: two thirds since
+    2026-11-05, 95% before (DECISIONS, "Terrestrial unless COL says marine"). `land_classes` are the classes whose species with no environment in COL
+    layer 4 takes as terrestrial, as if COL said so, but for those in an order, family or genus of `marine_exceptions`. The calibration pins
+    both to what it ran with (`realms.calibrate.DESIGN`): 95% and no classes. `wcvp_mode` is how
     layer 3 uses WCVP (see `clean`): `native_only` is the design's rule, and which mode the analysis takes is decided in M1.
     `griis_without_status` is what layer 3 does with a GRIIS list whose export has no distribution table, so that nothing says which of its
     entries are introduced: `skip` (the rule, and the default) does not apply it, and `apply` applies it name-only, as every list was before
@@ -120,7 +141,9 @@ class Settings:
     alone. `rules_off` names rules of `SWITCHABLE` to leave out one at a time.
     """
 
-    land_share: float = 0.95
+    land_share: float = 2 / 3
+    land_classes: frozenset[str] = TERRESTRIAL_CLASSES
+    marine_exceptions: frozenset[str] = MARINE_EXCEPTIONS
     satellite_gap_km: int = 500
     satellite_record_share: float = 0.02
     satellite_cell_share: float = 0.20
@@ -148,6 +171,8 @@ class Settings:
         if not 0.5 < self.land_share <= 1:
             raise ValueError(f"land_share is a share above one half, so that a species has one side at most, not {self.land_share}")
         object.__setattr__(self, "rules_off", frozenset(self.rules_off))
+        object.__setattr__(self, "land_classes", frozenset(self.land_classes))
+        object.__setattr__(self, "marine_exceptions", frozenset(self.marine_exceptions))
         unknown = sorted(self.rules_off - set(SWITCHABLE))
         if unknown:
             raise ValueError(f"rules_off can name {SWITCHABLE}, not {unknown}: layers go off with `layers`, WCVP with wcvp_mode, and zero_area_part is not a switch")
@@ -168,7 +193,7 @@ class Cleaned:
     removals of layers 2 to 5 (those with a null `to_part`) are the input's `n - n_human_text` with layer 1 on, and its `n_raw` with layer 1 off.
     `unplaced`: the pairs Task 10 could not place on the grid, for the species that have records: `rule` (the one that would
     have applied them), `species_id`, `country`, `place` (the subdivision or the marine area) and the species' `records`.
-    `sides`: how layer 4 sorted the species (`species`, `land`, `sea`, `exempt`, `conflict`, and the two kinds of conflict), empty if
+    `sides`: how layer 4 sorted the species (`species`, `land`, `sea`, `exempt`, `land_by_class`, `conflict`, and the two kinds of conflict), empty if
     layer 4 was off.
     """
 
@@ -541,13 +566,20 @@ def _layer_3(
         run.drop(_wcvp(judged(), refs, settings.wcvp_mode), rule)
 
 
+def _side_columns(taxa: pl.DataFrame) -> pl.DataFrame:
+    """What `_sides` reads of the taxa, one row per species: the environment, and the class, order, family and genus (null where the taxa lack the column)."""
+    ranks = [pl.col(c) if c in taxa.columns else pl.lit(None, dtype=pl.String).alias(c) for c in ("class", "order", "family", "genus")]
+    return taxa.select("species_id", "environment", *ranks).unique("species_id")
+
+
 def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings: Settings) -> tuple[pl.DataFrame, dict[str, int]]:
     """`species_id` and `side` ("land", "sea" or null) of each species, from COL's environment and the side of its records, and the counts.
 
-    A land species is exactly terrestrial in COL or has at least `land_share` of its records on land parts, and a sea species is the
-    same the other way round. Freshwater and brackish species and all of Aves are exempt. Where the two disagree, as for a species that
-    is exactly marine with nearly all its records in land parts, `settings.side_conflict` says: COL's environment decides, or the
-    species is left alone. The counts are `Cleaned.sides`.
+    A land species is exactly terrestrial in COL, or has no environment in COL and is of a class of `settings.land_classes` and of no order, family
+    or genus of `settings.marine_exceptions`, or has at least `land_share` of its records on land parts. A sea species is exactly marine in COL or
+    has at least `land_share` of its records on sea parts. Freshwater and brackish species and all of Aves are exempt. Where COL (or the class)
+    and the records disagree, as for a species that is exactly marine with nearly all its records in land parts, `settings.side_conflict` says:
+    COL's environment decides, or the species is left alone. The counts are `Cleaned.sides`; `land_by_class` counts the species the class made land.
     """
     share = (
         rows.join(meta.select("part", "kind"), on="part", how="left")
@@ -560,12 +592,14 @@ def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings:
     )
     environment = pl.col("environment")
     exempt = environment.str.contains(FRESH_OR_BRACKISH).fill_null(False) | (pl.col("class") == "Aves").fill_null(False)
-    land_env, sea_env = (environment == "terrestrial").fill_null(False), (environment == "marine").fill_null(False)
+    excepted = pl.any_horizontal(pl.col(rank).is_in(list(settings.marine_exceptions)).fill_null(False) for rank in ("order", "family", "genus"))
+    by_class = environment.is_null() & pl.col("class").is_in(list(settings.land_classes)).fill_null(False) & ~excepted
+    land_env, sea_env = (environment == "terrestrial").fill_null(False) | by_class, (environment == "marine").fill_null(False)
     land_records, sea_records = pl.col("land") / pl.col("total") >= settings.land_share, pl.col("sea") / pl.col("total") >= settings.land_share
     none = pl.lit(None, dtype=pl.String)
     found = (
-        share.join(taxa.select("species_id", "environment", "class").unique("species_id"), on="species_id", how="left")
-        .with_columns(exempt.alias("exempt"), land_env.alias("land_env"), sea_env.alias("sea_env"), land_records.alias("land_records"), sea_records.alias("sea_records"))
+        share.join(_side_columns(taxa), on="species_id", how="left")
+        .with_columns(exempt.alias("exempt"), by_class.alias("by_class"), land_env.alias("land_env"), sea_env.alias("sea_env"), land_records.alias("land_records"), sea_records.alias("sea_records"))
         .with_columns((pl.col("land_env") | pl.col("land_records")).alias("land_side"), (pl.col("sea_env") | pl.col("sea_records")).alias("sea_side"))
         .with_columns((~pl.col("exempt") & pl.col("land_side") & pl.col("sea_side")).alias("conflict"))
         .with_columns(
@@ -588,6 +622,7 @@ def _sides(rows: pl.DataFrame, taxa: pl.DataFrame, meta: pl.DataFrame, settings:
         "land": found.filter(pl.col("side") == "land").height,
         "sea": found.filter(pl.col("side") == "sea").height,
         "exempt": found.filter(pl.col("exempt")).height,
+        "land_by_class": found.filter(pl.col("by_class") & (pl.col("side") == "land")).height,
         "conflict": both.height,
         "conflict_terrestrial_at_sea": both.filter(pl.col("land_env") & pl.col("sea_records")).height,
         "conflict_marine_on_land": both.filter(pl.col("sea_env") & pl.col("land_records")).height,

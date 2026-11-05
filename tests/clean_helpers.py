@@ -13,7 +13,7 @@ from realms.occurrences import COUNTS, DISTINCT
 
 # the design's layer 5 thresholds, which were the defaults of `Settings` until setting 132 of the calibration became them (Markus, 2026-11-01). A test of
 # what the design's values do passes this, and does not lean on the defaults
-DESIGN_5 = Settings(satellite_record_share=0.01, satellite_cell_share=0.05, under_rate_factor=0.01, group_min_records=1000)
+DESIGN_5 = Settings(satellite_record_share=0.01, satellite_cell_share=0.05, under_rate_factor=0.01, group_min_records=1000, land_share=0.95, land_classes=frozenset())
 
 
 def make_grid(cells: dict[str, tuple[float, float]], edges: list[tuple[str, str]] = (), centres: dict[str, tuple[float, float]] | None = None) -> Grid:
@@ -53,14 +53,15 @@ def counts(*rows) -> pl.DataFrame:
     return pl.DataFrame(list(rows), schema=schema)
 
 
-def taxon(species, kingdom="Animalia", cls="Insecta", environment=None, extinct=False):
-    return {"species_id": species, "kingdom": kingdom, "class": cls, "environment": environment, "extinct": extinct}
+def taxon(species, kingdom="Animalia", cls=None, environment=None, extinct=False, order=None, family=None, genus=None):
+    return {"species_id": species, "kingdom": kingdom, "class": cls, "environment": environment, "extinct": extinct, "order": order, "family": family, "genus": genus}
 
 
 def refs(
     taxa=(), groups=None, wcvp=(), griis=(), wrims=(), tdwg3=(), admin1=(), griis_no_cells=(), wrims_no_country=(), no_wild_range=(), griis_name_only=(), griis_name_only_no_cells=()
 ) -> References:
-    taxa = pl.DataFrame(list(taxa), schema={"species_id": pl.String, "kingdom": pl.String, "class": pl.String, "environment": pl.String, "extinct": pl.Boolean})
+    taxa = pl.DataFrame(list(taxa), schema={"species_id": pl.String, "kingdom": pl.String, "class": pl.String, "environment": pl.String, "extinct": pl.Boolean,
+                                            "order": pl.String, "family": pl.String, "genus": pl.String})
     griis_schema = {"species_id": pl.String, "country": pl.String, "subdivision": pl.String}
     wrims_schema = {"species_id": pl.String, "area_id": pl.String, "area": pl.String, "country": pl.String}
     if groups is None:

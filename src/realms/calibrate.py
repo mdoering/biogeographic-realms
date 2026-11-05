@@ -60,7 +60,8 @@ log = logging.getLogger(__name__)
 # The design's layer 5 thresholds (docs/design.md), the second value of every threshold of the grid (setting 64). They were the defaults of `Settings` until
 # Markus chose setting 132 of the grid (2026-11-01) and it became them. The calibration does not lean on those defaults, so that they can move without the calibration
 # moving: the grid sets all four thresholds itself, and what takes a setting by default here is this one.
-DESIGN = Settings(satellite_record_share=0.01, satellite_cell_share=0.05, under_rate_factor=0.01, group_min_records=1000)
+# Layer 4 as the calibration ran it, before 2026-11-05: 95% of the records, and no class taken as terrestrial (DECISIONS, "Terrestrial unless COL says marine").
+DESIGN = Settings(satellite_record_share=0.01, satellite_cell_share=0.05, under_rate_factor=0.01, group_min_records=1000, land_share=0.95, land_classes=frozenset())
 NATIVE_LOSS_LIMIT = 0.05
 # the knee rule's price: at most this many native presences lost for each extra outside presence removed, at each step along the hull: break-even, one for one
 MAX_MARGINAL = 1.0
@@ -339,8 +340,8 @@ def calibration_counts(counts: pl.DataFrame, refs: References) -> pl.DataFrame:
 
 
 def _early(settings: Settings) -> tuple:
-    """What layers 1, 2 and 4 take from the settings, which `calibrate` runs once: `land_share`, `side_conflict` and the rules of `EARLY_RULES` that are off."""
-    return settings.land_share, settings.side_conflict, settings.rules_off & EARLY_RULES
+    """What layers 1, 2 and 4 take from the settings, which `calibrate` runs once: `land_share`, `land_classes`, `marine_exceptions`, `side_conflict` and the rules of `EARLY_RULES` that are off."""
+    return settings.land_share, settings.land_classes, settings.marine_exceptions, settings.side_conflict, settings.rules_off & EARLY_RULES
 
 
 @dataclass(frozen=True)
