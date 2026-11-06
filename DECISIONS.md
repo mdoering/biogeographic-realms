@@ -2584,3 +2584,30 @@ The nested merges (land with land, the ocean apart):
 The full merge order (`merges.csv`) is the result; the levels are where it is drawn. Levels 6 and 7 (gaps of 0.037 and 0.021) are not drawn. Below 0.41 come single islands and units, which "distinct areas" would keep, but not as realms of their own.
 
 **To look at.** New Zealand joins the Palearctic (0.623), not Australia. The merge compares the union of a realm's taxa, and the Palearctic block holds most genera and families, so a small realm tends to join the largest. That is a property of union beta-sim and is not changed here.
+
+### The other runs and the circularity gate on `mt075` (2026-11-06)
+
+**The runs.** `off`, `introduced`, `native_only-no-extinct-no-no_wild_range`, `native_only-no-griis-no-griis_subnational` and `native_only-merged-names` were cleaned again with the new layer 4 and selected on `mt075` at seed 1, about 18 minutes each (log `res7/mt075-runs.log`). Each selects k = 5. The stability at seed 1:
+
+| Run | Stability |
+|---|---|
+| `off` | 0.813 |
+| `introduced` | 0.874 |
+| `native_only-no-extinct-no-no_wild_range` | 0.804 |
+| `native_only-no-griis-no-griis_subnational` | 0.957 |
+| `native_only` (median over five seeds) | 0.969 |
+
+The `mt090` outputs from before the change are kept in `res7/{circularity,crosscheck,review}-mt090/`.
+
+**The gate passes every mode, and the headline mode stays `native_only`** (`scripts/circularity.py --config mt075`, 99 rotations, `res7/circularity/`). The share of realm boundary along TDWG edges, against `off`'s 0.846, with the 95th percentile of the rotated boundaries:
+
+| Mode | Share | Raise over `off` | Null q95 |
+|---|---|---|---|
+| `introduced` | 0.881 | +0.034 | +0.057 |
+| `native_only` | 0.825 | −0.021 | +0.055 |
+| `native_only-no-extinct-no-no_wild_range` | 0.845 | −0.001 | +0.053 |
+| `native_only-no-griis-no-griis_subnational` | 0.872 | +0.026 | +0.053 |
+
+The figures are at `land_tolerance` 0.5; with no tolerance the shares are the same and every mode still passes.
+- **WCVP's native ranges do not pull the boundaries onto TDWG edges:** `native_only` lies further from them than `off`.
+- **The maps of the cleaning modes agree:** V is 0.975-0.990 among them. Against `off` it is 0.86-0.87, with about 41,000-45,000 km of sea boundary moved.
