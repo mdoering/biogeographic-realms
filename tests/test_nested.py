@@ -83,3 +83,72 @@ def test_bootstrap_recovery_finds_a_planted_map_again():
     assert table.height == 3 * 3 and table["jaccard"].min() > 0.9
     assert table.equals(bootstrap_recovery(ct, areas, adjacency, reference, 0.5, [], InfomapOptions(), n_boot=3, trials=1, workers=2))
     assert np.isclose(table["jaccard"].max(), 1.0)
+
+
+# the cut rules
+
+
+def test_replay_heights_gives_the_reference_heights_on_the_same_matrix():
+    unit_taxa = {
+        "o:sea": ["m0", "m1", "s0", "s1", "s2", "s3"],
+        "x:land": ["s0", "s1", "s2", "s3", "x4"],
+        "y:land": ["s0", "y1", "y2", "x4", "y4"],
+    }
+    from realms.nested import replay_heights
+
+    labels = {"o:sea": 0, "x:land": 1, "y:land": 2}
+    ct = matrix(taxa_rows(unit_taxa))
+    merges, _ = nested_merges(labels, ct, {0: True, 1: False, 2: False})
+    assert replay_heights(labels, merges, ct) == pytest.approx(merges["height"].to_list())
+
+
+def test_robust_levels_need_one_cut_to_fit_in_most_replicates():
+    import numpy as np
+    import polars as pl
+
+    from realms.nested import MERGES, robust_levels
+
+    merges = pl.DataFrame([{"k": 4, "height": 0.2, "keep": 0, "drop": 1, "kind": "land"}, {"k": 3, "height": 0.3, "keep": 0, "drop": 2, "kind": "land"},
+                           {"k": 2, "height": 0.8, "keep": 0, "drop": 3, "kind": "land"}], schema=MERGES)
+    # the first gap (0.2 to 0.3) is crossed in half of the replicates, the second (0.3 to 0.8) never
+    replicates = np.array([[0.2, 0.3, 0.8], [0.35, 0.25, 0.8], [0.2, 0.3, 0.75], [0.31, 0.3, 0.8]])
+    table = robust_levels(merges, replicates)
+    assert table["realms"].to_list() == [3, 2]
+    assert table["separated"].to_list() == pytest.approx([0.5, 1.0])
+    assert table["robust"].to_list() == [False, True]
+    assert table["cut"].to_list() == pytest.approx([0.25, 0.55])
+
+
+def test_robust_levels_have_no_cut_where_a_later_merge_is_lower():
+    import numpy as np
+    import polars as pl
+
+    from realms.nested import MERGES, robust_levels
+
+    merges = pl.DataFrame([{"k": 3, "height": 0.5, "keep": 0, "drop": 1, "kind": "land"}, {"k": 2, "height": 0.4, "keep": 0, "drop": 2, "kind": "land"}], schema=MERGES)
+    table = robust_levels(merges, np.array([[0.5, 0.4]]))
+    assert table.row(0, named=True)["cut"] is None and not table["robust"][0]
+
+
+def test_realm_excess_finds_a_planted_realm_and_not_a_random_one():
+    import numpy as np
+
+    from helpers import grid
+    from realms.matrix import cell_taxa
+    from realms.nested import realm_excess
+    from realms.synth import planted_network
+
+    presence, taxa, truth = planted_network(n_realms=3, cells_per_realm=10, endemic_species=40, widespread_species=3)
+    positions, adjacency = grid(6, 5)
+    ordered = sorted(truth, key=lambda c: (truth[c], int(c.split("-c")[1])))
+    name = dict(zip(positions, ordered))
+    adjacency = {name[p]: {name[n] for n in adjacency[p]} for p in positions}
+    areas = {c: 1.0 for c in ordered}
+    ct = cell_taxa(presence, taxa)
+    table = realm_excess(truth, ct, adjacency, areas, n_null=19, seed=1)
+    # on a 6 x 5 grid a null region can be the planted realm itself, so one realm's p is not at its floor of 1/20
+    assert table.height == 3 and (table["excess"] > 0.5).all() and (table["p"] <= 0.05).sum() >= 2
+    rng = np.random.default_rng(3)
+    shuffled = dict(zip(ordered, rng.permutation([truth[c] for c in ordered]).tolist()))
+    random = realm_excess(shuffled, ct, adjacency, areas, n_null=19, seed=1)
+    assert (random["excess"].abs() < 0.05).all() and (random["p"] > 0.05).all()

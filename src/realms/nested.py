@@ -169,3 +169,98 @@ def bootstrap_recovery(
     shared = (ct, areas, adjacency, reference, leaf_cut, cuts, options, seed, trials)
     rows = [row for rows in map_tasks(_boot, list(enumerate(draws)), shared, workers) for row in rows]
     return pl.DataFrame(rows, schema={"boot": pl.Int64, "cut": pl.Float64, "realm": pl.Int64, "jaccard": pl.Float64})
+
+
+# ---------------------------------------------------------------------------------------------------------------------------- the cut rules
+# (DECISIONS, "Nested levels: the cut rules", 2026-11-06): which levels are robust to the sampling of species (rule 2), and whether each realm of a
+# level holds more endemics than a random region of its area and pieces (rule 6).
+
+
+def replay_heights(start: Labels, merges: pl.DataFrame, ct: CellTaxa) -> list[float]:
+    """The height of each of `merges` (in the order made, from the map `start`) when the same groups merge in the same order on `ct`.
+
+    A group with no cell in `ct` has no taxa, and its beta-sim with anything is 1."""
+    merger = _Merger(start, ct)
+    index = {u: i for i, u in enumerate(merger.units)}
+    heights = []
+    for keep, drop in merges.select("keep", "drop").iter_rows():
+        i, j = index[keep], index[drop]
+        heights.append(float(merger.beta_sim()[i, j]))
+        merger.merge(i, j)
+    return heights
+
+
+def _replay(shared: tuple, task: tuple[int, np.ndarray]) -> list[float]:
+    ct, start, merges = shared
+    _, draws = task
+    return replay_heights(start, merges, ct.resample(draws))
+
+
+def height_replicates(ct: CellTaxa, start: Labels, merges: pl.DataFrame, n_boot: int = 199, seed: int = 1, workers: int = 1) -> np.ndarray:
+    """`replay_heights` on `n_boot` resamples of the species (drawn up front from one generator at `seed`, as `bootstrap_recovery` draws them):
+    resamples x merges."""
+    from realms.parallel import map_tasks
+
+    rng = np.random.default_rng(seed)
+    n_species = len(ct.species_ids())
+    if not n_species:
+        raise ValueError("height_replicates resamples species, so the matrix needs the species rank")
+    draws = [rng.integers(n_species, size=n_species) for _ in range(n_boot)]
+    rows = map_tasks(_replay, list(enumerate(draws)), (ct, start, merges), workers)
+    return np.array(rows, dtype=np.float64).reshape(n_boot, merges.height)
+
+
+def robust_levels(merges: pl.DataFrame, replicates: np.ndarray, share: float = 0.95) -> pl.DataFrame:
+    """Every place in the merge order where a cut could fall, and whether it is robust (rule 2).
+
+    The level after the first `done` merges (`merges` in the order made, the land-sea join excluded) holds where every merge made has a lower height
+    than every merge to come. It is robust where that holds in at least `share` of `replicates` (resamples x merges, `height_replicates`); its cut
+    is the middle of the reference's gap: half way between the highest merge made and the lowest to come. A row: `done`, `realms` (the count after
+    them), `below` and `above` (the gap's two ends), `cut`, `separated` (the share of replicates where a cut fits) and `robust`."""
+    within = merges.filter(pl.col("kind") != "both")
+    h = within["height"].to_numpy()
+    reps = replicates[:, : len(h)]
+    start = within["k"][0] if within.height else 1
+    rows = []
+    for done in range(1, len(h)):
+        below, above = float(h[:done].max()), float(h[done:].min())
+        separated = float(np.mean(reps[:, :done].max(axis=1) < reps[:, done:].min(axis=1))) if len(reps) else float("nan")
+        rows.append({"done": done, "realms": int(start) - done, "below": below, "above": above,
+                     "cut": (below + above) / 2 if above > below else None, "separated": separated, "robust": above > below and separated >= share})
+    schema = {"done": pl.Int64, "realms": pl.Int64, "below": pl.Float64, "above": pl.Float64, "cut": pl.Float64, "separated": pl.Float64, "robust": pl.Boolean}
+    return pl.DataFrame(rows, schema=schema)
+
+
+def _rank_incidences(ct: CellTaxa, cells: list[str]) -> list:
+    everything = ct.rows(cells)
+    from realms.matrix import Incidence
+
+    return [Incidence(everything.x[:, np.flatnonzero(ct.rank == r)], everything.totals[np.flatnonzero(ct.rank == r)]) for r in np.unique(ct.rank)]
+
+
+def realm_excess(
+    labels: Labels, ct: CellTaxa, adjacency: dict[str, set[str]], areas: dict[str, float], n_null: int = 99, seed: int = 1, tolerance: float = 0.95
+) -> pl.DataFrame:
+    """Each realm's endemic share against the same realm in `n_null` random maps of the same realm areas and pieces (`nullmodel.null_partitions`), the
+    shares averaged equally over the ranks of `ct`, as `nullmodel.endemism_excess` averages them (rule 6).
+
+    A taxon is endemic to a realm when at least `tolerance` of its cells lie inside. A row: `realm`, `observed`, `null_mean`, `null_q95`, `excess`
+    (observed less the null mean) and `p`, the share of the null maps (counting the observed one) whose realm has at least the observed share."""
+    from realms.endemism import realm_share
+    from realms.nullmodel import null_partitions
+
+    cells = sorted(labels)
+    realms = sorted(set(labels.values()))
+    position = {r: i for i, r in enumerate(realms)}
+    tables = _rank_incidences(ct, cells)
+
+    def shares(map_: Labels) -> np.ndarray:
+        cell_realm = np.array([position[map_[c]] for c in cells])
+        return np.mean([realm_share(t, cell_realm, len(realms), tolerance) for t in tables], axis=0)
+
+    observed = shares(labels)
+    nulls = np.array([shares(m) for m in null_partitions(labels, adjacency, areas, n=n_null, seed=seed)])
+    p = (1 + (nulls >= observed).sum(axis=0)) / (n_null + 1)
+    return pl.DataFrame({"realm": realms, "observed": observed, "null_mean": nulls.mean(axis=0), "null_q95": np.quantile(nulls, 0.95, axis=0),
+                         "excess": observed - nulls.mean(axis=0), "p": p},
+                        schema={"realm": pl.Int64, "observed": pl.Float64, "null_mean": pl.Float64, "null_q95": pl.Float64, "excess": pl.Float64, "p": pl.Float64})
