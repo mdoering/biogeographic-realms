@@ -2668,3 +2668,28 @@ Two known costs, already handled or reported:
 - **Duplicate genus and family ids, many of them provisional:** the merged-names run shows that they do not shape the realms (V 0.984 on `mt075`).
 
 Removed from the open points.
+
+### Visits against records: the check (2026-11-06)
+
+`native_only` was cleaned and selected on `mt075` (seed 1) from download 0003457 twice, with records and with visits as the evidence (`scripts/explore.py --evidence`, `results/visits/res7/`), and the two cut rules were applied to each (`scripts/nested_cuts.py`, `scripts/nested.py` without the bootstrap). A third column is the headline run on 0020744, so that the drift of GBIF between the two downloads (28.05M and 28.14M rows) shows apart from the evidence.
+
+| | 0020744, records | 0003457, records | 0003457, visits |
+|---|---|---|---|
+| selected k | 5 | 5 | 5 |
+| stability at k = 5 | 0.969 | 0.926 | 0.854 |
+| excess at k = 5 | 0.341 | 0.341 | 0.340 |
+| V at k = 5 | | 0.975 against 0020744 | 0.869 against records |
+| levels by the two rules | 5, 6, 7, 8, 9, 10, 13 | 5, 6, 8, 9, 10, 13 | 5, 6, 7, 8, 9, 12 |
+
+**Layer 5 with visits** (rows, against records on 0003457): `detached_satellite` 386,016 → 332,325, `thin_long_range` 55,451 → 78,554 (more rows fall under its 5), `under_reported` 154,719 → 124,055. Its thresholds were calibrated on records, so the shift is expected and the check stays a check.
+
+**What all three share:**
+- the coarsest level: the same five realms (the Holarctic, the Neotropics, the Afrotropics, Indo-Malaya with Australasia, the ocean);
+- at the finest, the Palearctic, the Nearctic, the Neotropics, Patagonia, the Afrotropics, Madagascar, Indo-Malaya, Australia, New Zealand, Hawaii, New Caledonia and the ocean.
+
+**What moves:**
+- **New Guinea:** its own realm on 0020744; inside an Indo-Malayan realm on 0003457 with records, where Indo-Malaya splits in two instead; with Australia with visits.
+- **New Zealand before it splits off:** with the Palearctic with records, with Australia with visits, together with the Antarctic coast and the subantarctic islands (247 parts; at k = 6 of the select stage as well). Its attachment to the Palearctic depends on how records are counted.
+- **The top five** merge in another order with visits (South and East Asia joins the Holarctic first at k = 4), as their heights tie at 0.79-0.82.
+
+**Reading:** the coarsest and the finest levels are robust to the evidence, apart from New Guinea; the intermediate attachments of the small realms are not. This supports reporting the coarsest and the finest levels that pass both rules, with the levels between as the merge order. Records stay the evidence, as the calibration was made on them; a switch to visits would need a new calibration, after M3.
