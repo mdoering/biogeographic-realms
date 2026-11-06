@@ -75,7 +75,7 @@ from realms.matrix import CellTaxa, cell_taxa
 from realms.natives import load_references
 from realms.network import network_from
 from realms.nullmodel import excess_table
-from realms.occurrences import load_country_counts, read_complete, resolution_of
+from realms.occurrences import VISITS, load_country_counts, read_complete, resolution_of
 from realms.select import bootstrap_stability, select_level
 from realms.split import load_split
 from realms.units import UnitSettings, Units, impute, is_coarse, major_groups, network_units, part_regions, removed_by_region
@@ -88,6 +88,11 @@ CLEAN_FILES = ("presence.parquet", "summary.csv", "summary_by_group.csv", "major
 UNIT_FILES = ("members.parquet", "presence.parquet", "areas.parquet", "adjacency.parquet", "excluded.parquet", "stats.parquet", "removed_by_region.csv", "cells.parquet")
 NAME_COLUMNS = ("kingdom", "order", "family", "genus")  # what `matrix.duplicate_names` needs of the taxa
 MERGED_SUFFIX = "merged-names"
+# what counts as a row's evidence (DECISIONS, "Species-days", 2026-11-06): its records, or its visits, which only a download with visits has
+EVIDENCE = ("records", "visits")
+VISITS_SUFFIX = "visits"
+# the counts that are records among `n`, scaled to visits by a row's visits per record when visits are the evidence
+RECORD_SUBSETS = ("n_nc", "n_ebird", "n_inat", "n_synonym", "n_human_text")
 MAP_FILES = ("partition.parquet", "structure.json", "candidates.parquet", "parts.parquet")
 SCREEN_FILES = (*MAP_FILES, "screen.csv")
 SELECT_FILES = (*MAP_FILES, "selection.csv", "selected.json")
@@ -153,16 +158,20 @@ def load_configs(path: Path) -> tuple[dict[str, InfomapOptions], Params]:
     return configs, Params(**screen)
 
 
-def run_name(mode: str, rules_off: Iterable[str] = (), merge_duplicate_names: bool = False, half: str = HALF) -> str:
+def run_name(mode: str, rules_off: Iterable[str] = (), merge_duplicate_names: bool = False, half: str = HALF, evidence: str = "records") -> str:
     """`native_only`, or `native_only-no-griis` with the rules switched off in sorted order, and `-merged-names` after them for a run that merges duplicate
-    genus and family names: the directory of a run. A half other than A ends it with `-half-<half>`, so that such a run never shares half A's directory."""
+    genus and family names: the directory of a run. `-visits` follows for a run whose evidence is visits. A half other than A ends it with `-half-<half>`,
+    so that such a run never shares half A's directory."""
+    if evidence not in EVIDENCE:
+        raise ValueError(f"the evidence is one of {EVIDENCE}, not {evidence!r}")
     if mode not in WCVP_MODES:
         raise ValueError(f"the WCVP mode is one of {WCVP_MODES}, not {mode!r}")
     unknown = sorted(set(rules_off) - set(SWITCHABLE))
     if unknown:
         raise ValueError(f"rules to switch off are of {SWITCHABLE}, not {unknown}")
     other_half = [f"half-{half}"] if half != HALF else []
-    return "-".join([mode, *(f"no-{rule}" for rule in sorted(set(rules_off))), *([MERGED_SUFFIX] if merge_duplicate_names else []), *other_half])
+    visits = [VISITS_SUFFIX] if evidence == "visits" else []
+    return "-".join([mode, *(f"no-{rule}" for rule in sorted(set(rules_off))), *([MERGED_SUFFIX] if merge_duplicate_names else []), *visits, *other_half])
 
 
 def config_dir(name: str, seed: int = 1) -> str:
@@ -209,7 +218,7 @@ def write_stamp(directory: Path, name: str, hash_: str, inputs: dict, log_entry:
 
 def clean_inputs(
     settings: Settings, layers: Iterable[int], list_codes: pl.DataFrame, marker: dict, manifest: str | None = None, merge_duplicate_names: bool = False,
-    half: str = HALF, split_sha256: str | None = None,
+    half: str = HALF, split_sha256: str | None = None, evidence: str = "records",
 ) -> dict:
     """What the cleaning stage's hash is of: the settings (the mode and the rules switched off are in them), the layers, the content of the frozen code table, the
     counts' `_COMPLETE` marker and the references' manifest (as a digest). `merge_duplicate_names` is in it only when it is on, as the taxa then carry names.
@@ -226,6 +235,7 @@ def clean_inputs(
         "manifest": manifest,
     }
     inputs |= {"merge_duplicate_names": True} if merge_duplicate_names else {}
+    inputs |= {"evidence": evidence} if evidence != "records" else {}  # records add nothing, which keeps the hashes of M1
     inputs |= {"half": half, "split": split_sha256} if half != HALF else {}
     return _versioned(inputs, "clean")
 
@@ -878,6 +888,26 @@ class CleanSpec:
     layers: tuple[int, ...]
     inputs: dict
     force: bool = False
+    evidence: str = "records"
+
+
+def evidence_counts(counts: pl.DataFrame, evidence: str) -> pl.DataFrame:
+    """The counts the cleaning reads, with `COUNTS` and nothing else. With `records`, they are as downloaded (visits dropped, if the download has them).
+
+    With `visits` (DECISIONS, "Species-days", 2026-11-06) a row's visits stand in for its records: `n` becomes `n_visits` and `n_open` `n_visits_open`, and
+    the counts that are records among `n` (`RECORD_SUBSETS`, `n_human_text` among them, which layer 1 subtracts) are scaled by the row's visits per record
+    and rounded, as the download has no visits for them. `n_raw` and the distinct counts stay."""
+    if evidence not in EVIDENCE:
+        raise ValueError(f"the evidence is one of {EVIDENCE}, not {evidence!r}")
+    keep = [c for c in counts.columns if c not in VISITS]
+    if evidence == "records":
+        return counts.select(keep)
+    missing = [c for c in VISITS if c not in counts.columns]
+    if missing:
+        raise ValueError(f"visits are the evidence, and the counts have no {missing}: the download was made without visits")
+    ratio = pl.when(pl.col("n") > 0).then(pl.col("n_visits") / pl.col("n")).otherwise(0.0)
+    scaled = [(pl.col(c) * ratio).round(0).cast(pl.Int64).alias(c) for c in RECORD_SUBSETS]
+    return counts.with_columns(*scaled, pl.col("n_visits").alias("n"), pl.col("n_visits_open").alias("n_open")).select(keep)
 
 
 @dataclass(frozen=True)
@@ -902,7 +932,7 @@ def clean_job(spec: CleanSpec) -> dict:
         raise ValueError(f"the grid file holds resolution {grid.resolution}, not {resolution}")
     refs = load_references(grid, spec.reference)
     split = load_split(spec.split)
-    counts = load_country_counts(spec.counts, split, "A")
+    counts = evidence_counts(load_country_counts(spec.counts, split, "A"), spec.evidence)
     del split
     return clean_stage(spec.out, counts, refs, grid, spec.settings, spec.layers, list_codes, spec.inputs, force=spec.force)
 
@@ -964,6 +994,7 @@ class Plan:
     seed: int = 1  # Infomap's, the bootstraps' and the null maps' seed (`Params.seed`); another seed writes to `<configuration>-s<seed>/`
     budget_gb: float = BUDGET_GB  # the most the parent and the workers of the bootstraps and the null maps may hold together
     half: str = HALF  # half A only: any other is refused here, so nothing can run on it by accident
+    evidence: str = "records"  # or "visits", for a download made with them: a run of its own, `<run>-visits`
 
     def __post_init__(self) -> None:
         if self.half != HALF:
@@ -992,12 +1023,13 @@ def run_pipeline(plan: Plan, unit_settings: UnitSettings = UnitSettings()) -> di
     names = list(plan.only) or list(configs)
     settings = Settings(wcvp_mode=plan.mode, rules_off=frozenset(plan.rules_off))
     merge = plan.merge_duplicate_names
-    out = Path(plan.results) / f"res{resolution}" / run_name(plan.mode, plan.rules_off, merge, plan.half)
+    out = Path(plan.results) / f"res{resolution}" / run_name(plan.mode, plan.rules_off, merge, plan.half, plan.evidence)
     out.mkdir(parents=True, exist_ok=True)
     manifest = plan.reference / "manifest.json"
     split_sha256 = hashlib.sha256(Path(plan.split).read_bytes()).hexdigest() if plan.half != HALF else None  # the split file's bytes, never a half of the counts
     inputs = clean_inputs(
-        settings, LAYERS, list_codes, marker, hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.exists() else None, merge, plan.half, split_sha256
+        settings, LAYERS, list_codes, marker, hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.exists() else None, merge, plan.half, split_sha256,
+        plan.evidence,
     )
     wanted = STAGES.index(plan.stage)
     force = {stage: plan.force and stage == plan.stage for stage in STAGES}
@@ -1005,7 +1037,7 @@ def run_pipeline(plan: Plan, unit_settings: UnitSettings = UnitSettings()) -> di
     done: dict = {"directory": out}
 
     begun = time.perf_counter()
-    result, peak = call(clean_job, CleanSpec(plan.counts, plan.reference, plan.split, plan.frozen_dir, out, settings, tuple(LAYERS), inputs, force["clean"]))
+    result, peak = call(clean_job, CleanSpec(plan.counts, plan.reference, plan.split, plan.frozen_dir, out, settings, tuple(LAYERS), inputs, force["clean"], plan.evidence))
     done["clean"] = result
     if not result["skipped"]:
         # `seconds` is the stage itself and `wall_seconds` the job with the loading of the references, the grid and the counts, whose peak is the child's

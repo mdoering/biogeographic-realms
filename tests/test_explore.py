@@ -744,3 +744,40 @@ def test_migrate_select_moves_the_select_result_and_drops_the_overwritten_screen
     (config / "stage-select.json").write_text("{}")
     with pytest.raises(ValueError, match="both here and in select"):
         explore.migrate_select(root)
+
+
+# visits as the evidence (DECISIONS, "Species-days", 2026-11-06)
+
+
+def test_run_name_ends_in_visits_for_visits_and_refuses_other_evidence():
+    assert explore.run_name("native_only", ["griis"], evidence="visits") == "native_only-no-griis-visits"
+    assert explore.run_name("native_only", [], merge_duplicate_names=True, evidence="visits") == "native_only-merged-names-visits"
+    assert explore.run_name("native_only", [], evidence="records") == "native_only"
+    with pytest.raises(ValueError, match="evidence"):
+        explore.run_name("native_only", [], evidence="photos")
+
+
+def test_evidence_counts_puts_visits_in_place_of_records_and_scales_the_record_subsets():
+    from realms.occurrences import COUNTS
+
+    row = {c: 0 for c in COUNTS} | {"species_id": "S1", "countrycode": "DK", "part": "c:land", "n_raw": 120, "n": 100, "n_open": 80, "n_human_text": 10,
+                                   "n_ebird": 50, "n_years": 7, "n_visits": 40, "n_visits_open": 30}
+    counts = pl.DataFrame([row])
+    visits = explore.evidence_counts(counts, "visits")
+    assert "n_visits" not in visits.columns and "n_visits_open" not in visits.columns
+    got = visits.row(0, named=True)
+    assert (got["n"], got["n_open"], got["n_human_text"], got["n_ebird"], got["n_raw"], got["n_years"]) == (40, 30, 4, 20, 120, 7)
+    records = explore.evidence_counts(counts, "records").row(0, named=True)
+    assert (records["n"], records["n_human_text"]) == (100, 10) and "n_visits" not in records
+    with pytest.raises(ValueError, match="without visits"):
+        explore.evidence_counts(counts.drop("n_visits", "n_visits_open"), "visits")
+
+
+def test_records_as_evidence_leave_the_clean_hash_as_it_was():
+    from realms.clean import Settings
+
+    marker = {"rows": 1, "resolution": 7, "zip": "x.zip", "zip_sha256": "0"}
+    codes = pl.DataFrame({"code": ["DK"]})
+    plain = explore.clean_inputs(Settings(), [1, 2], codes, marker)
+    assert explore.clean_inputs(Settings(), [1, 2], codes, marker, evidence="records") == plain
+    assert explore.clean_inputs(Settings(), [1, 2], codes, marker, evidence="visits") == plain | {"evidence": "visits"}
