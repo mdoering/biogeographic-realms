@@ -2611,3 +2611,13 @@ The `mt090` outputs from before the change are kept in `res7/{circularity,crossc
 The figures are at `land_tolerance` 0.5; with no tolerance the shares are the same and every mode still passes.
 - **WCVP's native ranges do not pull the boundaries onto TDWG edges:** `native_only` lies further from them than `off`.
 - **The maps of the cleaning modes agree:** V is 0.975-0.990 among them. Against `off` it is 0.86-0.87, with about 41,000-45,000 km of sea boundary moved.
+
+### The cross-checks on `mt075` (2026-11-06)
+
+`scripts/crosscheck.py --config mt075` (`res7/crosscheck/`; the `mt090` ones are in `res7/crosscheck-mt090/`).
+- **Beta-sim clustering at k = 5:** Ward (20 shuffles) has V 0.66-0.69 against Infomap's map, with area agreement 0.61-0.63. Average linkage has V 0.63 and area agreement 0.77. Its seeds agree completely (V 1.000), Ward's at 0.95-1.00. On `mt090` at k = 7 the area agreement was 0.59-0.62 (Ward) and 0.72-0.77 (average), so the agreement with an independent method has not changed.
+- **Duplicate names merged:**
+  - V 0.984 against the map on ids, with the same selected k (5) and the same parts.
+  - Excess differs by at most 0.007 at any k from 5 to 12.
+  - 972 genus names (2,001 ids) and 238 family names (487 ids) are merged.
+  - Repeated names do not shape the realms.
