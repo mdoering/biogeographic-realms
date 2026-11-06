@@ -131,7 +131,7 @@ def _pattern_sql(pattern: HumanPattern) -> str:
 def _visits(condition: str, resolution: int) -> str:
     """The number of distinct visits among the records meeting `condition`: a visit is a date (year, month and day, a missing part as 0) and a cell
     at `resolution`. Rows failing the condition give a null first column, which a multi-column `COUNT(DISTINCT ...)` skips. No casts: a query
-    building one text with `CAST(... AS VARCHAR)` passed validation but failed in GBIF's engine (download 0003444-261104105008071)."""
+    building one text with `CAST(... AS VARCHAR)` passed validation but failed in GBIF's engine, which wants a length on VARCHAR (download 0003444-261104105008071). `PRINTF` builds texts there without casts."""
     fine = f"GBIF_ISEA3HCode({resolution}, decimallatitude, decimallongitude, 0)"
     return f'COUNT(DISTINCT CASE WHEN {condition} THEN COALESCE("year",0) END, COALESCE("month",0), COALESCE("day",0), {fine})'
 
