@@ -2543,3 +2543,42 @@ Mangroves and salt-marsh plants are left as land. Folding their sea records into
 **What it is for.** Markus submits the download from his account. Nothing reads the new columns yet: `occurrences.COLUMNS` is exact, so ingesting the download needs the two columns added there first.
 - **On half A only, as a sensitivity check:** the cleaning with visits in place of records where records are evidence, and whether the realms move.
 - **Not as a change before M3:** the layer 5 thresholds were calibrated on record counts and that calibration is sealed (setting 132). A switch to visits would need a new calibration, so it belongs after M3, and is recorded here as a known limitation: records overstate effort and evidence most in the busiest cells.
+
+### After WoRMS: mt075 at k = 5 over five seeds (2026-11-06)
+
+The rerun of `native_only` with the new layer 4 (seeds 1-5, seven configurations, then `scripts/seeds.py` and `scripts/breaks.py --n-null 199`) finished on 2026-11-06 with no failures.
+- **The five-seed rule now picks `mt075` at k = 5:** excess 0.340, within 0.01 of the highest, among 32 maps with median stability of at least 0.8. Before, it picked `mt090` at k = 7 (excess 0.148, stability 0.809), the only map at or above the bar.
+- **The same map before and after:** `mt090` at k = 7 now has stability 0.971 (0.966-0.972) and excess 0.334, against 0.809 and 0.148 before. The likely cause is the sea leakage: land species recorded in sea parts made thousands of land species shared with the ocean realm rather than endemic. That is not yet checked against the backed-up results (`results/explore/res7-before-layer4/`).
+- **Merge heights (`mt075`, Infomap's units):** k = 2-5 at 0.80-0.82, then 0.747, 0.710, 0.689, 0.623, 0.561, 0.537, 0.525, 0.525, 0.464, 0.412. All Markov-time configurations agree on the top five (0.79-0.82) and on 0.75 for the sixth.
+- **The ocean** stays one realm at every cut. It no longer splits under `mt075`, as it did before ("Where the oceans separate").
+
+### Nested levels: the cuts (2026-11-06, provisional until Markus confirms)
+
+**Candidates.** `scripts/nested.py` on `mt075` (the five-seed choice), seed 1, leaf cut 0.4 and cuts 0.45 to 0.78 in steps of 0.05 (and 0.78), with 20 resamples of 3 trials (`results/explore/res7/native_only/nested-candidates/`, 39 min).
+The nested merges (land with land, the ocean apart):
+
+| Realms | Height of the merge that ends the level | What joins there |
+|---|---|---|
+| 15 → 14 | 0.412 | St Helena (one unit) into the Afrotropics |
+| 14 → 13 | 0.464 | the Mascarenes into the Afrotropics |
+| 13 → 11 | 0.525 | New Caledonia and Hawaii into Indo-Malaya with Australasia |
+| 11 → 10 | 0.537 | Patagonia and Chile into the Neotropics |
+| 10 → 9 | 0.561 | New Guinea into Indo-Malaya with Australasia |
+| 9 → 8 | 0.623 | New Zealand into the Palearctic |
+| 8 → 7 | 0.689 | Madagascar into the Afrotropics |
+| 7 → 6 | 0.710 | the Nearctic into the Palearctic |
+| 6 → 5 | 0.747 | Australia into Indo-Malaya |
+| 5 → 1 | 0.80-0.82 | the five blocks (Holarctic, Neotropics, Afrotropics, Indo-Malaya with Australasia, the ocean), last the land with the sea |
+
+**Recovery says little about the cut.** The median best Jaccard of every realm at every cut is at least 0.85 (most above 0.95), and each is recovered (Jaccard at least 0.5) in 70-100% of the resamples. The misses come mostly from the same resamples at every cut (6 of 20 at the top level, resamples 2, 8, 10, 13, 17 and 18): there Infomap's own modules join Indo-Malaya with the Holarctic, which no cut can undo. So no cut is more stable than its neighbours, and the cuts go by the merge heights.
+
+**Rule.** A level is reported where the realms stay the same over a range of cuts at least 0.05 wide (a gap of at least 0.05 between successive nested merges), cut at the middle of the gap, rounded to 0.01:
+- **0.77:** 5 realms
+- **0.66:** 8, adding Australia, the Nearctic and Madagascar
+- **0.59:** 9, adding New Zealand
+- **0.49:** 13, adding New Guinea, Patagonia, Hawaii and New Caledonia
+- **leaf cut 0.44:** 14, adding the Mascarenes
+
+The full merge order (`merges.csv`) is the result; the levels are where it is drawn. Levels 6 and 7 (gaps of 0.037 and 0.021) are not drawn. Below 0.41 come single islands and units, which "distinct areas" would keep, but not as realms of their own.
+
+**To look at.** New Zealand joins the Palearctic (0.623), not Australia. The merge compares the union of a realm's taxa, and the Palearctic block holds most genera and families, so a small realm tends to join the largest. That is a property of union beta-sim and is not changed here.
