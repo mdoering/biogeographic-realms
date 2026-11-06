@@ -2623,3 +2623,36 @@ The figures are at `land_tolerance` 0.5; with no tolerance the shares are the sa
   - Excess differs by at most 0.007 at any k from 5 to 12.
   - 972 genus names (2,001 ids) and 238 family names (487 ids) are merged.
   - Repeated names do not shape the realms.
+
+### Nested levels: the cut rules (2026-11-06, Markus's choice)
+
+The gap rule above ("Nested levels: the cuts") rested on a width of 0.05 that nothing in the data set. Markus chose two rules instead, rules 2 and 6 of the alternatives discussed (fixed cuts, a measured gap, the inconsistency coefficient, explained dissimilarity, split significance, endemism against a null, bootstrap recovery). The gap rule's levels are kept in `res7/native_only/nested-gap-rule/`.
+
+- **Rule 2, robust to the sampling of species** (`nested.robust_levels`, `nested.height_replicates`):
+  - Infomap's units are merged freely to a base cut of 0.3 (`nested.leaf_realms`), then land with land and sea with sea (`nested.nested_merges`).
+  - The merges are replayed, the same groups in the same order, on 199 resamples of the species.
+  - A level, the realms after the first *d* merges, is robust where one cut separates the merges made from the merges to come in at least 95% of the resamples.
+  - Its cut is the middle of the reference's gap, between the highest merge made and the lowest to come.
+  - This measures how much the heights move with the sampling of species, for fixed groups. Infomap's own variation is what the per-realm recovery shows.
+- **Rule 6, more endemic than chance** (`nested.realm_excess`):
+  - At each robust level, each realm's endemic share (at least 95% of a taxon's cells inside, averaged over species, genera and families as the excess averages them) is set against the same realm in 99 random maps with the same realm areas and pieces (`nullmodel.null_partitions`).
+  - A realm passes at p ≤ 0.05, and a level passes when all its realms do.
+
+**Result** (`scripts/nested_cuts.py`, `res7/native_only/nested-cuts/`, `mt075`):
+- **Rule 6 passes every realm at every robust level**, each at p = 0.01, the least that 99 null maps can show. The smallest excess is 0.19 (New Guinea, Patagonia and the islands), against null means of 0.01-0.05. Every realm the merge order produces holds far more endemics than a random region of its size. So rule 6 removes nothing here: rule 2 sets the levels.
+- **Rule 2:** the robust levels and their cuts:
+
+| Realms | Cut | Separated in | Added at this level |
+|---|---|---|---|
+| 5 | 0.773 | 100% | Holarctic, Neotropics, Afrotropics, Indo-Malaya with Australasia, the ocean |
+| 6 | 0.728 | 100% | Australia |
+| 7 | 0.699 | 97% | the Nearctic |
+| 8 | 0.656 | 100% | Madagascar |
+| 9 | 0.592 | 100% | New Zealand |
+| 10 | 0.549 | 99.5% | New Guinea |
+| 13 | 0.494 | 100% | Patagonia and Chile, Hawaii, New Caledonia |
+
+  - **Not robust:** 11 and 12 realms (Patagonia, and Hawaii with New Caledonia, merge within 0.012 of each other: 14% and 31%); 14 (the Mascarenes, 94.5%, just under 95%); 15 (St Helena, 88%). Nothing below 0.376 comes near.
+- **Against the gap rule:** the same top and bottom, with three levels more (Australia alone, the Nearctic alone, New Guinea) and the Mascarenes not a level. The finest level is 13 realms.
+
+The levels are drawn with `scripts/nested.py --leaf-cut 0.494 --cuts 0.773 0.728 0.699 0.656 0.592 0.549` and `scripts/nested_maps.py`.
