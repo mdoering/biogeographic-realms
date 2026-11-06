@@ -1220,3 +1220,44 @@ def test_an_ambiguous_near_miss_still_fails_qa(near_run, tmp_path):
     assert "unknown cells: 1 codes in 1 rows" in failed.value.code
     assert report_of(tmp_path)["unknown_cells"]["examples"] == [unknown] and report_of(tmp_path)["remaps"]["codes"] == 0
     assert not (tmp_path / KEY / COMPLETE).exists()
+
+
+# visits (DECISIONS, "Species-days", 2026-11-06)
+
+
+def with_visits(rows, visits):
+    return [(*r, v, max(v - 1, 0)) for r, v in zip(rows, visits, strict=True)]
+
+
+def test_ingest_takes_a_download_with_visits_and_keeps_them(tmp_path):
+    from realms.occurrences import VISIT_COLUMNS
+
+    rows = with_visits(SEVEN, [50, 2, 3, 4, 5, 6, 7])
+    out = tmp_path / "out"
+    assert ingest(download(tmp_path, rows, header=list(VISIT_COLUMNS)), out, chunk_lines=3) == 7
+    got = scan_counts(out).rename({"species_id": "specieskey"}).collect()
+    assert_frame_equal(got, pl.DataFrame(rows, schema=VISIT_COLUMNS, orient="row"))
+
+
+def test_ingest_refuses_visits_in_another_place(tmp_path):
+    from realms.occurrences import VISITS
+
+    rows = [(*r[:4], 1, 1, *r[4:]) for r in SEVEN]
+    with pytest.raises(ValueError, match="the columns of"):
+        ingest(download(tmp_path, rows, header=[*list(COLUMNS)[:4], *VISITS, *list(COLUMNS)[4:]]), tmp_path / "out")
+
+
+def test_load_presence_sums_visits_over_countries_and_a_download_without_them_has_none(tmp_path):
+    from realms.occurrences import VISIT_COLUMNS
+
+    rows = with_visits(SEVEN, [50, 2, 3, 4, 5, 6, 7])
+    out = tmp_path / "out"
+    zip_path = download(tmp_path, rows, header=list(VISIT_COLUMNS))
+    mark_complete(out, zip_path, 6, ingest(zip_path, out, 3))
+    got = load_presence(out, split(S1="A", S2="A"), "A")
+    s1 = got.filter((pl.col("species_id") == "S1") & (pl.col("part") == f"{C1}:land"))
+    assert s1["n_visits"].item() == 52 and s1["n_visits_open"].item() == 49 + 1  # DK and SE added
+    assert list(got.columns)[-2:] == ["n_visits", "n_visits_open"]
+    (tmp_path / "plain").mkdir()
+    plain = load_presence(ingested(tmp_path / "plain", SEVEN), split(S1="A", S2="A"), "A")
+    assert "n_visits" not in plain.columns

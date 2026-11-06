@@ -51,6 +51,18 @@ DISTINCT = ("n_datasets", "n_years", "n_datasets_open", "n_years_open")
 SUMMED = tuple(c for c in COUNTS if c not in DISTINCT)
 # the columns of the download, in the order of the query, with the types they are stored as. Ids are text, as floats lose digits.
 COLUMNS = {"specieskey": pl.String, "countrycode": pl.String, "cell": pl.String, "part": pl.String, **{c: pl.Int64 for c in COUNTS}}
+# the visits of a download made with `gbif.build_sql`'s `visit_resolution` (DECISIONS, "Species-days", 2026-11-06): distinct dates and fine cells, which
+# add up over the countries of a part (a fine cell lies in one country but at a border), so they are summed
+VISITS = ("n_visits", "n_visits_open")
+VISIT_COLUMNS = {**COLUMNS, **{c: pl.Int64 for c in VISITS}}
+
+
+def _schema(found: list[str], source: object) -> dict[str, pl.DataType]:
+    """The columns of a download with this header: `COLUMNS`, or `VISIT_COLUMNS` for one with visits. Anything else raises."""
+    for schema in (COLUMNS, VISIT_COLUMNS):
+        if found == list(schema):
+            return schema
+    raise ValueError(f"the columns of {source} are {found}, not {list(COLUMNS)} (or with {list(VISITS)} after them)")
 HALVES = ("A", "B", "all")
 BUFFER = 1 << 20
 EXAMPLES = 10
@@ -227,12 +239,12 @@ def _clear(out_dir: Path) -> None:
         path.unlink()
 
 
-def _parse(content: bytes, source: str) -> pl.DataFrame:
-    """The rows of a chunk that starts with the header. An empty field is a null."""
+def _parse(content: bytes, source: str, schema: dict[str, pl.DataType] = COLUMNS) -> pl.DataFrame:
+    """The rows of a chunk that starts with the header, in `schema`. An empty field is a null."""
     try:
-        df = pl.read_csv(io.BytesIO(content), separator="\t", quote_char=None, schema=COLUMNS, null_values=[""])
+        df = pl.read_csv(io.BytesIO(content), separator="\t", quote_char=None, schema=schema, null_values=[""])
     except pl.exceptions.PolarsError as error:
-        raise ValueError(f"{source} has a row that is not {list(COLUMNS)}: {error}") from error
+        raise ValueError(f"{source} has a row that is not {list(schema)}: {error}") from error
     unknown = df.filter(~pl.col("part").is_in(KINDS).fill_null(False))["part"].unique().to_list()
     if unknown:
         raise ValueError(f"part is one of {KINDS}, not {unknown}, in {source}")
@@ -284,9 +296,10 @@ def _fold(out_dir: Path, asides: list[pl.DataFrame], centres: Centres, index: in
         os.replace(kept, path)
         pool.append(hit)
         taken += hit.height
-    sums = [pl.col(c).sum() for c in SUMMED]
+    visits = [c for c in VISITS if c in moved.columns]
+    sums = [pl.col(c).sum() for c in (*SUMMED, *visits)]
     largest = [pl.col(c).max() for c in DISTINCT]
-    merged = pl.concat(pool).group_by(*KEY).agg(*sums, *largest).select(*COLUMNS).sort(*KEY)
+    merged = pl.concat(pool).group_by(*KEY).agg(*sums, *largest).select(*COLUMNS, *visits).sort(*KEY)
     merged.write_parquet(out_dir / f"part-{index:05d}.parquet")
     return tuple(remaps), merged.height - taken
 
@@ -307,14 +320,12 @@ def _ingest(zip_path: Path, out_dir: Path, chunk_lines: int, centres: Centres | 
             # a buffered reader reads lines in C, where the zip member's own readline is Python
             with io.BufferedReader(archive.open(members[0]), BUFFER) as lines:
                 header = lines.readline()
-                found = header.decode().rstrip("\r\n").split("\t")
-                if found != list(COLUMNS):
-                    raise ValueError(f"the columns of {zip_path} are {found}, not {list(COLUMNS)}")
+                schema = _schema(header.decode().rstrip("\r\n").split("\t"), zip_path)
                 for i in itertools.count():
                     chunk = b"".join(itertools.islice(lines, chunk_lines))
                     if not chunk:
                         break
-                    df = _parse(header + chunk, f"{zip_path.name}, chunk {i}")
+                    df = _parse(header + chunk, f"{zip_path.name}, chunk {i}", schema)
                     downloaded += df.height
                     if centres is not None:
                         df = _set_aside(df, centres, asides)
@@ -525,17 +536,19 @@ def _select(out_dir: Path, split: pl.DataFrame, half: str, unsealed: bool, keep:
         raise ValueError("the split has a species_id more than once")
     read_complete(out_dir)
     species = split if half == "all" else split.filter(pl.col("half") == half)
-    sums = [pl.col(c).sum() for c in SUMMED]
+    scan = scan_counts(out_dir)
+    visits = [c for c in VISITS if c in scan.collect_schema().names()]  # only in a download with visits, and then after the other counts
+    sums = [pl.col(c).sum() for c in (*SUMMED, *visits)]
     # the distinct counts of the countries in one part overlap, so the sum would overcount and the maximum is a lower bound
     largest = [pl.col(c).max() for c in DISTINCT]
     part = (pl.col("cell") + pl.lit(":") + pl.col("part")).alias("part")
     return (
-        scan_counts(out_dir)
+        scan
         .join(species.select("species_id").lazy(), on="species_id", how="inner")
         .group_by(*keep, "cell", "part")
         .agg(*sums, *largest)
         .with_columns(part)
-        .select(*keep, "part", *COUNTS)
+        .select(*keep, "part", *COUNTS, *visits)
         .sort(*keep, "part")
         .collect()
     )
