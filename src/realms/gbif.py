@@ -128,17 +128,18 @@ def _pattern_sql(pattern: HumanPattern) -> str:
     return f"({' AND '.join(parts)})"
 
 
-def _visit_key(resolution: int) -> str:
-    """A record's visit: its date (year, month and day, a missing part as 0) and its cell at `resolution`, as one text."""
+def _visits(condition: str, resolution: int) -> str:
+    """The number of distinct visits among the records meeting `condition`: a visit is a date (year, month and day, a missing part as 0) and a cell
+    at `resolution`. Rows failing the condition give a null first column, which a multi-column `COUNT(DISTINCT ...)` skips. No casts: a query
+    building one text with `CAST(... AS VARCHAR)` passed validation but failed in GBIF's engine (download 0003444-261104105008071)."""
     fine = f"GBIF_ISEA3HCode({resolution}, decimallatitude, decimallongitude, 0)"
-    date = ", '-', ".join(f'CAST(COALESCE("{part}",0) AS VARCHAR)' for part in ("year", "month", "day"))
-    return f"CONCAT({date}, '-', {fine})"
+    return f'COUNT(DISTINCT CASE WHEN {condition} THEN COALESCE("year",0) END, COALESCE("month",0), COALESCE("day",0), {fine})'
 
 
 def build_sql(resolution: int, patterns: Sequence[HumanPattern], visit_resolution: int | None = None) -> str:
     """The occurrence query: species x cell x land/sea x country, counting each filter rather than applying it.
 
-    With `visit_resolution`, also `n_visits` and `n_visits_open`: the distinct visits (`_visit_key`) among the records counted by `n` and by `n_open`.
+    With `visit_resolution`, also `n_visits` and `n_visits_open`: the distinct visits (`_visits`) among the records counted by `n` and by `n_open`.
     A species seen many times on one day at one spot is one visit, so the counts measure visits rather than photos (DECISIONS, "Species-days",
     2026-11-06). Without it the query is the one of the downloads so far, unchanged.
     """
@@ -150,9 +151,8 @@ def build_sql(resolution: int, patterns: Sequence[HumanPattern], visit_resolutio
     cell = f"GBIF_ISEA3HCode({resolution}, decimallatitude, decimallongitude, 0)"
     visits = ""
     if visit_resolution is not None:
-        key = _visit_key(visit_resolution)
-        visits = (f",\n COUNT(DISTINCT CASE WHEN {_CLEAN} THEN {key} END) AS n_visits"
-                  f",\n COUNT(DISTINCT CASE WHEN ({_CLEAN}) AND {_OPEN} THEN {key} END) AS n_visits_open")
+        visits = (f",\n {_visits(_CLEAN, visit_resolution)} AS n_visits"
+                  f",\n {_visits(f'({_CLEAN}) AND {_OPEN}', visit_resolution)} AS n_visits_open")
     return f"""SELECT specieskey, countrycode, {cell} AS cell, {_PART} AS part,
  COUNT(*) AS n_raw,
  SUM(CASE WHEN {_CLEAN} THEN 1 ELSE 0 END) AS n,

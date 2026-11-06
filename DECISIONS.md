@@ -2540,6 +2540,8 @@ Mangroves and salt-marsh plants are left as land. Folding their sea records into
 - **Undated records** collapse to one visit per species and resolution 17 cell, and records with only a year to one per year there.
 - **The query file** is `queries/occurrence_res7_visits.sql`, written and validated by `scripts/write_queries.py`. GBIF's validate endpoint accepts it. Without `visit_resolution` the query is byte-identical to the downloads so far, so `occurrence_res6.sql` and `occurrence_res7.sql` are unchanged.
 
+**The first download failed.** Markus submitted it as 0003444-261104105008071 on 2026-11-06. It failed after three minutes with no reason given. That version built one text per record with `CAST(... AS VARCHAR)`, which GBIF's validator accepts but its engine probably does not (a VARCHAR without a length). The query now counts `COUNT(DISTINCT year, month, day, cell)` over four columns, with no casts. The condition sits in the first column, whose null makes the row skipped.
+
 **What it is for.** Markus submits the download from his account. Nothing reads the new columns yet: `occurrences.COLUMNS` is exact, so ingesting the download needs the two columns added there first.
 - **On half A only, as a sensitivity check:** the cleaning with visits in place of records where records are evidence, and whether the realms move.
 - **Not as a change before M3:** the layer 5 thresholds were calibrated on record counts and that calibration is sealed (setting 132). A switch to visits would need a new calibration, so it belongs after M3, and is recorded here as a known limitation: records overstate effort and evidence most in the busiest cells.

@@ -206,9 +206,9 @@ def test_sql_without_visits_is_the_query_of_the_downloads_so_far():
 
 def test_sql_counts_visits_as_distinct_dates_at_the_visit_resolution():
     sql = build_sql(7, PATTERNS, visit_resolution=17)
-    key = ("CONCAT(CAST(COALESCE(\"year\",0) AS VARCHAR), '-', CAST(COALESCE(\"month\",0) AS VARCHAR), '-', CAST(COALESCE(\"day\",0) AS VARCHAR), "
-           "'-', GBIF_ISEA3HCode(17, decimallatitude, decimallongitude, 0))")
-    assert f"THEN {key} END) AS n_visits," in sql and f"THEN {key} END) AS n_visits_open\nFROM occurrence" in sql
+    rest = 'END, COALESCE("month",0), COALESCE("day",0), GBIF_ISEA3HCode(17, decimallatitude, decimallongitude, 0)) AS n_visits'
+    assert sql.count('THEN COALESCE("year",0) ' + rest) == 2  # n_visits and n_visits_open
+    assert "CAST(" not in sql and f"{rest}_open\nFROM occurrence" in sql
     end = sql.index("AS n_human_text") + len("AS n_human_text")
     assert sql[:end] + sql[sql.index("\nFROM occurrence") :] == build_sql(7, PATTERNS)  # nothing else changes
 
