@@ -2639,7 +2639,7 @@ The gap rule above ("Nested levels: the cuts") rested on a width of 0.05 that no
   - A realm passes at p ≤ 0.05, and a level passes when all its realms do.
 
 **Result** (`scripts/nested_cuts.py`, `res7/native_only/nested-cuts/`, `mt075`):
-- **Rule 6 passes every realm at every robust level**, each at p = 0.01, the least that 99 null maps can show. The smallest excess is 0.19 (New Guinea, Patagonia and the islands), against null means of 0.01-0.05. Every realm the merge order produces holds far more endemics than a random region of its size. So rule 6 removes nothing here: rule 2 sets the levels.
+- **Rule 6 passes every realm at every robust level**, each at p = 0.01, the least that 99 null maps can show. At 13 realms the smallest excess is the Nearctic's, 0.19 (0.30 endemic against a null mean of 0.11), then New Guinea's 0.20 and Hawaii's 0.21; the islands' null means are 0.01-0.03, the large realms' 0.07-0.15, and the ocean's 0.35 (0.72 observed). Every realm the merge order produces holds far more endemics than a random region of its size. So rule 6 removes nothing here: rule 2 sets the levels.
 - **Rule 2:** the robust levels and their cuts:
 
 | Realms | Cut | Separated in | Added at this level |
