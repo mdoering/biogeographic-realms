@@ -2528,3 +2528,18 @@ Mangroves and salt-marsh plants are left as land. Folding their sea records into
 - The calibration's `DESIGN` pins the setting off, as it ran.
 
 **The rerun.** The rerun of `native_only` started for "Terrestrial unless COL says marine" was stopped during seed 1, before any select result, and started again with WoRMS's environment. A new manifest would have cleaned again in the middle of it. The Costello gate is byte-identical.
+
+## 2026-11-06
+
+### Species-days (2026-11-06)
+
+**Why.** Our record counts are our evidence in several places: layer 4's land share, layer 5's satellite record share, the under-reporting rates and the group minimum. Many GBIF records repeat a species on one day at one spot: repeat photos, many observers at one rare bird, a seabird colony. On 2.9 billion GBIF records, van Merriënboer et al. ([arXiv:2611.00284](https://arxiv.org/abs/2611.00284), 2026) found that below about 600 m and one day two records are no more likely to be different species. Keeping one record per species, day and S2 level 14 cell there dropped 28.8% of the records. On eBird hotspots, complete checklists grew only as records to the power 0.85. So a count of visits measures effort and evidence better than a count of records.
+
+**The query.** `gbif.build_sql` takes an optional `visit_resolution` and then adds two columns: `n_visits` and `n_visits_open`, the distinct visits among the records counted by `n` and `n_open`.
+- **A visit** is a species with one date (year, month and day, a missing part as 0) in one ISEA3H cell of resolution 17, about 0.4 km². Resolution 7 is about 23,000 km² and each step divides by 3; 17 is the step nearest the paper's S2 level 14, about 0.32 km².
+- **Undated records** collapse to one visit per species and resolution 17 cell, and records with only a year to one per year there.
+- **The query file** is `queries/occurrence_res7_visits.sql`, written and validated by `scripts/write_queries.py`. GBIF's validate endpoint accepts it. Without `visit_resolution` the query is byte-identical to the downloads so far, so `occurrence_res6.sql` and `occurrence_res7.sql` are unchanged.
+
+**What it is for.** Markus submits the download from his account. Nothing reads the new columns yet: `occurrences.COLUMNS` is exact, so ingesting the download needs the two columns added there first.
+- **On half A only, as a sensitivity check:** the cleaning with visits in place of records where records are evidence, and whether the realms move.
+- **Not as a change before M3:** the layer 5 thresholds were calibrated on record counts and that calibration is sealed (setting 132). A switch to visits would need a new calibration, so it belongs after M3, and is recorded here as a known limitation: records overstate effort and evidence most in the busiest cells.

@@ -128,12 +128,31 @@ def _pattern_sql(pattern: HumanPattern) -> str:
     return f"({' AND '.join(parts)})"
 
 
-def build_sql(resolution: int, patterns: Sequence[HumanPattern]) -> str:
-    """The occurrence query: species x cell x land/sea x country, counting each filter rather than applying it."""
+def _visit_key(resolution: int) -> str:
+    """A record's visit: its date (year, month and day, a missing part as 0) and its cell at `resolution`, as one text."""
+    fine = f"GBIF_ISEA3HCode({resolution}, decimallatitude, decimallongitude, 0)"
+    date = ", '-', ".join(f'CAST(COALESCE("{part}",0) AS VARCHAR)' for part in ("year", "month", "day"))
+    return f"CONCAT({date}, '-', {fine})"
+
+
+def build_sql(resolution: int, patterns: Sequence[HumanPattern], visit_resolution: int | None = None) -> str:
+    """The occurrence query: species x cell x land/sea x country, counting each filter rather than applying it.
+
+    With `visit_resolution`, also `n_visits` and `n_visits_open`: the distinct visits (`_visit_key`) among the records counted by `n` and by `n_open`.
+    A species seen many times on one day at one spot is one visit, so the counts measure visits rather than photos (DECISIONS, "Species-days",
+    2026-11-06). Without it the query is the one of the downloads so far, unchanged.
+    """
     if not 1 <= resolution <= 22:
         raise ValueError(f"ISEA3H resolution must be 1 to 22, not {resolution}")
+    if visit_resolution is not None and not resolution < visit_resolution <= 22:
+        raise ValueError(f"the visit resolution must be finer than {resolution} and at most 22, not {visit_resolution}")
     human = " OR ".join(_pattern_sql(p) for p in patterns)
     cell = f"GBIF_ISEA3HCode({resolution}, decimallatitude, decimallongitude, 0)"
+    visits = ""
+    if visit_resolution is not None:
+        key = _visit_key(visit_resolution)
+        visits = (f",\n COUNT(DISTINCT CASE WHEN {_CLEAN} THEN {key} END) AS n_visits"
+                  f",\n COUNT(DISTINCT CASE WHEN ({_CLEAN}) AND {_OPEN} THEN {key} END) AS n_visits_open")
     return f"""SELECT specieskey, countrycode, {cell} AS cell, {_PART} AS part,
  COUNT(*) AS n_raw,
  SUM(CASE WHEN {_CLEAN} THEN 1 ELSE 0 END) AS n,
@@ -146,7 +165,7 @@ def build_sql(resolution: int, patterns: Sequence[HumanPattern]) -> str:
  SUM(CASE WHEN ({_CLEAN}) AND datasetkey = '{EBIRD}' THEN 1 ELSE 0 END) AS n_ebird,
  SUM(CASE WHEN ({_CLEAN}) AND datasetkey = '{INATURALIST}' THEN 1 ELSE 0 END) AS n_inat,
  SUM(CASE WHEN ({_CLEAN}) AND LOWER(taxonomicstatus) = 'synonym' THEN 1 ELSE 0 END) AS n_synonym,
- SUM(CASE WHEN ({_CLEAN}) AND ({human}) THEN 1 ELSE 0 END) AS n_human_text
+ SUM(CASE WHEN ({_CLEAN}) AND ({human}) THEN 1 ELSE 0 END) AS n_human_text{visits}
 FROM occurrence
 WHERE hascoordinate = TRUE AND hasgeospatialissues = FALSE AND occurrencestatus = 'PRESENT' AND specieskey IS NOT NULL
  AND basisofrecord <> 'FOSSIL_SPECIMEN' AND (coordinateuncertaintyinmeters IS NULL OR coordinateuncertaintyinmeters <= 100000)

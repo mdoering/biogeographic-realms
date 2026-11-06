@@ -197,3 +197,23 @@ def test_sql_pads_terms_with_outer_spaces():
     sql = build_sql(7, (HumanPattern("locality", " zoo ", kingdom="Animalia", unless=("not a zoo",)),))
     assert "CONCAT(' ', LOWER(COALESCE(locality,'')), ' ') LIKE '% zoo %'" in sql
     assert "CONCAT(' ', LOWER(COALESCE(locality,'')), ' ') NOT LIKE '%not a zoo%'" in sql
+
+
+def test_sql_without_visits_is_the_query_of_the_downloads_so_far():
+    sql = build_sql(7, PATTERNS)
+    assert "n_visits" not in sql and sql == build_sql(7, PATTERNS, visit_resolution=None)
+
+
+def test_sql_counts_visits_as_distinct_dates_at_the_visit_resolution():
+    sql = build_sql(7, PATTERNS, visit_resolution=17)
+    key = ("CONCAT(CAST(COALESCE(\"year\",0) AS VARCHAR), '-', CAST(COALESCE(\"month\",0) AS VARCHAR), '-', CAST(COALESCE(\"day\",0) AS VARCHAR), "
+           "'-', GBIF_ISEA3HCode(17, decimallatitude, decimallongitude, 0))")
+    assert f"THEN {key} END) AS n_visits," in sql and f"THEN {key} END) AS n_visits_open\nFROM occurrence" in sql
+    end = sql.index("AS n_human_text") + len("AS n_human_text")
+    assert sql[:end] + sql[sql.index("\nFROM occurrence") :] == build_sql(7, PATTERNS)  # nothing else changes
+
+
+@pytest.mark.parametrize("visit_resolution", [7, 6, 23])
+def test_sql_refuses_a_visit_resolution_not_finer_than_the_cells(visit_resolution):
+    with pytest.raises(ValueError, match="visit resolution"):
+        build_sql(7, PATTERNS, visit_resolution=visit_resolution)
