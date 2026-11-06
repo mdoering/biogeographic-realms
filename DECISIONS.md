@@ -2656,3 +2656,15 @@ The gap rule above ("Nested levels: the cuts") rested on a width of 0.05 that no
 - **Against the gap rule:** the same top and bottom, with three levels more (Australia alone, the Nearctic alone, New Guinea) and the Mascarenes not a level. The finest level is 13 realms.
 
 The levels are drawn with `scripts/nested.py --leaf-cut 0.494 --cuts 0.773 0.728 0.699 0.656 0.592 0.549` and `scripts/nested_maps.py`.
+
+### Provisionally accepted species count as accepted (2026-11-06, Markus's ruling)
+
+Markus: provisionally accepted species count as accepted. "Not ideal as there are conflicting or unresolved names/species, but ignoring them also seems wrong."
+
+This is what the pipeline has done since step 3: `reference.ACCEPTED` holds both statuses, so they are taxa and nodes like accepted species. In 315557 they are 174,878 of 2,529,340 species, with 0.29% of the records directly.
+
+Two known costs, already handled or reported:
+- **A provisional species that shares its name with an accepted one** of the same kingdom (7,948 such pairs among WCVP's names, *Zea mays* `5CXX5` and `VJSFD`): the name index sends a source's record on the name to the accepted twin. `clean_report.provisional_twins` lists them.
+- **Duplicate genus and family ids, many of them provisional:** the merged-names run shows that they do not shape the realms (V 0.984 on `mt075`).
+
+Removed from the open points.
