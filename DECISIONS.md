@@ -2777,3 +2777,13 @@ The headline run is now `native_only-eukaryotes` and replaces `native_only`. Eve
 5. the circularity gate on them, then the cross-checks and the review maps.
 
 The `native_only` outputs stay where they are, as the record of what the scope changed. The provisional eukaryotes-only run on mt075 at seed 1, whose `nested/` and `nested-cuts/` were drawn before the choice, moves to `nested-provisional/` and `nested-cuts-provisional/`.
+
+### The reporting rule (2026-11-07, Markus's ruling)
+
+Markus confirmed it. **The report gives the coarsest and the finest nested levels that pass both cut rules** (rule 2, robust to species resampling, and rule 6, every realm above its null; "Nested levels: the cut rules"). The levels between them are given as the nested merge order, not as further results.
+
+The rule is what gets preregistered, not its numbers. On half A's `native_only` run it gave 5 and 13 realms, but those numbers are not carried forward:
+- **Eukaryotes headline:** for `native_only-eukaryotes` (above), the rule's levels are whatever the rerun gives.
+- **Half B:** in the confirmation at M3, its levels are whatever the rule gives there. Fixing "5 and 13" in advance would make the confirmation a comparison with what looked right on half A.
+
+The rule adds no threshold of its own: the two cut rules already define the levels. It goes into `PREREGISTRATION.md` as written here, once that file's contents are settled. That is still an open point.
