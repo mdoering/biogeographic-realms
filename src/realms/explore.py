@@ -91,6 +91,9 @@ MERGED_SUFFIX = "merged-names"
 # what counts as a row's evidence (DECISIONS, "Species-days", 2026-11-06): its records, or its visits, which only a download with visits has
 EVIDENCE = ("records", "visits")
 VISITS_SUFFIX = "visits"
+# the kingdoms of a eukaryotes-only run (DECISIONS, "Eukaryotes only", 2026-11-07): COL's bacteria, archaea and viruses, and species with no kingdom, are left out
+EUKARYOTES = ("Animalia", "Chromista", "Fungi", "Plantae", "Protozoa")
+EUKARYOTES_SUFFIX = "eukaryotes"
 # the counts that are records among `n`, scaled to visits by a row's visits per record when visits are the evidence
 RECORD_SUBSETS = ("n_nc", "n_ebird", "n_inat", "n_synonym", "n_human_text")
 MAP_FILES = ("partition.parquet", "structure.json", "candidates.parquet", "parts.parquet")
@@ -158,9 +161,11 @@ def load_configs(path: Path) -> tuple[dict[str, InfomapOptions], Params]:
     return configs, Params(**screen)
 
 
-def run_name(mode: str, rules_off: Iterable[str] = (), merge_duplicate_names: bool = False, half: str = HALF, evidence: str = "records") -> str:
+def run_name(
+    mode: str, rules_off: Iterable[str] = (), merge_duplicate_names: bool = False, half: str = HALF, evidence: str = "records", eukaryotes_only: bool = False
+) -> str:
     """`native_only`, or `native_only-no-griis` with the rules switched off in sorted order, and `-merged-names` after them for a run that merges duplicate
-    genus and family names: the directory of a run. `-visits` follows for a run whose evidence is visits. A half other than A ends it with `-half-<half>`,
+    genus and family names: the directory of a run. `-visits` follows for a run whose evidence is visits, and `-eukaryotes` for a run of eukaryotes only. A half other than A ends it with `-half-<half>`,
     so that such a run never shares half A's directory."""
     if evidence not in EVIDENCE:
         raise ValueError(f"the evidence is one of {EVIDENCE}, not {evidence!r}")
@@ -171,7 +176,8 @@ def run_name(mode: str, rules_off: Iterable[str] = (), merge_duplicate_names: bo
         raise ValueError(f"rules to switch off are of {SWITCHABLE}, not {unknown}")
     other_half = [f"half-{half}"] if half != HALF else []
     visits = [VISITS_SUFFIX] if evidence == "visits" else []
-    return "-".join([mode, *(f"no-{rule}" for rule in sorted(set(rules_off))), *([MERGED_SUFFIX] if merge_duplicate_names else []), *visits, *other_half])
+    eukaryotes = [EUKARYOTES_SUFFIX] if eukaryotes_only else []
+    return "-".join([mode, *(f"no-{rule}" for rule in sorted(set(rules_off))), *([MERGED_SUFFIX] if merge_duplicate_names else []), *visits, *eukaryotes, *other_half])
 
 
 def config_dir(name: str, seed: int = 1) -> str:
@@ -218,7 +224,7 @@ def write_stamp(directory: Path, name: str, hash_: str, inputs: dict, log_entry:
 
 def clean_inputs(
     settings: Settings, layers: Iterable[int], list_codes: pl.DataFrame, marker: dict, manifest: str | None = None, merge_duplicate_names: bool = False,
-    half: str = HALF, split_sha256: str | None = None, evidence: str = "records",
+    half: str = HALF, split_sha256: str | None = None, evidence: str = "records", eukaryotes_only: bool = False,
 ) -> dict:
     """What the cleaning stage's hash is of: the settings (the mode and the rules switched off are in them), the layers, the content of the frozen code table, the
     counts' `_COMPLETE` marker and the references' manifest (as a digest). `merge_duplicate_names` is in it only when it is on, as the taxa then carry names.
@@ -236,6 +242,7 @@ def clean_inputs(
     }
     inputs |= {"merge_duplicate_names": True} if merge_duplicate_names else {}
     inputs |= {"evidence": evidence} if evidence != "records" else {}  # records add nothing, which keeps the hashes of M1
+    inputs |= {"kingdoms": list(EUKARYOTES)} if eukaryotes_only else {}  # nor does keeping every kingdom
     inputs |= {"half": half, "split": split_sha256} if half != HALF else {}
     return _versioned(inputs, "clean")
 
@@ -889,6 +896,14 @@ class CleanSpec:
     inputs: dict
     force: bool = False
     evidence: str = "records"
+    eukaryotes_only: bool = False
+
+
+def eukaryote_counts(counts: pl.DataFrame, taxa: pl.DataFrame) -> pl.DataFrame:
+    """The rows of `counts` whose species is in `taxa` (`load_taxa`) with a kingdom of `EUKARYOTES`: COL's bacteria, archaea and viruses go, and so do
+    species with no kingdom or not in the taxa."""
+    keep = taxa.filter(pl.col("kingdom").is_in(list(EUKARYOTES))).select("species_id")
+    return counts.join(keep, on="species_id", how="semi")
 
 
 def evidence_counts(counts: pl.DataFrame, evidence: str) -> pl.DataFrame:
@@ -934,6 +949,8 @@ def clean_job(spec: CleanSpec) -> dict:
     split = load_split(spec.split)
     counts = evidence_counts(load_country_counts(spec.counts, split, "A"), spec.evidence)
     del split
+    if spec.eukaryotes_only:
+        counts = eukaryote_counts(counts, refs.taxa)
     return clean_stage(spec.out, counts, refs, grid, spec.settings, spec.layers, list_codes, spec.inputs, force=spec.force)
 
 
@@ -995,6 +1012,7 @@ class Plan:
     budget_gb: float = BUDGET_GB  # the most the parent and the workers of the bootstraps and the null maps may hold together
     half: str = HALF  # half A only: any other is refused here, so nothing can run on it by accident
     evidence: str = "records"  # or "visits", for a download made with them: a run of its own, `<run>-visits`
+    eukaryotes_only: bool = False  # a run of its own, `<run>-eukaryotes`: no bacteria, archaea or viruses
 
     def __post_init__(self) -> None:
         if self.half != HALF:
@@ -1023,13 +1041,13 @@ def run_pipeline(plan: Plan, unit_settings: UnitSettings = UnitSettings()) -> di
     names = list(plan.only) or list(configs)
     settings = Settings(wcvp_mode=plan.mode, rules_off=frozenset(plan.rules_off))
     merge = plan.merge_duplicate_names
-    out = Path(plan.results) / f"res{resolution}" / run_name(plan.mode, plan.rules_off, merge, plan.half, plan.evidence)
+    out = Path(plan.results) / f"res{resolution}" / run_name(plan.mode, plan.rules_off, merge, plan.half, plan.evidence, plan.eukaryotes_only)
     out.mkdir(parents=True, exist_ok=True)
     manifest = plan.reference / "manifest.json"
     split_sha256 = hashlib.sha256(Path(plan.split).read_bytes()).hexdigest() if plan.half != HALF else None  # the split file's bytes, never a half of the counts
     inputs = clean_inputs(
         settings, LAYERS, list_codes, marker, hashlib.sha256(manifest.read_bytes()).hexdigest() if manifest.exists() else None, merge, plan.half, split_sha256,
-        plan.evidence,
+        plan.evidence, plan.eukaryotes_only,
     )
     wanted = STAGES.index(plan.stage)
     force = {stage: plan.force and stage == plan.stage for stage in STAGES}
@@ -1037,7 +1055,7 @@ def run_pipeline(plan: Plan, unit_settings: UnitSettings = UnitSettings()) -> di
     done: dict = {"directory": out}
 
     begun = time.perf_counter()
-    result, peak = call(clean_job, CleanSpec(plan.counts, plan.reference, plan.split, plan.frozen_dir, out, settings, tuple(LAYERS), inputs, force["clean"], plan.evidence))
+    result, peak = call(clean_job, CleanSpec(plan.counts, plan.reference, plan.split, plan.frozen_dir, out, settings, tuple(LAYERS), inputs, force["clean"], plan.evidence, plan.eukaryotes_only))
     done["clean"] = result
     if not result["skipped"]:
         # `seconds` is the stage itself and `wall_seconds` the job with the loading of the references, the grid and the counts, whose peak is the child's

@@ -781,3 +781,24 @@ def test_records_as_evidence_leave_the_clean_hash_as_it_was():
     plain = explore.clean_inputs(Settings(), [1, 2], codes, marker)
     assert explore.clean_inputs(Settings(), [1, 2], codes, marker, evidence="records") == plain
     assert explore.clean_inputs(Settings(), [1, 2], codes, marker, evidence="visits") == plain | {"evidence": "visits"}
+
+
+# eukaryotes only (DECISIONS, "Eukaryotes only", 2026-11-07)
+
+
+def test_a_eukaryotes_only_run_has_a_name_and_a_hash_of_its_own():
+    from realms.clean import Settings
+
+    assert explore.run_name("native_only", [], eukaryotes_only=True) == "native_only-eukaryotes"
+    assert explore.run_name("native_only", [], evidence="visits", eukaryotes_only=True) == "native_only-visits-eukaryotes"
+    marker = {"rows": 1, "resolution": 7, "zip": "x.zip", "zip_sha256": "0"}
+    codes = pl.DataFrame({"code": ["DK"]})
+    plain = explore.clean_inputs(Settings(), [1, 2], codes, marker)
+    assert explore.clean_inputs(Settings(), [1, 2], codes, marker, eukaryotes_only=False) == plain
+    assert explore.clean_inputs(Settings(), [1, 2], codes, marker, eukaryotes_only=True) == plain | {"kingdoms": list(explore.EUKARYOTES)}
+
+
+def test_eukaryote_counts_keep_the_eukaryotes_and_drop_the_rest():
+    counts = pl.DataFrame({"species_id": ["A", "B", "V", "N", "X"], "n": [1, 2, 3, 4, 5]})
+    taxa = pl.DataFrame({"species_id": ["A", "B", "V", "N"], "kingdom": ["Animalia", "Fungi", "Orthornavirae", None]})
+    assert explore.eukaryote_counts(counts, taxa)["species_id"].to_list() == ["A", "B"]

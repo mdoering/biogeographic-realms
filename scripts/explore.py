@@ -57,6 +57,8 @@ def main() -> None:
     )
     parser.add_argument("--evidence", choices=("records", "visits"), default="records",
                         help="what counts as a row's evidence: its records, or its visits for a download made with them (a run of its own, <run>-visits)")
+    parser.add_argument("--eukaryotes-only", action="store_true",
+                        help="leave out COL's bacteria, archaea and viruses (and species with no kingdom): a run of its own, <run>-eukaryotes")
     parser.add_argument("--seed", type=int, default=1, help="the seed of Infomap, the bootstraps and the null maps, default 1; another writes to <config>-s<N>/")
     parser.add_argument(
         "--budget-gb", type=float, default=BUDGET_GB,
@@ -77,7 +79,7 @@ def main() -> None:
     plan = Plan(
         counts=args.counts, reference=args.reference, split=args.split, frozen_dir=FROZEN_DIR, results=args.results, configs=args.configs, mode=args.wcvp_mode,
         rules_off=tuple(args.rules_off), stage=args.stage, only=tuple(args.only), workers=args.workers, force=args.force, isolate=not args.in_process,
-        merge_duplicate_names=args.merge_duplicate_names, seed=args.seed, budget_gb=args.budget_gb, evidence=args.evidence,
+        merge_duplicate_names=args.merge_duplicate_names, seed=args.seed, budget_gb=args.budget_gb, evidence=args.evidence, eukaryotes_only=args.eukaryotes_only,
     )
     try:
         done = run_pipeline(plan)
