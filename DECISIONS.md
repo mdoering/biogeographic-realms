@@ -2733,3 +2733,34 @@ So the attachment rests on a near tie that thinly recorded microorganisms tip. I
 - **Stability at k = 5 is lower** (0.805, one seed), and excess is higher (0.351).
 
 Whether prokaryotes and viruses stay is Markus's call on scope. The per-class signal test ("Which groups carry the realm signal") is the data-driven way to decide which groups to keep.
+
+### Which groups carry the realm signal (2026-11-07)
+
+Markus chose a data-driven test of which groups to keep, with the condition that it "must avoid removing all true, rarely sampled endemics which are good signals". The test (`nested.class_signal`, `scripts/group_signal.py`) works on the headline's finest level, 13 realms, against 199 random maps of the same realm areas and pieces (`nullmodel.null_partitions`).
+
+**The protections for rare groups:**
+- Only species in at least two cells are scored. A species in one cell is endemic to any map and would make a thinly recorded class look signal-free.
+- A class is judged only if it has at least 30 scored species. A smaller class is kept unjudged: 245 classes, 19,706 species.
+- A class is dropped only if it is not above the null (p > 0.05).
+
+**Two designs failed on birds, and why.** On the whole map, with "endemic" meaning at least 95% of a species' cells in one realm, the test dropped birds (Aves 0.367 against a null of 0.373, p 0.59). With a continuous measure, the mean share of a species' cells in its main realm, it dropped them again (0.820 against 0.797, p 0.42), together with the mushrooms (Agaricomycetes, +0.108, p 0.075). Two things distort the whole map:
+- **The ocean** is one realm at every level and 58% of the units. A coastal or sea-going species splits its cells between a land realm and the ocean, in every map alike.
+- **The yes/no measure** counts range size more than boundaries. A vagrant cell in twenty fails a wide-ranging species in every map, and a small, compact range passes in every map.
+
+**The test as adopted:** the continuous measure (`concordance`), on land only. The land realms' land units are used, and a species' cells are counted there (`totals_within`). The whole-map runs are kept as `group_signal-all-*.csv`. On land the test behaves as it should:
+- birds +0.161, mammals +0.160, insects +0.162, flowering plants +0.143, amphibians +0.142, reptiles +0.110, mosses +0.143, mushrooms +0.153 and lichens +0.132, all at p 0.005;
+- the microfungi as well: Dothideomycetes +0.129 (p 0.005), Leotiomycetes +0.154 (0.010), Sordariomycetes +0.105 (0.015).
+
+**Result** (`res7/native_only/nested/group_signal-land-concordance.csv`): 95 classes testable, 26 without signal.
+- **Prokaryotes: 10 of 12 testable classes have no signal**, which is 4,789 of their 6,078 species: Actinomycetes, Gamma-, Alpha- and Betaproteobacteria, Flavobacteriia, Bacilli, Clostridia, Cytophagia, Chitinophagia and Bacteroidia. Only the Cyanophyceae (+0.147, p 0.005) and one small class pass.
+- **Eukaryotes: 16 of 83 have no signal**, which is 6,228 of 556,541 species (1.1%). Every one has a positive excess (0.05-0.18) at p 0.055-0.15:
+  - slime moulds, yeasts, Kickxellomycetes, Mucoromycetes and Coniocybomycetes;
+  - cryptophytes, golden algae, ciliates (Oligohymenophorea), diatoms (+0.101, p 0.09) and desmids;
+  - tapeworms and two classes of thorny-headed worms;
+  - rotifers;
+  - Andreaeopsida;
+  - sharks, which are marine and cannot be judged on land.
+
+  These are small, thinly sampled groups with a weak but positive signal: the case the condition protects.
+
+**Reading:** the test separates prokaryotes, which on land do not follow the realms, from eukaryotes, which do even where weakly. Dropping eukaryote classes on borderline p values would remove the rare true signal Markus wanted kept. Prokaryotes are the one group the data rule out. That points to the eukaryotes-only scope ("Eukaryotes only") rather than to dropping classes. Viruses are too few to test, and they are host records anyway. The decision is Markus's.

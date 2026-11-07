@@ -154,7 +154,8 @@ def test_realm_excess_finds_a_planted_realm_and_not_a_random_one():
     assert (random["excess"].abs() < 0.05).all() and (random["p"] > 0.05).all()
 
 
-def test_class_signal_keeps_a_class_that_follows_the_realms_and_drops_one_that_does_not():
+@pytest.mark.parametrize("measure", ["concordance", "endemic"])
+def test_class_signal_keeps_a_class_that_follows_the_realms_and_drops_one_that_does_not(measure):
     import numpy as np
     import polars as pl
 
@@ -180,7 +181,7 @@ def test_class_signal_keeps_a_class_that_follows_the_realms_and_drops_one_that_d
     taxa = pl.DataFrame({"species_id": sorted(set(presence["species_id"]))}).with_columns(pl.lit(None, pl.String).alias("genus_id"), pl.lit(None, pl.String).alias("family_id"))
     ct = cell_taxa(presence, taxa)
     classes = {f"E{s}": "Endemica" for s in range(40)} | {f"W{s}": "Vagantia" for s in range(40)} | {f"S{s}": "Solitaria" for s in range(40)}
-    table = class_signal(labels, ct, adjacency, {c: 1.0 for c in cells}, classes, n_null=19)
+    table = class_signal(labels, ct, adjacency, {c: 1.0 for c in cells}, classes, n_null=19, measure=measure)
     got = {r["class"]: r for r in table.iter_rows(named=True)}
     assert got["Endemica"]["observed"] == 1.0 and not got["Endemica"]["drop"]
     assert got["Vagantia"]["drop"] and got["Vagantia"]["testable"]

@@ -3,11 +3,15 @@
 `uv run python -I scripts/group_signal.py --counts data/gbif/<key> [--run native_only] [--nested nested] [--level finest] [--n-null 99]`
 
 Reads the realms of one level of `scripts/nested.py`'s output (default the finest) and the matrix the select stage scored, as `scripts/nested.py` does,
-and the classification of the release (`reference.load_taxa`). For each class, `nested.class_signal`: the share of its species (those in at least two
-cells) endemic to a realm, against 99 random maps of the same realm areas and pieces. A class is dropped only if it has at least `--min-species` such
-species and is not above the null (p > `--alpha`); a smaller class is never judged, so rarely sampled groups and their endemics stay.
+and the classification of the release (`reference.load_taxa`). For each class, `nested.class_signal`: by default the mean share of a species' cells in
+its main realm (`--measure concordance`), against `--n-null` random maps of the same realm areas and pieces. By default on land only: the land realms'
+land units, a species' cells counted there. The ocean is one realm at every level, and a coastal species splits its cells between it and a land realm
+in every map, which hid the signal of birds on the whole map (`--all-parts`). Only species in at least two cells are scored. A class is dropped only
+if it has at least `--min-species` scored species and is not above the null (p > `--alpha`); a smaller class is never judged, so rarely sampled
+groups and their endemics stay.
 
-Writes `res<r>/<run>/<nested>/group_signal.csv` and logs the classes to drop. Half A only. It removes nothing: a run without them is a decision.
+Writes `res<r>/<run>/<nested>/group_signal-<land|all>-<measure>.csv` and `.log`, and logs the classes to drop. Half A only. It removes nothing: a run
+without them is a decision.
 """
 
 import argparse
@@ -21,7 +25,7 @@ import polars as pl
 
 from realms.candidates import resolve_pieces
 from realms.explore import assigned_only, network_matrix, peak_gb, read_selected, read_units
-from realms.nested import class_signal
+from realms.nested import SEA_SUFFIX, class_signal, sea_realms
 from realms.occurrences import IncompleteIngest, resolution_of
 from realms.reference import load_taxa
 
@@ -37,6 +41,11 @@ def main() -> None:
     parser.add_argument("--n-null", type=int, default=99)
     parser.add_argument("--min-species", type=int, default=30)
     parser.add_argument("--alpha", type=float, default=0.05)
+    parser.add_argument("--all-parts", action="store_true",
+                        help="test on the whole map; by default on land only (the land realms' land units), as the ocean is one realm and a coastal species "
+                             "splits its cells between it and a land realm in every map")
+    parser.add_argument("--measure", choices=("concordance", "endemic"), default="concordance",
+                        help="concordance: the mean share of a species' cells in its main realm; endemic: the share of species with 95%% in one realm")
     parser.add_argument("--configs", type=Path, default=Path("explore/configs.toml"))
     parser.add_argument("--results", type=Path, default=Path("results/explore"))
     parser.add_argument("--reference", type=Path, default=Path("data/reference"))
@@ -49,13 +58,13 @@ def main() -> None:
     run_dir = args.results / f"res{resolution}" / args.run
     source = run_dir / args.nested
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S",
-                        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(source / "group_signal.log", mode="w")])
+                        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(source / f"group_signal-{'all' if args.all_parts else 'land'}-{args.measure}.log", mode="w")])
     meta = json.loads((source / "levels.json").read_text())
     levels = {int(n): c for n, c in meta["levels"].items()}
     level = max(levels) if args.level == "finest" else int(args.level)
     config = meta["config"]
     log.info(f"---- group signal: resolution {resolution}, run {args.run}, configuration {config}, level {level} (cut {levels[level]}), "
-             f"{args.n_null} null maps, at least {args.min_species} species in two cells or more, alpha {args.alpha}")
+             f"{'the whole map' if args.all_parts else 'land only'}, measure {args.measure}, {args.n_null} null maps, at least {args.min_species} species in two cells or more, alpha {args.alpha}")
     started = time.perf_counter()
 
     found = read_selected(run_dir, config, args.configs)
@@ -70,14 +79,20 @@ def main() -> None:
     labels = {u: unit_realm[u] for u in leaves if u in unit_realm}
     if len(labels) != len(leaves):
         raise SystemExit(f"FAILED {len(leaves) - len(labels)} units have no realm at level {level}")
+    if not args.all_parts:
+        sea = sea_realms(labels, scored.areas)
+        labels = {u: r for u, r in labels.items() if not sea[r] and not u.endswith(SEA_SUFFIX)}
+    adjacency = {u: {n for n in scored.adjacency.get(u, ()) if n in labels} for u in labels}
     manifest = json.loads((args.reference / "manifest.json").read_text())
     taxa = load_taxa(Path(manifest["col"]["path"]))
     species_class = {s: f"{k} {c}" for s, k, c in taxa.select("species_id", "kingdom", "class").iter_rows() if c}
-    log.info(f"{len(labels)} units in {len(set(labels.values()))} realms: {time.perf_counter() - started:.0f} s")
+    log.info(f"{len(labels)} units in {len(set(labels.values()))} realms tested: {time.perf_counter() - started:.0f} s")
 
-    table = class_signal(labels, scored.ct, scored.adjacency, scored.areas, species_class, n_null=args.n_null, min_species=args.min_species, alpha=args.alpha)
+    table = class_signal(labels, scored.ct, adjacency, scored.areas, species_class, n_null=args.n_null, min_species=args.min_species, alpha=args.alpha,
+                         measure=args.measure, totals_within=not args.all_parts)
     table = table.sort("species", descending=True)
-    table.write_csv(source / "group_signal.csv")
+    scope = "all" if args.all_parts else "land"
+    table.write_csv(source / f"group_signal-{scope}-{args.measure}.csv")
     with pl.Config(tbl_rows=60, float_precision=3, tbl_width_chars=200):
         log.info(f"the 40 largest classes:\n{table.head(40)}")
         log.info(f"to drop ({table['drop'].sum()} of {table.height} classes, {table.filter(pl.col('drop'))['species'].sum():,} species):\n{table.filter(pl.col('drop'))}")

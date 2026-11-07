@@ -271,23 +271,27 @@ def realm_excess(
 # same areas only adds noise. Species in one cell are endemic to any map, so they are not scored, and a class too small to test is never judged.
 
 
-def _endemic_species(x, totals: np.ndarray, cell_realm: np.ndarray, n_realms: int, tolerance: float) -> np.ndarray:
-    """Whether each column of `x` (cells x species, binary) has at least `tolerance` of its `totals` cells in one realm."""
+def _main_realm_share(x, totals: np.ndarray, cell_realm: np.ndarray, n_realms: int) -> np.ndarray:
+    """The share of each column's `totals` cells (`x`, cells x species, binary) that lie in its main realm."""
     from scipy.sparse import coo_matrix
 
     membership = coo_matrix((np.ones(len(cell_realm)), (np.arange(len(cell_realm)), cell_realm)), shape=(x.shape[0], n_realms)).tocsr()
     counts = (x.T.tocsr() @ membership).toarray()
-    return counts.max(axis=1) / np.maximum(totals, 1) >= tolerance
+    return counts.max(axis=1) / np.maximum(totals, 1)
 
 
 def class_signal(
     labels: Labels, ct: CellTaxa, adjacency: dict[str, set[str]], areas: dict[str, float], species_class: dict[str, str],
-    n_null: int = 99, seed: int = 1, tolerance: float = 0.95, min_species: int = 30, alpha: float = 0.05,
+    n_null: int = 99, seed: int = 1, tolerance: float = 0.95, min_species: int = 30, alpha: float = 0.05, measure: str = "concordance",
+    totals_within: bool = False,
 ) -> pl.DataFrame:
-    """For each class, the share of its species endemic to a realm of `labels` (at least `tolerance` of its cells inside), against the same share in
-    `n_null` random maps of the same realm areas and pieces (`nullmodel.null_partitions`).
+    """For each class, how well its species keep to the realms of `labels`, against the same in `n_null` random maps of the same realm areas and pieces
+    (`nullmodel.null_partitions`). `measure` is `concordance`, the mean share of a species' cells in its main realm, or `endemic`, the share of species
+    with at least `tolerance` of their cells in one realm. The second mostly measures range size: a vagrant cell in twenty fails a wide-ranging species
+    in every map, and a small compact range passes in every map, so a well-recorded, mobile class shows nothing (birds did, 2026-11-07).
 
-    Only species in at least two cells of `ct` are scored (`scored`); `species` counts them all. A class is `testable` with at least `min_species` scored
+    With `totals_within`, a species' cells are counted on the cells of `labels` only (for a test on land, where its sea cells are not in the map);
+    otherwise on the whole matrix. Only species in at least two such cells are scored (`scored`); `species` counts them all. A class is `testable` with at least `min_species` scored
     species, and is to be dropped (`drop`) only if testable and its share is not above the null maps' (p > `alpha`), p counting the observed map."""
     from realms.matrix import SPECIES
     from realms.nullmodel import null_partitions
@@ -299,12 +303,16 @@ def class_signal(
     columns = np.flatnonzero(ct.rank == SPECIES)
     ids = [ct.taxa[j].removeprefix("species:") for j in columns]
     x = table.x[:, columns].tocsc()
-    totals = table.totals[columns]
+    totals = np.asarray(x.sum(axis=0)).ravel() if totals_within else table.totals[columns]
     classes = np.array([species_class.get(i) or "" for i in ids])
     scored = totals >= 2
 
+    if measure not in ("concordance", "endemic"):
+        raise ValueError(f"the measure is concordance or endemic, not {measure!r}")
+
     def endemic(map_: Labels) -> np.ndarray:
-        return _endemic_species(x, totals, np.array([position[map_[c]] for c in cells]), len(realms), tolerance)
+        share = _main_realm_share(x, totals, np.array([position[map_[c]] for c in cells]), len(realms))
+        return share if measure == "concordance" else (share >= tolerance).astype(np.float64)
 
     observed = endemic(labels)
     nulls = [endemic(m) for m in null_partitions(labels, adjacency, areas, n=n_null, seed=seed)]
