@@ -2764,3 +2764,16 @@ Markus chose a data-driven test of which groups to keep, with the condition that
   These are small, thinly sampled groups with a weak but positive signal: the case the condition protects.
 
 **Reading:** the test separates prokaryotes, which on land do not follow the realms, from eukaryotes, which do even where weakly. Dropping eukaryote classes on borderline p values would remove the rare true signal Markus wanted kept. Prokaryotes are the one group the data rule out. That points to the eukaryotes-only scope ("Eukaryotes only") rather than to dropping classes. Viruses are too few to test, and they are host records anyway. The decision is Markus's.
+
+### The scope is eukaryotes (2026-11-07, Markus's ruling)
+
+Markus: "yes, drop prokaryotes and start". The analysis keeps the kingdoms Animalia, Chromista, Fungi, Plantae and Protozoa (`explore --eukaryotes-only`, `explore.EUKARYOTES`) and drops COL's Bacteria, Archaea and Viruses. The ground is the class test above: on land, prokaryotes do not follow the realms (10 of 12 testable classes), while every eukaryote class shows a positive excess, even where it is too weak to pass. No eukaryote class is dropped. Rarely sampled groups keep their signal, as Markus required.
+
+The headline run is now `native_only-eukaryotes` and replaces `native_only`. Everything downstream is redone on it, in this order, with the rules already fixed and nothing chosen by hand:
+1. the five-seed choice: seeds 1-5 x the seven configurations, then `scripts/seeds.py --run native_only-eukaryotes`;
+2. the cut rules (rules 2 and 6, `scripts/nested_cuts.py`) on the chosen configuration;
+3. the nested levels with their bootstrap (`scripts/nested.py`, 20 resamples) and maps;
+4. the other cleaning runs, each eukaryotes only: off, introduced, the two rule-off variants and merged names;
+5. the circularity gate on them, then the cross-checks and the review maps.
+
+The `native_only` outputs stay where they are, as the record of what the scope changed. The provisional eukaryotes-only run on mt075 at seed 1, whose `nested/` and `nested-cuts/` were drawn before the choice, moves to `nested-provisional/` and `nested-cuts-provisional/`.
