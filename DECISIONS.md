@@ -2693,3 +2693,21 @@ Removed from the open points.
 - **The top five** merge in another order with visits (South and East Asia joins the Holarctic first at k = 4), as their heights tie at 0.79-0.82.
 
 **Reading:** the coarsest and the finest levels are robust to the evidence, apart from New Guinea; the intermediate attachments of the small realms are not. This supports reporting the coarsest and the finest levels that pass both rules, with the levels between as the merge order. Records stay the evidence, as the calibration was made on them; a switch to visits would need a new calibration, after M3.
+
+### New Zealand: what the records say (2026-11-07, Markus's ruling)
+
+Markus: "for NZ keep what the records tell us." Records stay the evidence, and New Zealand stays with the Palearctic until it splits off (at the 9-realm level on 0020744). Nothing changes.
+
+**Why it is close** (download 0003457, records, the 10-realm level):
+- **All ranks together:** New Zealand's beta-sim is 0.621 with the Palearctic and 0.631 with Australia. With visits it is 0.612 and 0.610, and with visits Australia's realm already holds New Guinea, which makes it richer.
+- **By rank:**
+  - species: 0.741 and 0.746;
+  - genera: 0.387 and 0.406;
+  - families: 0.110 and 0.154.
+
+  The Palearctic wins at every rank, but only just.
+- **Shared species:** of New Zealand's 12,477 species, 1,632 are shared with the Palearctic only, 1,571 with Australia only, 1,600 with both and 7,674 with neither.
+- **What the Palearctic-only species are:** they have a median of 4 records in New Zealand, against 27 for the Australia-only ones. Most are microfungi (Sordariomycetes, Dothideomycetes, Leotiomycetes, Pezizomycetes), diatoms, bacteria (Actinomycetes, Cyanophyceae), Agaricomycetes and insects. These are widespread, thinly recorded organisms, often found where European workers sampled.
+- **What the Australia-only species are:** insects, lichens, liverworts, mosses, flowering plants, ferns and birds, with far more records each.
+
+So the attachment rests on a near tie that thinly recorded microorganisms tip. It is noted for the review, not acted on. Whether bacteria and diatoms belong in a realm analysis is a separate question, raised on the review page.
