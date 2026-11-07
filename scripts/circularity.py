@@ -2,7 +2,7 @@
 
 `uv run python -I scripts/circularity.py --counts data/gbif/<key>`
 
-Reads the select stage of one configuration (`--config`, default `mt090`) of each run, `results/explore/res<r>/<run>/<config>/select/`, at the resolution
+Reads the select stage of one configuration (`--config`, default `mt090`) of each run, `results/explore/res<r>/<run><suffix>/<config>/select/`, at the resolution
 of the counts' `_COMPLETE` marker, with `explore.read_selected` (which refuses a result that is not current) and `seeds.read_headline`, which puts the k chosen over five seeds (`<run>/seeds/choice.json`) in place of seed 1's where the choice names the configuration; the grid and the TDWG level 3 regions come from the references' manifest. Writes to `res<r>/circularity/`:
 
 - `runs.csv`: each run's selected k, its stability and whether it fell short of 0.8, its parts, and its land and sea boundary km at that k.
@@ -76,6 +76,7 @@ def main() -> None:
     parser.add_argument("--config", default="mt090", help="the Infomap configuration of the runs, default mt090 (DECISIONS, over five seeds, 2026-11-03)")
     parser.add_argument("--configs", type=Path, default=Path("explore/configs.toml"), help="the named Infomap configurations, default explore/configs.toml")
     parser.add_argument("--runs", nargs="+", default=list(RUNS), help="the runs, the base (WCVP off) first")
+    parser.add_argument("--suffix", default="", help="appended to each run's directory, -eukaryotes for the eukaryotes-only runs (DECISIONS, \"The scope is eukaryotes\", 2026-11-07); the runs keep their names in the outputs")
     parser.add_argument("--rotations", type=int, default=99)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--results", type=Path, default=Path("results/explore"))
@@ -107,11 +108,11 @@ def main() -> None:
     level3 = manifest_path(args.reference, "wgsrpd_level3")
     land = manifest_path(args.reference, "natural_earth_land")
     log.info(f"resolution {resolution} (from {args.counts}), configuration {args.config}, grid {gpkg}, regions {level3}, land {land}")
-    log.info(f"runs {args.runs}, base {BASE}, {args.rotations} rotations, seed {args.seed}")
+    log.info(f"runs {args.runs} (directories <run>{args.suffix}), base {BASE}, {args.rotations} rotations, seed {args.seed}")
 
     t = time.perf_counter()
     try:
-        runs = {run: read_run(root / run, args.config, args.configs) for run in args.runs}
+        runs = {run: read_run(root / f"{run}{args.suffix}", args.config, args.configs) for run in args.runs}
     except (ValueError, FileNotFoundError) as error:
         raise SystemExit(f"FAILED {error}") from error
     k = common_k({run: r["candidates"] for run, r in runs.items()}, {run: r["k"] for run, r in runs.items()})
