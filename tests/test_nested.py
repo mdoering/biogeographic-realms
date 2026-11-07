@@ -152,3 +152,37 @@ def test_realm_excess_finds_a_planted_realm_and_not_a_random_one():
     shuffled = dict(zip(ordered, rng.permutation([truth[c] for c in ordered]).tolist()))
     random = realm_excess(shuffled, ct, adjacency, areas, n_null=19, seed=1)
     assert (random["excess"].abs() < 0.05).all() and (random["p"] > 0.05).all()
+
+
+def test_class_signal_keeps_a_class_that_follows_the_realms_and_drops_one_that_does_not():
+    import numpy as np
+    import polars as pl
+
+    from helpers import grid
+    from realms.matrix import cell_taxa
+    from realms.nested import class_signal
+
+    positions, adjacency = grid(6, 6)
+    cells = [f"c{i}" for i in range(36)]
+    name = dict(zip(positions, cells))
+    adjacency = {name[p]: {name[n] for n in adjacency[p]} for p in positions}
+    labels = {c: (0 if i % 6 < 3 else 1) for i, c in enumerate(cells)}  # two realms, the left and the right half
+    rows = []
+    for s in range(40):  # endemic: each species in 3 cells of one half
+        half = s % 2
+        rows += [(c, f"E{s}") for c in [cells[r * 6 + half * 3 + (s % 3)] for r in ((s // 3) % 4, (s // 3) % 4 + 1, (s // 3) % 4 + 2)]]
+    rng = np.random.default_rng(1)
+    for s in range(40):  # scattered: each species in 3 random cells anywhere
+        rows += [(c, f"W{s}") for c in rng.choice(cells, 3, replace=False)]
+    for s in range(40):  # single cells: endemic to any map, never scored
+        rows.append((cells[s % 36], f"S{s}"))
+    presence = pl.DataFrame(rows, schema=["cell", "species_id"], orient="row")
+    taxa = pl.DataFrame({"species_id": sorted(set(presence["species_id"]))}).with_columns(pl.lit(None, pl.String).alias("genus_id"), pl.lit(None, pl.String).alias("family_id"))
+    ct = cell_taxa(presence, taxa)
+    classes = {f"E{s}": "Endemica" for s in range(40)} | {f"W{s}": "Vagantia" for s in range(40)} | {f"S{s}": "Solitaria" for s in range(40)}
+    table = class_signal(labels, ct, adjacency, {c: 1.0 for c in cells}, classes, n_null=19)
+    got = {r["class"]: r for r in table.iter_rows(named=True)}
+    assert got["Endemica"]["observed"] == 1.0 and not got["Endemica"]["drop"]
+    assert got["Vagantia"]["drop"] and got["Vagantia"]["testable"]
+    assert got["Solitaria"]["scored"] == 0 and not got["Solitaria"]["testable"] and not got["Solitaria"]["drop"]
+

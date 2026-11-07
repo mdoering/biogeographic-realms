@@ -2711,3 +2711,25 @@ Markus: "for NZ keep what the records tell us." Records stay the evidence, and N
 - **What the Australia-only species are:** insects, lichens, liverworts, mosses, flowering plants, ferns and birds, with far more records each.
 
 So the attachment rests on a near tie that thinly recorded microorganisms tip. It is noted for the review, not acted on. Whether bacteria and diatoms belong in a realm analysis is a separate question, raised on the review page.
+
+### Eukaryotes only (2026-11-07, Markus asked for the variant)
+
+`scripts/explore.py --eukaryotes-only` (`explore.eukaryote_counts`, run `native_only-eukaryotes`, its own hash) keeps the species of COL's Animalia, Chromista, Fungi, Plantae and Protozoa, and leaves out bacteria, archaea, viruses and species with no kingdom: about 6,900 species, 1.2% of species and 0.6% of presences. It was selected on `mt075` at seed 1, and the two cut rules and the levels were run on it, all on 0020744.
+
+| | headline | eukaryotes only |
+|---|---|---|
+| species after cleaning | 588,400 | 581,164 |
+| units | 3,293 | 2,897 |
+| selected k | 5 | 5 |
+| stability at k = 5 (seed 1) | 0.969 | 0.805 |
+| excess at k = 5 | 0.341 | 0.351 |
+| levels by the two rules | 5, 6, 7, 8, 9, 10, 13 | 5, 6, 7, 8, 9, 14 |
+
+- **The coarsest level** is the same five realms, and the order of the splits to nine realms is the same: Australia, the Nearctic, Madagascar, New Zealand.
+- **New Zealand attaches to Australia** before it splits off, not to the Palearctic. The direct beta-sims on the headline's finest level, all species against eukaryotes only:
+  - New Zealand with the Palearctic: 0.623 → 0.646;
+  - New Zealand with Australia: 0.631 → 0.640.
+- **The finest level, 14 realms,** holds the headline's 13, New Guinea among them, and a fourteenth: temperate East Asia (Japan, Korea and north-east China, 3.0M km², centre 45°N 128°E) splits from Indo-Malaya.
+- **Stability at k = 5 is lower** (0.805, one seed), and excess is higher (0.351).
+
+Whether prokaryotes and viruses stay is Markus's call on scope. The per-class signal test ("Which groups carry the realm signal") is the data-driven way to decide which groups to keep.

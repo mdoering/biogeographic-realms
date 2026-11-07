@@ -264,3 +264,65 @@ def realm_excess(
     return pl.DataFrame({"realm": realms, "observed": observed, "null_mean": nulls.mean(axis=0), "null_q95": np.quantile(nulls, 0.95, axis=0),
                          "excess": observed - nulls.mean(axis=0), "p": p},
                         schema={"realm": pl.Int64, "observed": pl.Float64, "null_mean": pl.Float64, "null_q95": pl.Float64, "excess": pl.Float64, "p": pl.Float64})
+
+
+# ---------------------------------------------------------------------------------------------------------------------------- which groups carry the signal
+# (DECISIONS, "Which groups carry the realm signal", 2026-11-07): a class whose species are no more endemic to the realms than to random regions of the
+# same areas only adds noise. Species in one cell are endemic to any map, so they are not scored, and a class too small to test is never judged.
+
+
+def _endemic_species(x, totals: np.ndarray, cell_realm: np.ndarray, n_realms: int, tolerance: float) -> np.ndarray:
+    """Whether each column of `x` (cells x species, binary) has at least `tolerance` of its `totals` cells in one realm."""
+    from scipy.sparse import coo_matrix
+
+    membership = coo_matrix((np.ones(len(cell_realm)), (np.arange(len(cell_realm)), cell_realm)), shape=(x.shape[0], n_realms)).tocsr()
+    counts = (x.T.tocsr() @ membership).toarray()
+    return counts.max(axis=1) / np.maximum(totals, 1) >= tolerance
+
+
+def class_signal(
+    labels: Labels, ct: CellTaxa, adjacency: dict[str, set[str]], areas: dict[str, float], species_class: dict[str, str],
+    n_null: int = 99, seed: int = 1, tolerance: float = 0.95, min_species: int = 30, alpha: float = 0.05,
+) -> pl.DataFrame:
+    """For each class, the share of its species endemic to a realm of `labels` (at least `tolerance` of its cells inside), against the same share in
+    `n_null` random maps of the same realm areas and pieces (`nullmodel.null_partitions`).
+
+    Only species in at least two cells of `ct` are scored (`scored`); `species` counts them all. A class is `testable` with at least `min_species` scored
+    species, and is to be dropped (`drop`) only if testable and its share is not above the null maps' (p > `alpha`), p counting the observed map."""
+    from realms.matrix import SPECIES
+    from realms.nullmodel import null_partitions
+
+    cells = sorted(labels)
+    realms = sorted(set(labels.values()))
+    position = {r: i for i, r in enumerate(realms)}
+    table = ct.rows(cells)
+    columns = np.flatnonzero(ct.rank == SPECIES)
+    ids = [ct.taxa[j].removeprefix("species:") for j in columns]
+    x = table.x[:, columns].tocsc()
+    totals = table.totals[columns]
+    classes = np.array([species_class.get(i) or "" for i in ids])
+    scored = totals >= 2
+
+    def endemic(map_: Labels) -> np.ndarray:
+        return _endemic_species(x, totals, np.array([position[map_[c]] for c in cells]), len(realms), tolerance)
+
+    observed = endemic(labels)
+    nulls = [endemic(m) for m in null_partitions(labels, adjacency, areas, n=n_null, seed=seed)]
+    rows = []
+    for name in sorted(set(classes) - {""}):
+        mine = classes == name
+        use = mine & scored
+        n = int(use.sum())
+        if n:
+            obs = float(observed[use].mean())
+            null = np.array([float(e[use].mean()) for e in nulls])
+            p = float((1 + (null >= obs).sum()) / (n_null + 1))
+            null_mean, null_q95 = float(null.mean()), float(np.quantile(null, 0.95))
+        else:
+            obs = null_mean = null_q95 = p = float("nan")
+        testable = n >= min_species
+        rows.append({"class": name, "species": int(mine.sum()), "scored": n, "observed": obs, "null_mean": null_mean, "null_q95": null_q95,
+                     "excess": obs - null_mean, "p": p, "testable": testable, "drop": bool(testable and p > alpha)})
+    schema = {"class": pl.String, "species": pl.Int64, "scored": pl.Int64, "observed": pl.Float64, "null_mean": pl.Float64, "null_q95": pl.Float64,
+              "excess": pl.Float64, "p": pl.Float64, "testable": pl.Boolean, "drop": pl.Boolean}
+    return pl.DataFrame(rows, schema=schema)
