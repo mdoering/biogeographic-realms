@@ -2787,3 +2787,58 @@ The rule is what gets preregistered, not its numbers. On half A's `native_only` 
 - **Half B:** in the confirmation at M3, its levels are whatever the rule gives there. Fixing "5 and 13" in advance would make the confirmation a comparison with what looked right on half A.
 
 The rule adds no threshold of its own: the two cut rules already define the levels. It goes into `PREREGISTRATION.md` as written here, once that file's contents are settled. That is still an open point.
+
+### The eukaryotes headline: results (2026-11-08)
+
+This is the chain from "The scope is eukaryotes", run in full with no hand choices (log `res7/eukaryotes-headline.log`, 19:55 to 08:32). One step failed and was rerun: the gate's `--suffix -eukaryotes` was read by argparse as an option, so the gate ran again with `--suffix=-eukaryotes`.
+
+**The five-seed choice** (`native_only-eukaryotes/seeds/`) is again mt075 at k = 5: excess 0.355 (was 0.340), with 35 stable maps (was 32). Median stability over the seeds is 0.961 (range 0.805-0.969).
+
+**The cut rules** (`nested-cuts/`):
+- Rule 2 finds robust levels at 5, 6, 7, 8, 9 and 14 realms, with cuts 0.796, 0.756, 0.709, 0.664, 0.596 and 0.484. Without the prokaryotes, `native_only`'s levels at 10 and 13 are no longer robust, and 14 is.
+- Rule 6 passes every realm at every level (p = 0.01), with the smallest excess 0.136.
+- **The reporting rule therefore gives 5 and 14 realms.**
+
+**The nesting** (`nested/`, 20 Infomap resamples; `nested/maps/`):
+- **5 realms:** Holarctic; Afrotropics with Madagascar; Neotropics with Patagonia; Indo-Malaya with Australasia; the ocean.
+- **6:** Australia with New Zealand splits from Indo-Malaya.
+- **7:** the Nearctic splits from the Palearctic.
+- **8:** Madagascar.
+- **9:** New Zealand.
+- **14:** New Guinea, Patagonia, Hawaii, New Caledonia, and **temperate East Asia**: Manchuria, the Amur, Korea and Japan, 3.0M km², split from Indo-Malaya.
+
+The order matches `native_only` except in two places:
+- New Zealand now sits with Australia rather than the Palearctic before it splits off. This is the attachment the visits and eukaryotes-only checks had found.
+- East Asia is new. In `native_only` it lay inside Indo-Malaya at every level.
+
+**Recovery.** Every realm is recovered in the Infomap resamples at 75-100%, with median Jaccard 0.80-1.00, with two exceptions:
+- **East Asia** is recovered in 5% of resamples (median Jaccard 0.17). In nearly every resample it is absorbed into a larger realm.
+- **The Palearctic** falls to 55% (median Jaccard 0.63), from 80%. In those resamples it either takes in East Asia or is joined with Indo-Malaya, as before.
+
+The cut rules do not use this recovery. Rule 2 replays the merges of fixed base realms on species resamples, and East Asia's merge height has a wide gap there. Recovery reruns Infomap itself, which moves the modules under it. Whether a realm needs both is a question for Markus (below).
+
+**The gate** (`res7/circularity/`, all runs eukaryotes only, mt075, `--suffix=-eukaryotes`): every run selects k = 5, and every mode passes. The headline mode stays `native_only`.
+
+| Run | Share of boundary along TDWG edges | Change from `off` | 95th percentile of rotations |
+|---|---|---|---|
+| `off` | 0.801 | | |
+| `native_only` | 0.813 | +0.012 | 0.126 |
+| `introduced` | 0.892 | +0.091 | 0.129; 0.102 without the land tolerance, the closest margin |
+| no extinct / no-wild-range rules | 0.871 | +0.069 | |
+| no GRIIS | 0.752 | -0.049 | |
+
+**The cross-checks** (`res7/crosscheck/`):
+- **Beta-sim area agreement with Infomap at k = 5:**
+  - Ward 0.687, 0.842 and 0.687 over three seeds (was 0.61-0.63); seed 2 differs, with V 0.87 between seeds;
+  - average linkage 0.769, as before.
+- **Merged names:** V 0.983, and the cleaned presence and the units are identical.
+
+**Outputs.**
+- The review maps are in `res7/review/`.
+- The `native_only` versions of the gate, cross-check and review outputs are in `res7/*-native_only/`.
+
+**Open for Markus: East Asia.** It passes both preregistered rules but is not reproduced when Infomap reruns on resampled species. My recommendation is to keep the rules as they are and report 5 and 14, with each realm's recovery beside it and East Asia marked as the one realm the resamples do not reproduce. Two alternatives were considered:
+- **A recovery bar on whole levels.** Its only effect here would be to drop level 14, so the finest level would be 9. That loses New Guinea, Patagonia, Hawaii and New Caledonia, which recover at 85-100%.
+- **A bar on single realms.** It would fold East Asia back into Indo-Malaya and report a 13-realm level that no rule defines.
+
+Either alternative would be a rule chosen after seeing which realm fails.
