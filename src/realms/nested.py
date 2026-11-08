@@ -13,6 +13,8 @@ realms join. So the realms are reported at nested levels, and a unit is a realm 
 `candidates.py`, the selection and the Costello gate are unchanged: this is a separate path.
 """
 
+from collections.abc import Iterable
+
 import numpy as np
 import polars as pl
 
@@ -229,6 +231,20 @@ def robust_levels(merges: pl.DataFrame, replicates: np.ndarray, share: float = 0
                      "cut": (below + above) / 2 if above > below else None, "separated": separated, "robust": above > below and separated >= share})
     schema = {"done": pl.Int64, "realms": pl.Int64, "below": pl.Float64, "above": pl.Float64, "cut": pl.Float64, "separated": pl.Float64, "robust": pl.Boolean}
     return pl.DataFrame(rows, schema=schema)
+
+
+def reported_levels(realms: Iterable[int]) -> list[int]:
+    """The levels a report gives, of those that pass both cut rules (`realms`, their counts of realms): the coarsest; the end of the unbroken run
+    from it, where each level has one realm more than the one before, so that every split down to it is robust on its own; and the finest
+    (DECISIONS, "The reporting rule", 2026-11-07, and its third level, 2026-11-08). Sorted, without repeats: two when the run reaches the finest,
+    one when only one level passes, none when none does."""
+    chosen = sorted(set(realms))
+    if not chosen:
+        return []
+    end = chosen[0]
+    while end + 1 in chosen:
+        end += 1
+    return sorted({chosen[0], end, chosen[-1]})
 
 
 def _rank_incidences(ct: CellTaxa, cells: list[str]) -> list:

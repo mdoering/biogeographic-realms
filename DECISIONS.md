@@ -2837,8 +2837,28 @@ The cut rules do not use this recovery. Rule 2 replays the merges of fixed base 
 - The review maps are in `res7/review/`.
 - The `native_only` versions of the gate, cross-check and review outputs are in `res7/*-native_only/`.
 
-**Open for Markus: East Asia.** It passes both preregistered rules but is not reproduced when Infomap reruns on resampled species. My recommendation is to keep the rules as they are and report 5 and 14, with each realm's recovery beside it and East Asia marked as the one realm the resamples do not reproduce. Two alternatives were considered:
+**East Asia** (settled by "The reporting rule: a third level", 2026-11-08). It passes both preregistered rules but is not reproduced when Infomap reruns on resampled species. My recommendation is to keep the rules as they are and report 5 and 14, with each realm's recovery beside it and East Asia marked as the one realm the resamples do not reproduce. Two alternatives were considered:
 - **A recovery bar on whole levels.** Its only effect here would be to drop level 14, so the finest level would be 9. That loses New Guinea, Patagonia, Hawaii and New Caledonia, which recover at 85-100%.
 - **A bar on single realms.** It would fold East Asia back into Indo-Malaya and report a 13-realm level that no rule defines.
 
 Either alternative would be a rule chosen after seeing which realm fails.
+
+### The reporting rule: a third level (2026-11-08, Markus's ruling)
+
+This entry replaces "The reporting rule" of 2026-11-07. Markus asked to report 5, 9 and 14 on the eukaryotes headline. The 9 comes from a rule, so the rule is what he confirmed and what gets preregistered.
+
+**The report gives three of the levels that pass both cut rules** (`nested.reported_levels`, written as `reported` to `nested-cuts/cuts.json`):
+1. **The coarsest.**
+2. **The end of the unbroken run from the coarsest.** Each level in the run has exactly one realm more than the one before it, so every split down to it is robust on its own: the hierarchy is resolved one split at a time.
+3. **The finest.** Each of its realms is given with its recovery in the Infomap resamples (`nested/realms.csv`).
+
+The levels between them are given as the merge order. When the run reaches the finest level, two levels are reported; when only one level passes, one is.
+
+**The rule on half A:**
+- **`native_only-eukaryotes`** has robust levels 5, 6, 7, 8, 9 and 14, so the report gives **5, 9 and 14**. From 9 to 14, five realms split at once: New Guinea, Patagonia, Hawaii, New Caledonia and temperate East Asia. No level between 9 and 14 is robust, so their order is not resolved.
+- **The earlier `native_only`** run has robust levels 5-10 and 13, so the rule would give 5, 10 and 13.
+- **Half B:** at M3 the levels are whatever the rule gives there.
+
+**Why not a recovery bar.** Recovery does not single out 9, and a bar would need a threshold chosen to land on it. Without the prokaryotes, the Palearctic (the Holarctic at 5 and 6) is weakly recovered at every level: 45-55% of resamples, median Jaccard 0.41-0.63, where `native_only` had 70-80%. In those resamples Infomap joins it with Indo-Malaya. The entry "The eukaryotes headline: results" gave the Palearctic's 55% for the finest level only; it holds at every level.
+
+**East Asia** stays in the 14-realm level, which the rule reports. It is shown as the one realm the resamples rarely reproduce: 5%, median Jaccard 0.17.

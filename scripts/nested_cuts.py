@@ -13,7 +13,7 @@ and sea with sea (`nested.nested_merges`). Every place in that merge order where
 
 Writes to `res<r>/<run>/nested-cuts/` (or `--out`), with `run.log`: `merges.csv`, `heights.csv` (resamples x merges), `levels.csv` (every candidate,
 rule 2), `excess.csv` (rule 6, per robust level and realm) and `cuts.json`: the robust levels that pass, their cuts, and the command of
-`scripts/nested.py` that draws them. Half A only. It chooses by the rules and nothing else.
+`scripts/nested.py` that draws them, and `reported`, the levels a report gives (`nested.reported_levels`). Half A only. It chooses by the rules and nothing else.
 """
 
 import argparse
@@ -28,7 +28,7 @@ import polars as pl
 
 from realms.candidates import resolve_pieces
 from realms.explore import assigned_only, network_matrix, peak_gb, read_selected, read_units
-from realms.nested import height_replicates, leaf_realms, nested_merges, realm_excess, robust_levels, sea_realms
+from realms.nested import height_replicates, leaf_realms, nested_merges, realm_excess, reported_levels, robust_levels, sea_realms
 from realms.occurrences import IncompleteIngest, resolution_of
 from realms.seeds import read_choice
 
@@ -106,11 +106,12 @@ def main() -> None:
 
     chosen = levels.filter(pl.col("robust") & pl.col("passes").fill_null(False)).sort("cut", descending=True)
     cuts = [round(c, 3) for c in chosen["cut"].to_list()]
+    reported = reported_levels(chosen["realms"].to_list())
     command = (f"uv run python -I scripts/nested.py --counts {args.counts} --config {config} --leaf-cut {cuts[-1]} --cuts {' '.join(map(str, cuts[:-1]))}"
                if cuts else None)
     (out / "cuts.json").write_text(json.dumps({"config": config, "base_cut": args.base_cut, "n_boot": args.n_boot, "share": args.share, "n_null": args.n_null,
-                                               "alpha": args.alpha, "levels": chosen.select("realms", "cut").to_dicts(), "nested_command": command}, indent=2) + "\n")
-    log.info(f"levels by both rules: {chosen.select('realms', 'cut').rows()}; {command}")
+                                               "alpha": args.alpha, "levels": chosen.select("realms", "cut").to_dicts(), "reported": reported, "nested_command": command}, indent=2) + "\n")
+    log.info(f"levels by both rules: {chosen.select('realms', 'cut').rows()}; reported (the coarsest, the end of its run, the finest): {reported}; {command}")
     log.info(f"nested cuts: {time.perf_counter() - started:.0f} s, peak {peak_gb():.1f} GB")
 
 

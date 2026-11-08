@@ -187,3 +187,17 @@ def test_class_signal_keeps_a_class_that_follows_the_realms_and_drops_one_that_d
     assert got["Vagantia"]["drop"] and got["Vagantia"]["testable"]
     assert got["Solitaria"]["scored"] == 0 and not got["Solitaria"]["testable"] and not got["Solitaria"]["drop"]
 
+
+
+@pytest.mark.parametrize(("realms", "reported"), [
+    ([5, 6, 7, 8, 9, 14], [5, 9, 14]),  # the eukaryotes headline: a run to 9, then five realms at once
+    ([13, 5, 10, 6, 9, 7, 8], [5, 10, 13]),  # unsorted: native_only's levels
+    ([5, 6, 7], [5, 7]),  # the run reaches the finest
+    ([5, 9, 14], [5, 14]),  # no run past the coarsest
+    ([5], [5]),
+    ([], []),
+])
+def test_reported_levels_give_the_coarsest_the_end_of_its_run_and_the_finest(realms, reported):
+    from realms.nested import reported_levels
+
+    assert reported_levels(realms) == reported
