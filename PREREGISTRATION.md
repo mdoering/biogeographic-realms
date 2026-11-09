@@ -1,8 +1,8 @@
 # Preregistration: global biogeographic realms from GBIF occurrences
 
 **Status: DRAFT for Markus to edit, 2026-11-09.** Drawn from `docs/design.md` and `DECISIONS.md` up to 2026-11-09, which hold the
-reasons. Markus registers the final version on OSF before half B is unsealed (design, "Exploring and confirming", step 3). Items marked
-**TO SETTLE** are proposals, not yet decided.
+reasons. Markus registers the final version on OSF before half B is unsealed (design, "Exploring and confirming", step 3). Every
+method choice is settled; section 12 lists what is still to fill in.
 
 The rules are what is registered, not the numbers they gave on half A. On half B and on all species, the numbers are whatever the
 rules give there.
@@ -81,7 +81,9 @@ The layers run in order (design, "Cleaning"; `src/realms/clean.py`):
 **The WCVP mode is chosen by the circularity gate** (section 8). The headline mode is the first of `native_only` and `introduced` whose
 gate passes, else WCVP off.
 
-**TO SETTLE: how `group_min_records` (300 on half A) scales to all species.** This is an open point from 2026-11-01.
+**`group_min_records` scales with the records** (Markus, 2026-11-09). The calibration chose 300 on half A, whose group totals per cell are
+about half those of all species. A run uses 300 times its records over half A's records, so that the threshold keeps the meaning it had
+on A: about 600 on all species, and B's own ratio on half B. The exact values are filled in at the freeze.
 
 ## 5. Units of the network
 
@@ -174,9 +176,13 @@ The frozen pipeline (sections 4 to 8) runs once on half B. Any failure is report
     over the parts both map.
   - B's own reported levels are reported beside A's.
 
-**TO SETTLE: the pass marks.** Proposals:
-- **C1 passes** when, at every reported level, B's excess is above the null (p ≤ 0.05) at each of the three ranks. A realm whose own
-  excess on B is not above the null (p > 0.05) is reported as not confirmed. It does not fail the whole test.
+**The pass marks** (Markus, 2026-11-09):
+- **C1 passes** when, at every reported level, B's area-weighted excess is above the null (p ≤ 0.05) at each of the three ranks, and the
+  family rank is also above the null over A's land realms alone. The land test weighs the land realms only (`nested.sea_realms`: under half
+  their area in sea parts), each null map's realm at the same position standing in for a land realm (`scripts/rank_endemism.py`, scope
+  `land`). It is there because the sea realm carries most of a level's family score. A realm whose own excess on B is not above the null
+  (p > 0.05) is reported as not confirmed. It does not fail the whole test. On half A every rank passes at every level on the whole map
+  and on land (p = 0.01), and per realm only New Guinea fails, at family rank at 14 realms.
 - **C2 passes** when V ≥ 0.8 at the coarsest reported level. This is the bar the stability already uses. On half A, maps at different
   seeds and in different cleaning modes agree at V 0.87-0.99. V at the finer reported levels is reported against the same 0.8, but
   does not decide.
@@ -215,8 +221,6 @@ None of these changes the headline.
 
 ## 12. Still open before registration
 
-- **The pass marks of section 9.**
-- **The scaling of `group_min_records`** to all species.
 - **Two source issues**, to be noted rather than fixed in the pipeline:
   - GRIIS-US flags *Passer domesticus* and *Columba livia* as native;
   - ChecklistBank dataset 28940 (Cayman Brac) carries the alias GRIIS-KY.

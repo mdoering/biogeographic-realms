@@ -11,8 +11,10 @@ A taxon is endemic to a realm when at least 95% of its units lie inside. Writes 
 
 - `realms.csv`: per level, realm and rank, the taxa present and endemic, the endemic share against the same realm in the null maps (mean, q95,
   excess, p).
-- `levels.csv`: per level and rank, the area-weighted share (the measure of `nullmodel.endemism_excess` at one rank) against the null maps, and the
-  realms with p above `--alpha` at that rank.
+- `levels.csv`: per level, rank and scope, the area-weighted share (the measure of `nullmodel.endemism_excess` at one rank) against the null maps, and the
+  realms with p above `--alpha` at that rank. Scope `all` is the whole map; scope `land` weighs the land realms only (`nested.sea_realms`, under half
+  their area in sea parts), each null map's realm at the same position standing in for a land realm. The land scope is the second half of the C1
+  pass mark for families (PREREGISTRATION.md, section 9), as the sea realm carries most of a level's family score.
 - `level<n>.png`, one per reported level: a map per rank, each realm shaded by its endemic share at that rank, on a scale per rank; a realm not
   above the null at that rank is hatched. Drawn from the realm outlines of `nested/maps/level<i>.gpkg` (`scripts/nested_maps.py`).
 - `report.md`: the tables per reported level.
@@ -42,7 +44,7 @@ from scipy.sparse import coo_matrix  # noqa: E402
 from shapely.ops import polylabel  # noqa: E402
 
 from realms.candidates import resolve_pieces  # noqa: E402
-from realms.endemism import area_weighted, realm_share  # noqa: E402
+from realms.endemism import area_weighted as whole_map, realm_share  # noqa: E402
 from realms.explore import assigned_only, network_matrix, peak_gb, read_selected, read_units  # noqa: E402
 from realms.hexmaps import DPI, GLOBE, OUTLINE, _polygons, _projected  # noqa: E402
 from realms.maps import SURFACE, TEXT  # noqa: E402
@@ -66,6 +68,12 @@ def counts(table: Incidence, cell_realm: np.ndarray, n_realms: int) -> tuple[np.
     present = np.bincount(inside.col, minlength=n_realms)
     endemic = np.bincount(inside.col[inside.data / table.totals[inside.row] >= TOLERANCE], minlength=n_realms)
     return present, endemic
+
+
+def area_weighted(shares: np.ndarray, cell_realm: np.ndarray, cell_area: np.ndarray, keep: np.ndarray) -> float:
+    """`endemism.area_weighted` over the realms `keep` marks only: their shares weighted by their areas in the map `cell_realm`."""
+    realm_area = np.bincount(cell_realm, weights=cell_area, minlength=len(shares)) * keep
+    return float((shares * realm_area).sum() / realm_area.sum())
 
 
 def _percent(share: float) -> str:
@@ -159,6 +167,8 @@ def score(args, run_dir: Path, out: Path, cuts: dict, rule6: pl.DataFrame, names
         everything = scored.ct.rows(cells)
         tables = [Incidence(everything.x[:, cols], everything.totals[cols]) for cols in (np.flatnonzero(scored.ct.rank == i) for i in range(len(RANKS)))]
         cell_area = np.array([scored.areas[c] for c in cells])
+        is_sea = sea_realms(labels, scored.areas)
+        land = np.array([not is_sea[r] for r in realms])  # A's land realms; a null map's realm of the same position stands in for each
 
         def placed(map_) -> np.ndarray:
             return np.array([position[map_[c]] for c in cells])
@@ -185,14 +195,18 @@ def score(args, run_dir: Path, out: Path, cuts: dict, rule6: pl.DataFrame, names
                                    "present": int(present[j]), "endemic": int(endemic[j]), "observed": float(observed[i, j]),
                                    "null_mean": float(nulls[:, i, j].mean()), "null_q95": float(np.quantile(nulls[:, i, j], 0.95)),
                                    "excess": float(observed[i, j] - nulls[:, i, j].mean()), "p": float(p[j])})
-            whole = area_weighted(observed[i], observed_realm, cell_area)
-            whole_null = np.array([area_weighted(nulls[b, i], cr, cell_area) for b, cr in enumerate(null_realms)])
-            failing = [level_names.get(str(realms[j]), str(realms[j])) for j in np.flatnonzero(p > args.alpha)]
-            level_rows.append({"realms": n, "cut": level["cut"], "rank": rank, "observed": whole, "null_mean": float(whole_null.mean()),
-                               "null_q95": float(np.quantile(whole_null, 0.95)), "excess": float(whole - whole_null.mean()),
-                               "p": float((1 + (whole_null >= whole).sum()) / (args.n_null + 1)), "realms_failing": "; ".join(failing)})
+            for scope, keep in (("all", np.ones(len(realms), dtype=bool)), ("land", land)):
+                whole = area_weighted(observed[i], observed_realm, cell_area, keep)
+                if scope == "all" and not np.isclose(whole, whole_map(observed[i], observed_realm, cell_area), rtol=0, atol=1e-12):
+                    raise SystemExit(f"FAILED at {n} realms the whole-map score differs from endemism.area_weighted")
+                whole_null = np.array([area_weighted(nulls[b, i], cr, cell_area, keep) for b, cr in enumerate(null_realms)])
+                failing = [level_names.get(str(realms[j]), str(realms[j])) for j in np.flatnonzero((p > args.alpha) & keep)]
+                level_rows.append({"realms": n, "cut": level["cut"], "rank": rank, "scope": scope, "observed": whole, "null_mean": float(whole_null.mean()),
+                                   "null_q95": float(np.quantile(whole_null, 0.95)), "excess": float(whole - whole_null.mean()),
+                                   "p": float((1 + (whole_null >= whole).sum()) / (args.n_null + 1)), "realms_failing": "; ".join(failing)})
         log.info(f"{n} realms: rank average reproduces rule 6; failing p > {args.alpha}: "
-                 + "; ".join(f"{r['rank']} [{r['realms_failing']}]" for r in level_rows[-len(RANKS):]) + f"; {time.perf_counter() - started:.0f} s")
+                 + "; ".join(f"{r['rank']} {r['scope']} p {r['p']:.2f} [{r['realms_failing']}]" for r in level_rows[-2 * len(RANKS):])
+                 + f"; {time.perf_counter() - started:.0f} s")
 
     realm_table = pl.DataFrame(realm_rows)
     level_table = pl.DataFrame(level_rows)
@@ -248,7 +262,7 @@ def main() -> None:
         rows = realm_table.filter(pl.col("realms") == n)
         cut = rows["cut"][0]
         lines.append(f"\n### {n} realms (cut {cut:.3f})\n")
-        lines.append(markdown(level_table.filter(pl.col("realms") == n).select("rank", "observed", "null_mean", "null_q95", "excess", "p", "realms_failing"),
+        lines.append(markdown(level_table.filter(pl.col("realms") == n).select("rank", "scope", "observed", "null_mean", "null_q95", "excess", "p", "realms_failing"),
                               {"observed": ".3f", "null_mean": ".3f", "null_q95": ".3f", "excess": ".3f", "p": ".2f"}))
         wide = (rows.with_columns((pl.col("observed") * 100).round(1).cast(pl.String) + " (" + (pl.col("null_mean") * 100).round(1).cast(pl.String) + ") "
                                   + pl.col("endemic").cast(pl.String) + "/" + pl.col("present").cast(pl.String)

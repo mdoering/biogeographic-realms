@@ -2980,3 +2980,23 @@ On half A at the headline's 9-realm map:
 - a threshold of two species drops 55% of the genera.
 
 Such a threshold measures sampling effort more than range. It shrinks large families to their best-sampled cells, and the threshold that gives them the most endemism would be chosen against the C1 pass mark. In the headline, genera and families already count for little: their links are weighted by information and they are about 1% of the columns of the merges. The realms come from species (`Realms from one rank on its own: results`). Markus: leave it. The roll-up stays as it is.
+
+### The half B pass marks and the scaling of `group_min_records` (2026-11-09)
+
+Markus settled the last two method points of the preregistration (PREREGISTRATION.md, sections 4 and 9).
+
+**C1** passes when, at every reported level, half B's area-weighted endemism excess is above the null (p ≤ 0.05) at each of the three ranks, and the family rank is also above the null over A's land realms alone. On half A the sea realm carries most of a level's family score: at 9 realms the family share is 0.392 on the whole map but 0.083 over land. Without the land test the ocean alone could pass the families.
+
+The land test is now scope `land` in `scripts/rank_endemism.py`. It weighs the land realms only (`nested.sea_realms`), and each null map's realm at the same position stands in for a land realm. Scope `all` is checked against `endemism.area_weighted`.
+
+On half A, every rank passes at every level on both scopes, p = 0.01 (the smallest p 99 null maps allow):
+
+| realms | family, whole map (null q95) | family, land (null q95) |
+|---|---|---|
+| 5 | 0.417 (0.142) | 0.141 (0.041) |
+| 9 | 0.392 (0.124) | 0.083 (0.023) |
+| 14 | 0.390 (0.114) | 0.077 (0.021) |
+
+Per realm, the only failure is New Guinea at family rank at 14 realms. A realm that fails is reported as not confirmed and does not fail the test. C2 stays as proposed: V ≥ 0.8 at the coarsest reported level.
+
+**`group_min_records`** scales with the records (open point I4, 2026-11-01). The calibration chose 300 on half A, which holds about half the records of all species. A run uses 300 times its records over half A's, which keeps the meaning the threshold had on A: about 600 on all species. The exact values, and the code that sets them, come at the freeze and in M2; half A's runs keep 300.
