@@ -2891,3 +2891,10 @@ The selection's own bootstrap stability (20 bootstraps of 3 trials, the design's
 Following "Why the Palearctic is hard to reproduce", each resample of the recovery check (`nested.bootstrap_recovery`) now runs Infomap with 10 trials, as many as the reference map has; it used to run 3. `scripts/nested.py --boot-trials` defaults to 10. Recovery then measures how stable a realm is on the data, not how often a short search misses.
 
 Only the recovery column (`nested/realms.csv`, `recovery.csv`) changes. The levels, the cut rules, the selection and its 3-trial bootstrap stability stay as they were. The 3-trial outputs are kept in `native_only-eukaryotes/nested-boot3/`.
+
+**Result (2026-11-09).** `scripts/nested.py` was rerun with the same cuts and 20 resamples of 10 trials. The levels, realms and areas are identical; only the recovery column changed.
+- **Recovery:** every realm at every level is recovered in 85-100% of the resamples, with median Jaccard 0.68-1.00. The Palearctic is recovered in 100% at every level (Jaccard 0.97-0.98, up from 0.41-0.63). The Holarctic at 5 and 6 realms is at 100% (0.98, up from 0.53).
+- **Temperate East Asia** is the one exception: 15% (Jaccard 0.17, up from 5%). It is the realm the report flags.
+- **The ocean** at 14 realms has median Jaccard 0.70, down from 0.81, and is recovered in 95% of resamples.
+
+The 3-trial outputs are in `nested-boot3/`. The review page and `nested/maps/tables.md` use the new recovery.
