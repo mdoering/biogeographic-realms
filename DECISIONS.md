@@ -2905,3 +2905,19 @@ Markus answered the review page's three questions with "yes to all 3":
 - **The reported levels** of the eukaryotes headline, 5, 9 and 14 realms, read right to him. Temperate East Asia is flagged by its recovery.
 - **The Antarctic coast and Greenland stay Palearctic**, as the data and the imputation give them. Their imputed parts are hatched on the maps and flagged in the per-cell outputs.
 - **`PREREGISTRATION.md` is drafted from DECISIONS** for Markus to edit. The pass marks for the confirmation on half B, which the design leaves to the freeze, are drafted as proposals for him to settle.
+
+### Endemism by rank on its own (2026-11-09)
+
+Rule 6 and the endemism excess of the configuration choice average species, genus and family equally. The proposed half B pass mark C1 asks each rank to pass separately, which had not been checked on half A. `scripts/rank_endemism.py` splits rule 6 by rank, at every level of `nested-cuts/cuts.json`. It rebuilds the levels and draws the null maps as `scripts/nested_cuts.py` does (99, seed 1), and checks that the rank average reproduces `nested-cuts/excess.csv` before writing anything; it does at all six levels. It changes no method. Outputs are in `native_only-eukaryotes/rank-endemism/`: `realms.csv`, `levels.csv`, `report.md`, and one map per reported level with a panel per rank (`level1.png`, `level5.png`, `level6.png`). The matrix has 580,158 species, 71,484 genera and 5,586 families.
+
+**Per level.** At every level and rank the area-weighted share is above all 99 null maps (p = 0.01). At 14 realms: species 0.820 against a null mean of 0.436, genus 0.589 against 0.234, family 0.390 against 0.084. The excess falls only a little from species to family (0.38, 0.36, 0.31).
+
+**The family score of a level is mostly the ocean.** Sea realms are 58% of the area. The ocean's family share is 61% (null 13%); the land realms' are 0.1-12%. Over land realms alone, weighted by area (the null as the area-weighted null means, so without a p):
+- at 5 realms: species 0.84 against 0.33, genus 0.51 against 0.12, family 0.14 against 0.03;
+- at 14 realms: species 0.76 against 0.25, genus 0.37 against 0.08, family 0.08 against 0.02.
+
+The land signal at family rank is about five times the null, but small in absolute terms. A level-wide test at family rank would pass on the ocean alone.
+
+**Per realm.** Every realm passes at every rank at every level (p = 0.01), with one exception: **New Guinea at family rank at 14 realms**, 1 endemic family of 746 (0.1%, null 0.1%, p = 0.35). The small realms pass at family rank on a handful of families against a null near zero: Hawaii 2 of 520, New Caledonia 4 of 442, Madagascar 12 of 692, Patagonia 13 of 855, New Zealand 15 of 1,039, East Asia 20 of 1,476. Counts that small can fall to zero or one on another sample.
+
+**What this means for C1.** As proposed, C1 is met on half A at the level of whole maps, at each rank. But the family part of that is carried by the ocean. Per realm, the strict per-rank reading would already fail New Guinea on A, and on B would be at the mercy of a few families in each small realm. Markus decides the pass mark (PREREGISTRATION.md, section 9).
