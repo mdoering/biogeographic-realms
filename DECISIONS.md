@@ -2969,3 +2969,14 @@ At 3 realms the headline is cut from the same merge order, not from one of its o
 - the sea stays one realm.
 
 Both rest on genera and families, which matches the per-rank endemism (`Endemism by rank on its own`), where the ocean carries most of the family signal. The headline method stays as it is. Five seeds for the species-alone run would only change the result if its configuration choice moved; that is for Markus to ask for.
+
+### Genus and family presence stays one species (2026-11-09)
+
+A genus or family is present in a cell when one of its species is (`matrix._assemble`, an OR over the species). Markus asked whether a threshold that grows with the taxon's size should replace it, so that a single species of a family of hundreds counts for little.
+
+On half A at the headline's 9-realm map:
+- one-species presences are the rule: 68% of a genus's presences in a cell and 45% of a family's rest on one species, and 19% even in families of 1,000 species or more;
+- a threshold of 5% of the family's species raises the share of families endemic to one realm from 0.49 to 0.57, and for families of 100 or more species from 0.21 to 0.55, by shrinking their median range from 953 cells to 29;
+- a threshold of two species drops 55% of the genera.
+
+Such a threshold measures sampling effort more than range. It shrinks large families to their best-sampled cells, and the threshold that gives them the most endemism would be chosen against the C1 pass mark. In the headline, genera and families already count for little: their links are weighted by information and they are about 1% of the columns of the merges. The realms come from species (`Realms from one rank on its own: results`). Markus: leave it. The roll-up stays as it is.
