@@ -48,6 +48,7 @@ import multiprocessing
 import os
 import re
 import resource
+import shutil
 import sys
 import time
 import tomllib
@@ -71,7 +72,7 @@ from realms.clean import LAYERS, SWITCHABLE, WCVP_MODES, Settings, clean, frozen
 from realms.clean_report import removal_summary
 from realms.cluster import InfomapOptions, Partition, run_infomap
 from realms.grid import Grid, load_grid
-from realms.matrix import CellTaxa, cell_taxa
+from realms.matrix import RANKS, SPECIES, CellTaxa, cell_taxa
 from realms.natives import load_references
 from realms.network import network_from
 from realms.nullmodel import excess_table
@@ -94,6 +95,9 @@ VISITS_SUFFIX = "visits"
 # the kingdoms of a eukaryotes-only run (DECISIONS, "Eukaryotes only", 2026-11-07): COL's bacteria, archaea and viruses, and species with no kingdom, are left out
 EUKARYOTES = ("Animalia", "Chromista", "Fungi", "Plantae", "Protozoa")
 EUKARYOTES_SUFFIX = "eukaryotes"
+# a run of one rank on its own (DECISIONS, "Realms from one rank on its own", 2026-11-09): `<run>-rank-<rank>`, on the cleaning and units of `<run>`
+RANK_SUFFIX = "rank"
+RANK_NAME = re.compile(rf"-{RANK_SUFFIX}-({'|'.join(RANKS)})(?=-|$)")
 # the counts that are records among `n`, scaled to visits by a row's visits per record when visits are the evidence
 RECORD_SUBSETS = ("n_nc", "n_ebird", "n_inat", "n_synonym", "n_human_text")
 MAP_FILES = ("partition.parquet", "structure.json", "candidates.parquet", "parts.parquet")
@@ -162,11 +166,12 @@ def load_configs(path: Path) -> tuple[dict[str, InfomapOptions], Params]:
 
 
 def run_name(
-    mode: str, rules_off: Iterable[str] = (), merge_duplicate_names: bool = False, half: str = HALF, evidence: str = "records", eukaryotes_only: bool = False
+    mode: str, rules_off: Iterable[str] = (), merge_duplicate_names: bool = False, half: str = HALF, evidence: str = "records", eukaryotes_only: bool = False,
+    rank: str | None = None,
 ) -> str:
     """`native_only`, or `native_only-no-griis` with the rules switched off in sorted order, and `-merged-names` after them for a run that merges duplicate
-    genus and family names: the directory of a run. `-visits` follows for a run whose evidence is visits, and `-eukaryotes` for a run of eukaryotes only. A half other than A ends it with `-half-<half>`,
-    so that such a run never shares half A's directory."""
+    genus and family names: the directory of a run. `-visits` follows for a run whose evidence is visits, `-eukaryotes` for a run of eukaryotes only, and `-rank-<rank>` for a run of one rank on its own
+    (`rank_alone`). A half other than A ends it with `-half-<half>`, so that such a run never shares half A's directory."""
     if evidence not in EVIDENCE:
         raise ValueError(f"the evidence is one of {EVIDENCE}, not {evidence!r}")
     if mode not in WCVP_MODES:
@@ -174,10 +179,53 @@ def run_name(
     unknown = sorted(set(rules_off) - set(SWITCHABLE))
     if unknown:
         raise ValueError(f"rules to switch off are of {SWITCHABLE}, not {unknown}")
+    if rank is not None and rank not in RANKS:
+        raise ValueError(f"the rank of a run of one rank is one of {RANKS}, not {rank!r}")
     other_half = [f"half-{half}"] if half != HALF else []
     visits = [VISITS_SUFFIX] if evidence == "visits" else []
     eukaryotes = [EUKARYOTES_SUFFIX] if eukaryotes_only else []
-    return "-".join([mode, *(f"no-{rule}" for rule in sorted(set(rules_off))), *([MERGED_SUFFIX] if merge_duplicate_names else []), *visits, *eukaryotes, *other_half])
+    one_rank = [RANK_SUFFIX, rank] if rank is not None else []
+    return "-".join([mode, *(f"no-{rule}" for rule in sorted(set(rules_off))), *([MERGED_SUFFIX] if merge_duplicate_names else []), *visits, *eukaryotes, *one_rank, *other_half])
+
+
+def run_rank(run_dir: Path) -> str | None:
+    """The rank of a run of one rank on its own, from its directory's name (`run_name`), or `None` for a run of every rank."""
+    found = RANK_NAME.search(Path(run_dir).name)
+    return found.group(1) if found else None
+
+
+def base_run(run_dir: Path) -> Path:
+    """The run of every rank whose cleaning and units a run of one rank uses: the same directory without `-rank-<rank>`."""
+    run_dir = Path(run_dir)
+    return run_dir.with_name(RANK_NAME.sub("", run_dir.name))
+
+
+def rank_alone(ct: CellTaxa, rank: str) -> CellTaxa:
+    """The matrix of one rank on its own, whose taxa are the units of the analysis: the columns of `rank`, marked as the species rank.
+
+    Marked so, every step treats them as it treats species in a run of every rank: the network weighs their links 1 (not `network.information_weight`), the
+    pieces and merges compare them, the bootstraps and the rule 2 replicates resample them, and the endemism is scored on them alone. They have no genus or
+    family. For `species` it is the species columns."""
+    if rank not in RANKS:
+        raise ValueError(f"the rank of a run of one rank is one of {RANKS}, not {rank!r}")
+    one = ct.select([rank])
+    none = np.full(len(one.taxa), -1, dtype=np.int64)
+    return CellTaxa(one.cells, one.taxa, np.full(len(one.taxa), SPECIES, dtype=np.int8), one.x, none, none.copy())
+
+
+def copy_base_stages(run_dir: Path) -> list[str]:
+    """Copy the cleaning and units of `base_run(run_dir)` into a run of one rank that has none yet, stamps and all; returns what was copied.
+
+    The rank enters neither stage's hash, so the copies are current there, and the run of one rank never cleans again or writes into its base run."""
+    run_dir, base = Path(run_dir), base_run(run_dir)
+    if run_rank(run_dir) is None:
+        raise ValueError(f"{run_dir} is not a run of one rank")
+    copied = []
+    for stage in (CLEANED, UNITS):
+        if not (run_dir / stage).exists() and (base / stage).exists():
+            shutil.copytree(base / stage, run_dir / stage)
+            copied.append(stage)
+    return copied
 
 
 def config_dir(name: str, seed: int = 1) -> str:
@@ -400,7 +448,7 @@ def read_light_grid(out: Path) -> Grid:
 def network_matrix(out: Path, units: Units | None = None, merge_duplicate_names: bool = False) -> CellTaxa:
     """The cell-taxon matrix of the units of the network (they are its cells), with the genus and family of each species from the cleaned stage.
 
-    With `merge_duplicate_names`, the ids of a duplicate genus or family name are one column (`matrix.cell_taxa`), which needs the names that only the cleaning of
+    In a run of one rank (`run_rank`, from the name of `out`) it is that rank on its own (`rank_alone`). With `merge_duplicate_names`, the ids of a duplicate genus or family name are one column (`matrix.cell_taxa`), which needs the names that only the cleaning of
     a run that merges keeps.
     """
     units = units or read_units(out)
@@ -408,7 +456,9 @@ def network_matrix(out: Path, units: Units | None = None, merge_duplicate_names:
     missing = [c for c in NAME_COLUMNS if c not in taxa.columns]
     if merge_duplicate_names and missing:
         raise ValueError(f"{Path(out) / CLEANED / 'taxa.parquet'} has no {missing}, which merging duplicate names needs: clean with --merge-duplicate-names")
-    return cell_taxa(units.presence.select(pl.col("unit").alias("cell"), "species_id"), taxa, merge_duplicate_names=merge_duplicate_names)
+    ct = cell_taxa(units.presence.select(pl.col("unit").alias("cell"), "species_id"), taxa, merge_duplicate_names=merge_duplicate_names)
+    rank = run_rank(Path(out))
+    return ct if rank is None else rank_alone(ct, rank)
 
 
 def labelled_units(units: Units, labelled: set[str]) -> Units:
@@ -674,23 +724,25 @@ def _table_rows(table: dict[int, float], name: str) -> pl.DataFrame:
     return pl.DataFrame({"k": list(table), name: list(table.values())}, schema={"k": pl.Int64, name: pl.Float64}).sort("k")
 
 
-def config_inputs(parent: str, options: InfomapOptions, params: Params, stage: str, merge_duplicate_names: bool = False) -> dict:
+def config_inputs(parent: str, options: InfomapOptions, params: Params, stage: str, merge_duplicate_names: bool = False, rank: str | None = None) -> dict:
     """What a configuration's stamp is a hash of: the units stage, the options, the parameters (the seed among them) and which stage it is, `merge_duplicate_names`
-    only when it is on, as the matrix then merges them, and the stage's `METHOD_VERSION` only when it is not 1."""
+    only when it is on, as the matrix then merges them, `rank` only in a run of one rank, and the stage's `METHOD_VERSION` only when it is not 1."""
     inputs = {"units": parent, "options": asdict(options), "params": asdict(params), "stage": stage}
-    return _versioned(inputs | ({"merge_duplicate_names": True} if merge_duplicate_names else {}), stage)
+    inputs |= {"merge_duplicate_names": True} if merge_duplicate_names else {}
+    inputs |= {"rank": rank} if rank is not None else {}
+    return _versioned(inputs, stage)
 
 
 def screen_stage(
     out: Path, name: str, units: Units, ct: CellTaxa, grid: Grid, options: InfomapOptions, params: Params, parent: str, *, workers: int = 1, force: bool = False,
-    merge_duplicate_names: bool = False, budget_gb: float = BUDGET_GB,
+    merge_duplicate_names: bool = False, budget_gb: float = BUDGET_GB, rank: str | None = None,
 ) -> dict:
     """Infomap with `trials_screen` trials, `candidate_maps`, and the endemism excess of every k over `n_null_screen` null maps, into `<out>/<name>/` (`config_dir`).
 
-    `parent` is the hash of the units stage, and `merge_duplicate_names` says that `ct` merges them (`network_matrix`). A degenerate clustering is written to
-    `structure.json` and never raised. The select stage writes elsewhere (`stage_dir`), so a screen leaves a select result alone.
+    `parent` is the hash of the units stage, `merge_duplicate_names` says that `ct` merges them and `rank` that it is one rank on its own (`network_matrix`). A
+    degenerate clustering is written to `structure.json` and never raised. The select stage writes elsewhere (`stage_dir`), so a screen leaves a select result alone.
     """
-    inputs = config_inputs(parent, options, params, "screen", merge_duplicate_names)
+    inputs = config_inputs(parent, options, params, "screen", merge_duplicate_names, rank)
     hash_ = digest(inputs)
     directory = stage_dir(out, name, "screen", params.seed)
     if not force and is_current(directory, "stage-screen", hash_, SCREEN_FILES):
@@ -719,15 +771,15 @@ def screen_stage(
 
 def select_stage(
     out: Path, name: str, units: Units, ct: CellTaxa, grid: Grid, options: InfomapOptions, params: Params, parent: str, *, workers: int = 1, force: bool = False,
-    merge_duplicate_names: bool = False, budget_gb: float = BUDGET_GB,
+    merge_duplicate_names: bool = False, budget_gb: float = BUDGET_GB, rank: str | None = None,
 ) -> dict:
     """Infomap with `trials_select` trials, `candidate_maps`, `bootstrap_stability`, `excess_table` over `n_null_select` null maps, and `select_level`, into
     `<out>/<name>/select/` (`stage_dir`).
 
-    `parent` is the hash of the units stage, and `merge_duplicate_names` says that `ct` merges them (`network_matrix`). A degenerate clustering is written to
-    `structure.json` and `selected.json` and never raised.
+    `parent` is the hash of the units stage, `merge_duplicate_names` says that `ct` merges them and `rank` that it is one rank on its own (`network_matrix`). A
+    degenerate clustering is written to `structure.json` and `selected.json` and never raised.
     """
-    inputs = config_inputs(parent, options, params, "select", merge_duplicate_names)
+    inputs = config_inputs(parent, options, params, "select", merge_duplicate_names, rank)
     hash_ = digest(inputs)
     directory = stage_dir(out, name, "select", params.seed)
     if not force and is_current(directory, "stage-select", hash_, SELECT_FILES):
@@ -800,8 +852,8 @@ def read_selected(run_dir: Path, config: str, configs_path: Path, *, seed: int =
     """The select result of configuration `config` (of `configs_path`) in the run `run_dir`, if it is current, else a `ValueError` that says why.
 
     Current means what `run_pipeline` would find: the units stage is of the cleaning stage's hash, and the select stamp has the hash of `config_inputs` over the units
-    stamp's hash, the configuration's options, the parameters of `configs_path` at `seed`, and `merge_duplicate_names` (by default, whether the run's name ends in
-    `-merged-names`), with all its files there. Also checked: the result is not degenerate, and `parts.parquet` marks the k of `selected.json`.
+    stamp's hash, the configuration's options, the parameters of `configs_path` at `seed`, `merge_duplicate_names` (by default, whether the run's name ends in
+    `-merged-names`) and the rank of a run of one rank (`run_rank`), with all its files there. Also checked: the result is not degenerate, and `parts.parquet` marks the k of `selected.json`.
     """
     run_dir = Path(run_dir)
     configs, params = load_configs(configs_path)
@@ -814,7 +866,7 @@ def read_selected(run_dir: Path, config: str, configs_path: Path, *, seed: int =
     if units["inputs"].get("cleaned") != cleaned["hash"]:
         raise ValueError(f"{run_dir}: the units stage is of cleaning {units['inputs'].get('cleaned')}, the cleaning stage is {cleaned['hash']}")
     directory = stage_dir(run_dir, config, "select", seed)
-    hash_ = digest(config_inputs(units["hash"], configs[config], replace(params, seed=seed), "select", merge))
+    hash_ = digest(config_inputs(units["hash"], configs[config], replace(params, seed=seed), "select", merge, run_rank(run_dir)))
     if not is_current(directory, "stage-select", hash_, SELECT_FILES):
         found = read_stamp(directory, "stage-select")
         why = "has no select stamp" if not found else f"has a select stamp of {found.get('hash')}, not {hash_}, or misses one of {list(SELECT_FILES)}"
@@ -1013,6 +1065,7 @@ class Plan:
     half: str = HALF  # half A only: any other is refused here, so nothing can run on it by accident
     evidence: str = "records"  # or "visits", for a download made with them: a run of its own, `<run>-visits`
     eukaryotes_only: bool = False  # a run of its own, `<run>-eukaryotes`: no bacteria, archaea or viruses
+    rank: str | None = None  # a run of its own, `<run>-rank-<rank>`: the network of one rank on its own, on the cleaning and units of `<run>`
 
     def __post_init__(self) -> None:
         if self.half != HALF:
@@ -1041,8 +1094,12 @@ def run_pipeline(plan: Plan, unit_settings: UnitSettings = UnitSettings()) -> di
     names = list(plan.only) or list(configs)
     settings = Settings(wcvp_mode=plan.mode, rules_off=frozenset(plan.rules_off))
     merge = plan.merge_duplicate_names
-    out = Path(plan.results) / f"res{resolution}" / run_name(plan.mode, plan.rules_off, merge, plan.half, plan.evidence, plan.eukaryotes_only)
+    out = Path(plan.results) / f"res{resolution}" / run_name(plan.mode, plan.rules_off, merge, plan.half, plan.evidence, plan.eukaryotes_only, plan.rank)
     out.mkdir(parents=True, exist_ok=True)
+    if plan.rank is not None:
+        if plan.force and plan.stage in ("clean", "units"):
+            raise ValueError(f"a run of one rank takes its {plan.stage} from {base_run(out).name}: force it there")
+        copy_base_stages(out)
     manifest = plan.reference / "manifest.json"
     split_sha256 = hashlib.sha256(Path(plan.split).read_bytes()).hexdigest() if plan.half != HALF else None  # the split file's bytes, never a half of the counts
     inputs = clean_inputs(
@@ -1075,7 +1132,7 @@ def run_pipeline(plan: Plan, unit_settings: UnitSettings = UnitSettings()) -> di
 
         def current(name: str, stage: str) -> bool:
             directory = stage_dir(out, name, stage, params.seed)
-            return is_current(directory, f"stage-{stage}", digest(config_inputs(parent, configs[name], params, stage, merge)), files[stage])
+            return is_current(directory, f"stage-{stage}", digest(config_inputs(parent, configs[name], params, stage, merge, plan.rank)), files[stage])
 
         needed = [n for n in names if plan.force or not all(current(n, stage) for stage in stages)]
         units = read_units(out)
@@ -1088,11 +1145,11 @@ def run_pipeline(plan: Plan, unit_settings: UnitSettings = UnitSettings()) -> di
                 continue
             done[name]["screen"] = screen_stage(
                 out, name, units, ct, grid, configs[name], params, parent, workers=plan.workers, force=force["screen"], merge_duplicate_names=merge,
-                budget_gb=plan.budget_gb,
+                budget_gb=plan.budget_gb, rank=plan.rank,
             )
             if wanted >= 3:
                 done[name]["select"] = select_stage(
                     out, name, units, ct, grid, configs[name], params, parent, workers=plan.workers, force=force["select"], merge_duplicate_names=merge,
-                    budget_gb=plan.budget_gb,
+                    budget_gb=plan.budget_gb, rank=plan.rank,
                 )
     return done

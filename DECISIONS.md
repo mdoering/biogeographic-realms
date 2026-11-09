@@ -2921,3 +2921,17 @@ The land signal at family rank is about five times the null, but small in absolu
 **Per realm.** Every realm passes at every rank at every level (p = 0.01), with one exception: **New Guinea at family rank at 14 realms**, 1 endemic family of 746 (0.1%, null 0.1%, p = 0.35). The small realms pass at family rank on a handful of families against a null near zero: Hawaii 2 of 520, New Caledonia 4 of 442, Madagascar 12 of 692, Patagonia 13 of 855, New Zealand 15 of 1,039, East Asia 20 of 1,476. Counts that small can fall to zero or one on another sample.
 
 **What this means for C1.** As proposed, C1 is met on half A at the level of whole maps, at each rank. But the family part of that is carried by the ocean. Per realm, the strict per-rank reading would already fail New Guinea on A, and on B would be at the mercy of a few families in each small realm. Markus decides the pass mark (PREREGISTRATION.md, section 9).
+
+### Realms from one rank on its own (2026-11-09)
+
+Markus asked for realms built from each rank on its own before the freeze: the robustness run "species only, species plus genus, and family only" of the design, here species, genus and family. `scripts/explore.py --rank R` makes a run `<run>-rank-<R>` (`explore.run_name`). It copies the cleaning and the units of `<run>` (`explore.copy_base_stages`); the rank enters neither stage's hash, so the copies are current, and the run never writes into its base run.
+
+**The rank's taxa are the units of the analysis** (`explore.rank_alone`). The matrix holds that rank's columns only, marked as the species rank. Every step then treats them as a run of every rank treats species:
+- the network weighs their links 1, not by `network.information_weight`, which is for genera and families beside species;
+- the pieces and merges compare them;
+- the bootstraps of the selection, the rule 2 replicates and the recovery resample them;
+- the endemism excess, the configuration choice and rule 6 score them alone.
+
+So a family run is what the pipeline makes of a world that has only families. The rules are the headline's and nothing is tuned. `network_matrix` takes the rank from the run's name, so the seeds, nested-cuts and nested scripts need no change, and the rank is in the configuration's hash (`config_inputs`, `read_selected`).
+
+**First pass, seed 1 only.** The headline's five-seed choice took about 10 hours. Here each rank runs the seven configurations at seed 1. The choice is `scripts/seeds.py --seeds 1`, followed by the cut rules, the nested levels with a 10-trial recovery, and the maps. Five seeds can follow if a rank's map is worth it. The runs are compared with the headline by area-weighted V-measure at each reported realm count.

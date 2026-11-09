@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import geopandas as gpd
+import numpy as np
 import polars as pl
 import pytest
 from shapely import box
@@ -107,9 +108,10 @@ def run_chain(out: Path, w: World, params: Params = FAST, *, settings: Settings 
     done["units"] = explore.units_stage(out, w.grid, w.coarse, w.coarse_gpkg, UNITS, w.regions, done["clean"]["hash"], force=force)
     if stage in ("screen", "select"):
         units, light, ct = explore.read_units(out), explore.read_light_grid(out), explore.network_matrix(out)
-        done["screen"] = explore.screen_stage(out, "default", units, ct, light, options, params, done["units"]["hash"], force=force)
+        rank = explore.run_rank(out)
+        done["screen"] = explore.screen_stage(out, "default", units, ct, light, options, params, done["units"]["hash"], force=force, rank=rank)
         if stage == "select":
-            done["select"] = explore.select_stage(out, "default", units, ct, light, options, params, done["units"]["hash"], force=force)
+            done["select"] = explore.select_stage(out, "default", units, ct, light, options, params, done["units"]["hash"], force=force, rank=rank)
     return done
 
 
@@ -802,3 +804,63 @@ def test_eukaryote_counts_keep_the_eukaryotes_and_drop_the_rest():
     counts = pl.DataFrame({"species_id": ["A", "B", "V", "N", "X"], "n": [1, 2, 3, 4, 5]})
     taxa = pl.DataFrame({"species_id": ["A", "B", "V", "N"], "kingdom": ["Animalia", "Fungi", "Orthornavirae", None]})
     assert explore.eukaryote_counts(counts, taxa)["species_id"].to_list() == ["A", "B"]
+
+
+# one rank on its own (DECISIONS, "Realms from one rank on its own", 2026-11-09)
+
+
+def test_a_run_of_one_rank_has_a_name_of_its_own_that_gives_the_rank_back():
+    assert explore.run_name("native_only", [], eukaryotes_only=True, rank="family") == "native_only-eukaryotes-rank-family"
+    assert explore.run_name("native_only", ["griis"], rank="species") == "native_only-no-griis-rank-species"
+    assert explore.run_name("native_only", [], rank=None) == "native_only"
+    with pytest.raises(ValueError, match="rank"):
+        explore.run_name("native_only", [], rank="order")
+    assert explore.run_rank(Path("res7/native_only-eukaryotes-rank-genus")) == "genus"
+    assert explore.run_rank(Path("res7/native_only-eukaryotes")) is None
+    assert explore.run_rank(Path("res7/native_only-merged-names-eukaryotes")) is None
+    assert explore.base_run(Path("res7/native_only-eukaryotes-rank-genus")) == Path("res7/native_only-eukaryotes")
+
+
+def test_rank_alone_makes_the_ranks_taxa_the_units_of_the_analysis():
+    from realms.matrix import SPECIES, cell_taxa
+
+    presence = pl.DataFrame({"cell": ["a", "a", "b", "b", "c"], "species_id": ["s1", "s2", "s2", "s3", "s3"]})
+    taxa = pl.DataFrame({"species_id": ["s1", "s2", "s3"], "genus_id": ["g1", "g1", "g2"], "family_id": ["f1", "f1", "f1"]})
+    ct = cell_taxa(presence, taxa)
+    genus = explore.rank_alone(ct, "genus")
+    assert genus.taxa == ["genus:g1", "genus:g2"] and (genus.rank == SPECIES).all()
+    assert (genus.genus_col == -1).all() and (genus.family_col == -1).all()
+    assert genus.x.toarray().tolist() == [[True, False], [True, True], [False, True]]
+    # resampled, a genus drawn twice counts twice, as a species does
+    assert explore.rank_alone(ct, "genus").resample(np.array([0, 0])).taxa == ["species:genus:g1#0", "species:genus:g1#1"]
+    species = explore.rank_alone(ct, "species")
+    assert species.taxa == ["species:s1", "species:s2", "species:s3"] and (species.genus_col == -1).all()
+    with pytest.raises(ValueError, match="rank"):
+        explore.rank_alone(ct, "order")
+
+
+def test_the_rank_enters_the_hash_of_a_configuration_only_when_there_is_one():
+    plain = explore.config_inputs("u", InfomapOptions(), FAST, "select")
+    assert explore.config_inputs("u", InfomapOptions(), FAST, "select", rank=None) == plain
+    assert explore.config_inputs("u", InfomapOptions(), FAST, "select", rank="family") == plain | {"rank": "family"}
+
+
+def test_a_run_of_one_rank_takes_the_cleaning_and_units_of_its_base_run_and_clusters_on_that_rank(world, planted, tmp_path, monkeypatch):
+    shutil.copytree(planted[0], tmp_path / "res7" / "native_only")
+    out = tmp_path / "res7" / "native_only-rank-genus"
+    assert explore.copy_base_stages(out) == ["cleaned", "units"]
+    assert explore.copy_base_stages(out) == []  # once only: what is there is never overwritten
+    done = run_chain(out, world)
+    assert done["clean"]["skipped"] and done["units"]["skipped"]  # the same inputs: the copied stages are current
+    ct = explore.network_matrix(out)
+    assert all(t.startswith("genus:") for t in ct.taxa)
+    chosen = json.loads((out / "default" / "select" / "selected.json").read_text())
+    assert chosen["k"] == 4
+    found = dict(pl.read_parquet(out / "default" / "select" / "candidates.parquet").filter(pl.col("k") == 4).select("unit", "realm").iter_rows())
+    assert v_measure(found, {p: world.truth[p] for p in found}) >= 0.95
+    # read back, the rank is in the hash, taken from the run's name
+    monkeypatch.setattr(explore, "load_configs", lambda path: ({"default": InfomapOptions()}, FAST))
+    assert explore.read_selected(out, "default", tmp_path / "configs.toml").k == 4
+    shutil.copytree(out, tmp_path / "res7" / "native_only-rank-family")  # the genus run's files under the name of a family run are not its result
+    with pytest.raises(ValueError, match="not the current select result"):
+        explore.read_selected(tmp_path / "res7" / "native_only-rank-family", "default", tmp_path / "configs.toml")

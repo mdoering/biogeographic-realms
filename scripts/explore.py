@@ -17,6 +17,10 @@ Cleaning and the units run in a child process of their own, so that each one's p
 holds none of it. `--workers N` is how many processes the bootstraps and the null maps may use at most: the first two tasks of each are run in two workers to measure a
 worker's peak, and no more workers start than fit in `--budget-gb` (default 40) next to the parent. Each worker's peak is in the stage's `log.json`.
 
+`--rank R` (species, genus or family) makes a run of that rank on its own, `<run>-rank-<R>`: it copies the cleaning and the units of `<run>`, which must be there,
+and clusters, merges, resamples and scores on that rank's taxa alone, as a run of every rank does on species (`explore.rank_alone`; DECISIONS, "Realms from one
+rank on its own", 2026-11-09).
+
 `--seed N` runs Infomap, the bootstraps and the null maps at seed N (default 1). The seed is in the hash of the screen and the select, and a seed other than 1
 writes to `<config>-s<N>/`, so it never overwrites seed 1's result. A stage that writes its outputs again deletes the stamps of the stages that depend on it.
 
@@ -59,6 +63,8 @@ def main() -> None:
                         help="what counts as a row's evidence: its records, or its visits for a download made with them (a run of its own, <run>-visits)")
     parser.add_argument("--eukaryotes-only", action="store_true",
                         help="leave out COL's bacteria, archaea and viruses (and species with no kingdom): a run of its own, <run>-eukaryotes")
+    parser.add_argument("--rank", choices=("species", "genus", "family"), default=None,
+                        help="cluster on one rank on its own (explore.rank_alone), on the cleaning and units of the run without it: a run of its own, <run>-rank-<rank>")
     parser.add_argument("--seed", type=int, default=1, help="the seed of Infomap, the bootstraps and the null maps, default 1; another writes to <config>-s<N>/")
     parser.add_argument(
         "--budget-gb", type=float, default=BUDGET_GB,
@@ -80,6 +86,7 @@ def main() -> None:
         counts=args.counts, reference=args.reference, split=args.split, frozen_dir=FROZEN_DIR, results=args.results, configs=args.configs, mode=args.wcvp_mode,
         rules_off=tuple(args.rules_off), stage=args.stage, only=tuple(args.only), workers=args.workers, force=args.force, isolate=not args.in_process,
         merge_duplicate_names=args.merge_duplicate_names, seed=args.seed, budget_gb=args.budget_gb, evidence=args.evidence, eukaryotes_only=args.eukaryotes_only,
+        rank=args.rank,
     )
     try:
         done = run_pipeline(plan)
