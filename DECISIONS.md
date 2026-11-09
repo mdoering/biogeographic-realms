@@ -2885,3 +2885,9 @@ The failures are all-or-nothing per resample: Jaccard 0.92-0.99 or 0.16-0.38, th
 **Reading.** The low recovery of the Palearctic, and the misses in earlier runs (Infomap joining Indo-Malaya with the Holarctic), measure how often 3 trials of Infomap miss on a resample, not how stable the realm is. Without the prokaryotes this happens more often: 9 of 20 resamples against about 4 of 20 with all species. The reason is not established. The recovery check would measure the data if its resamples ran Infomap with the reference's 10 trials (`scripts/nested.py --boot-trials 10`). The cut rules and the selection do not use this recovery.
 
 The selection's own bootstrap stability (20 bootstraps of 3 trials, the design's) may be lowered by the same misses. It stays as it is, because changing it changes the selection, the Costello gate and the calibrated design.
+
+### The recovery check runs Infomap with 10 trials (2026-11-09, Markus's ruling)
+
+Following "Why the Palearctic is hard to reproduce", each resample of the recovery check (`nested.bootstrap_recovery`) now runs Infomap with 10 trials, as many as the reference map has; it used to run 3. `scripts/nested.py --boot-trials` defaults to 10. Recovery then measures how stable a realm is on the data, not how often a short search misses.
+
+Only the recovery column (`nested/realms.csv`, `recovery.csv`) changes. The levels, the cut rules, the selection and its 3-trial bootstrap stability stay as they were. The 3-trial outputs are kept in `native_only-eukaryotes/nested-boot3/`.

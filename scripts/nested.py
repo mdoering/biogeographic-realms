@@ -67,7 +67,7 @@ def main() -> None:
     parser.add_argument("--leaf-cut", type=float, required=True)
     parser.add_argument("--cuts", type=float, nargs="*", default=[], help="the cuts of the levels above the leaves")
     parser.add_argument("--n-boot", type=int, default=20)
-    parser.add_argument("--boot-trials", type=int, default=3)
+    parser.add_argument("--boot-trials", type=int, default=10, help="Infomap trials per resample, default 10 as the reference map's; with 3, poor local optima pass for instability (DECISIONS, 2026-11-09)")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--configs", type=Path, default=Path("explore/configs.toml"))
     parser.add_argument("--results", type=Path, default=Path("results/explore"))
