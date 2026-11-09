@@ -2935,3 +2935,37 @@ Markus asked for realms built from each rank on its own before the freeze: the r
 So a family run is what the pipeline makes of a world that has only families. The rules are the headline's and nothing is tuned. `network_matrix` takes the rank from the run's name, so the seeds, nested-cuts and nested scripts need no change, and the rank is in the configuration's hash (`config_inputs`, `read_selected`).
 
 **First pass, seed 1 only.** The headline's five-seed choice took about 10 hours. Here each rank runs the seven configurations at seed 1. The choice is `scripts/seeds.py --seeds 1`, followed by the cut rules, the nested levels with a 10-trial recovery, and the maps. Five seeds can follow if a rank's map is worth it. The runs are compared with the headline by area-weighted V-measure at each reported realm count.
+
+### Realms from one rank on its own: results (2026-11-09)
+
+Half A, release 315557, download 0020744-261023074918325, seed 1 (log `results/explore/res7/rank-runs.log`).
+
+**Family alone: no map.** All seven configurations are degenerate. default and regularized give one module. mt075 to mt095 give two big modules, about land (4,366 units) and sea (3,222), and 3,540 single-unit modules. With every family link weighted 1, the widespread families tie the whole land together.
+
+**Genus alone: no stable map.** Six configurations are degenerate (2 to 4 units above the size floor). mt075 gives 5 realms but falls short: its stability is 0.69, below 0.8, beside 1,590 single-unit modules. The seeds script stops there, so there are no cut rules and no maps. Nothing was tuned to rescue either rank: a lower Markov time or other link weights would change `network.py` or `matrix.py`, which stay as they are.
+
+**Species alone: close to the headline.**
+- The choice is mt085 at k = 7 (excess 0.408). The headline's choice is mt075 at k = 5.
+- Rules 2 and 6 pass at 3, 6, 7, 8 and 9 realms. The reporting rule gives 3 and 9: the run from 6 to 9 ends at the finest level, so there is no third.
+- The 10-trial recovery finds every realm at every level in all 20 resamples.
+- At 3 realms: the Afrotropics with Madagascar, the rest of the land, and the sea.
+- At 9 realms, the headline's land realms are there with two differences:
+  - New Zealand stays with Australia;
+  - the sea splits in two, the Atlantic with the Arctic against the Indo-Pacific with the Southern Ocean.
+
+`scripts/compare_runs.py` cuts each run's merge order at a realm count and compares it with the headline's map at that count, over the 11,130 units both map. It reports the V-measure over units and the area agreement (`crosscheck.area_agreement`). The headline against itself gives 1.000 at every count.
+
+| realms | why | V-measure | area agreement |
+|---|---|---|---|
+| 3 | species-alone level | 0.944 | 0.997 |
+| 5 | headline level | 0.837 | 0.901 |
+| 9 | both | 0.854 | 0.794 |
+| 14 | headline level | 0.783 | 0.578 |
+
+At 3 realms the headline is cut from the same merge order, not from one of its own levels. At 14 the species-alone map is not one of its own levels: no level finer than 9 passes the rules.
+
+**What this says.** The realms down to 9 come from species. Genera and families add little to where the boundaries fall, and they cannot make realms on their own at this resolution under these rules. In the headline they are weighted by information and sit beside the species. There they decide two things:
+- New Zealand separates from Australia at 9;
+- the sea stays one realm.
+
+Both rest on genera and families, which matches the per-rank endemism (`Endemism by rank on its own`), where the ocean carries most of the family signal. The headline method stays as it is. Five seeds for the species-alone run would only change the result if its configuration choice moved; that is for Markus to ask for.
