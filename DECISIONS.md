@@ -2898,3 +2898,10 @@ Only the recovery column (`nested/realms.csv`, `recovery.csv`) changes. The leve
 - **The ocean** at 14 realms has median Jaccard 0.70, down from 0.81, and is recovered in 95% of resamples.
 
 The 3-trial outputs are in `nested-boot3/`. The review page and `nested/maps/tables.md` use the new recovery.
+
+### The reported levels, the Antarctic coast and the preregistration (2026-11-09, Markus's rulings)
+
+Markus answered the review page's three questions with "yes to all 3":
+- **The reported levels** of the eukaryotes headline, 5, 9 and 14 realms, read right to him. Temperate East Asia is flagged by its recovery.
+- **The Antarctic coast and Greenland stay Palearctic**, as the data and the imputation give them. Their imputed parts are hatched on the maps and flagged in the per-cell outputs.
+- **`PREREGISTRATION.md` is drafted from DECISIONS** for Markus to edit. The pass marks for the confirmation on half B, which the design leaves to the freeze, are drafted as proposals for him to settle.
