@@ -94,7 +94,7 @@ gate passes, else WCVP off.
 
 - **Network.** Bipartite: cell-part units against taxa at species, genus and family rank. Links are presence only. Genus and family
   links are weighted by the spatial information they carry, as in Infomap Bioregions 2. Genus and family presence comes from the
-  cleaned species only.
+  cleaned species only: a genus or family is present in a cell when any one of its species is (DECISIONS, 2026-11-09).
 - **Configurations:** seven of Infomap's scale, as in `explore/configs.toml`:
   - `default`;
   - Markov time 0.95, 0.90, 0.85, 0.80 and 0.75;
@@ -201,7 +201,8 @@ As listed in the design ("Robustness runs"):
 - per taxon group, and without birds;
 - whether a cell's sampled composition predicts its realm;
 - a minimum of 5 species instead of 50 for a unit;
-- species only, species plus genus, and family only;
+- species only, species plus genus, and family only. Each rank on its own was run on half A (DECISIONS, 2026-11-09): species alone
+  comes close to the headline (V 0.84 at 5 realms, 0.85 at 9), genus and family alone give no stable map;
 - dated trees against ranks where trees exist;
 - resolution 6 against 7;
 - beta-sim with UPGMA against Infomap;
