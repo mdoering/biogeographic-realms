@@ -2862,3 +2862,26 @@ The levels between them are given as the merge order. When the run reaches the f
 **Why not a recovery bar.** Recovery does not single out 9, and a bar would need a threshold chosen to land on it. Without the prokaryotes, the Palearctic (the Holarctic at 5 and 6) is weakly recovered at every level: 45-55% of resamples, median Jaccard 0.41-0.63, where `native_only` had 70-80%. In those resamples Infomap joins it with Indo-Malaya. The entry "The eukaryotes headline: results" gave the Palearctic's 55% for the finest level only; it holds at every level.
 
 **East Asia** stays in the 14-realm level, which the rule reports. It is shown as the one realm the resamples rarely reproduce: 5%, median Jaccard 0.17.
+
+### Why the Palearctic is hard to reproduce (2026-11-09)
+
+Markus asked why the Palearctic's recovery is low (45-55% of resamples at every level, see "The eukaryotes headline: results"). The diagnostic is in the session scratchpad as `palearctic_boots.py`; its outputs are in `res7/native_only-eukaryotes/nested-diagnostics/`. It reruns the 20 resamples of `nested.bootstrap_recovery` with the same draws and the same Infomap seeds, and keeps each resample's maps and Infomap modules. It reproduces the recovery in `nested/recovery.csv` exactly.
+
+**The Palearctic is never broken up.** In every resample, 95-100% of its area stays in one realm. When it is "not recovered", it has been joined to something else:
+- **the ocean** in 7 of the 20 resamples;
+- **the Afrotropics or the Nearctic** in 4.
+
+The failures are all-or-nothing per resample: Jaccard 0.92-0.99 or 0.16-0.38, the same at every level.
+
+**Infomap makes the join, not the merges after it.** In the failing resamples, one Infomap module already holds a large share of the Palearctic together with ocean, Nearctic or Afrotropical units. The ocean in that module is not the seas next to Eurasia. It is open-ocean cells from every basin and latitude, down to south of 30°S. These resamples also have many more modules: 3,200-5,400, against 2,200-2,900 in the resamples that recover the Palearctic. That is the mark of a poor local optimum: a catch-all module plus fragments.
+
+**It is Infomap's search, not the data.** The recovery resamples run Infomap with 3 trials; the reference map is made with 10. The 11 failing resamples were rerun with 10 trials (`replicates-t10.parquet`):
+- at 5 realms, the Palearctic comes back in all 11 (Jaccard 0.97-0.99);
+- at 14 realms, it comes back in all 11 as well (0.69-0.98);
+- the module counts fall to 2,100-3,000.
+
+**Temperate East Asia stays weak with 10 trials.** It is recovered in 2 of the 11 resamples (Jaccard 0.92 and 0.53, the rest 0.15-0.28). Its weakness is in the data.
+
+**Reading.** The low recovery of the Palearctic, and the misses in earlier runs (Infomap joining Indo-Malaya with the Holarctic), measure how often 3 trials of Infomap miss on a resample, not how stable the realm is. Without the prokaryotes this happens more often: 9 of 20 resamples against about 4 of 20 with all species. The reason is not established. The recovery check would measure the data if its resamples ran Infomap with the reference's 10 trials (`scripts/nested.py --boot-trials 10`). The cut rules and the selection do not use this recovery.
+
+The selection's own bootstrap stability (20 bootstraps of 3 trials, the design's) may be lowered by the same misses. It stays as it is, because changing it changes the selection, the Costello gate and the calibrated design.
