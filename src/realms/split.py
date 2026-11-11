@@ -96,6 +96,14 @@ def crossed(before: pl.DataFrame, after: pl.DataFrame) -> pl.DataFrame:
     return both.filter(pl.col("half") != pl.col("half_before")).sort("species_id")
 
 
+def id_changes(before: pl.DataFrame, after: pl.DataFrame) -> pl.DataFrame:
+    """Species whose id changed between releases: `species_id_before, species_id` for each name (with authorship) found once in each
+    release under two different ids, sorted. A name held twice in either release is left out, as it can't be paired."""
+    once = lambda df: df.filter(pl.col("name").is_unique()).select("species_id", "name")  # noqa: E731
+    pairs = once(before).rename({"species_id": "species_id_before"}).join(once(after), on="name", how="inner")
+    return pairs.filter(pl.col("species_id_before") != pl.col("species_id")).select("species_id_before", "species_id").sort("species_id_before")
+
+
 def _place(rows: pl.DataFrame, rng: np.random.Generator, totals: dict[str, int]) -> dict[str, str]:
     """Each lineage of `rows` (lineage, len) in a half: shuffled, then largest first into whichever half holds fewer species so far."""
     lineages = rows["lineage"].to_numpy(allow_copy=True)

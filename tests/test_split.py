@@ -3,7 +3,7 @@ import hashlib
 import polars as pl
 import pytest
 
-from realms.split import assign_halves, carry_over, crossed, load_split, split_sha256
+from realms.split import assign_halves, carry_over, crossed, id_changes, load_split, split_sha256
 
 
 def taxa(rows):
@@ -196,3 +196,14 @@ def test_crossed_lists_the_species_of_both_splits_whose_half_changed():
     new = previous([("s1", "family:F2", "B"), ("s2", "family:F1", "A"), ("s4", "family:F3", "B")])
     result = crossed(old, new)
     assert result.select("species_id", "lineage_before", "half_before", "lineage", "half").rows() == [("s1", "family:F1", "A", "family:F2", "B")]
+
+
+def names(rows):
+    return pl.DataFrame(rows, schema={"species_id": pl.String, "name": pl.String}, orient="row")
+
+
+def test_id_changes_pairs_the_ids_of_a_name_found_once_in_each_release():
+    before = names([("a", "Aus bus L."), ("b", "Cus dus L."), ("c", "Eus fus L."), ("d", "Eus fus L."), ("e", "Gus hus L.")])
+    after = names([("a", "Aus bus L."), ("x", "Cus dus L."), ("y", "Eus fus L."), ("z", "Gus hus L."), ("w", "Gus hus L.")])
+    # a kept its id; b became x; Eus fus is twice before and Gus hus twice after, so neither can be paired
+    assert id_changes(before, after).rows() == [("b", "x")]
