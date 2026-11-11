@@ -222,7 +222,7 @@ None of these changes the headline.
 ## 12. Still open before registration
 
 - **Two source issues**, to be noted rather than fixed in the pipeline:
-  - GRIIS-US flags *Passer domesticus* and *Columba livia* as native;
-  - ChecklistBank dataset 28940 (Cayman Brac) carries the alias GRIIS-KY. This is a data interpretation issue at checklistbank.org that
-    Markus is fixing; all GRIIS lists are fetched again once it is fixed, before the freeze.
+  - GRIIS-US flags *Passer domesticus* and *Columba livia* as native. This is a data interpretation issue at checklistbank.org that
+    Markus is fixing; all GRIIS lists are fetched again once it is fixed, before the freeze;
+  - ChecklistBank dataset 28940 (Cayman Brac) carries the alias GRIIS-KY.
 - **The exact commit and data hashes** that the registration cites. These are filled in at the freeze.
