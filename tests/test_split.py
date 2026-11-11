@@ -3,7 +3,7 @@ import hashlib
 import polars as pl
 import pytest
 
-from realms.split import assign_halves, load_split, split_sha256
+from realms.split import assign_halves, carry_over, crossed, load_split, split_sha256
 
 
 def taxa(rows):
@@ -134,3 +134,65 @@ def test_load_split_refuses_a_changed_file(tmp_path):
     write_split(path, flipped)
     with pytest.raises(ValueError, match="halves.parquet"):
         load_split(path, sha256=expected)
+
+
+def previous(rows):
+    """A split of an earlier release: (species_id, lineage, half) rows."""
+    return pl.DataFrame(rows, schema={"species_id": pl.String, "lineage": pl.String, "half": pl.String}, orient="row")
+
+
+def test_carry_over_keeps_each_known_family_in_its_half_whatever_its_species():
+    old = assign_halves(families([3, 5, 2, 7, 4, 1]))
+    renamed = families([3, 5, 2, 7, 4, 1]).with_columns(("new-" + pl.col("species_id")).alias("species_id"))
+    result = carry_over(renamed, old.select("species_id", "lineage", "half"))
+    old_half = dict(zip(old["lineage"], old["half"]))
+    assert all(old_half[lineage] == half for lineage, half in zip(result["lineage"], result["half"]))
+
+
+def test_carry_over_of_an_unchanged_release_is_the_same_split():
+    df = families(list(range(1, 30)))
+    old = assign_halves(df)
+    assert species_half(carry_over(df, old.select("species_id", "lineage", "half"))) == species_half(old)
+
+
+def test_carry_over_moves_a_species_with_its_new_family():
+    old = previous([("s1", "family:F1", "A"), ("s2", "family:F2", "B")])
+    result = carry_over(taxa([("s1", "g", "F2", "O", "C"), ("s2", "g", "F2", "O", "C")]), old)
+    assert species_half(result) == {"s1": "B", "s2": "B"}
+
+
+def test_carry_over_puts_a_new_family_in_the_lighter_half_of_its_group():
+    old = previous([(f"a{i}", "family:Big", "A") for i in range(10)] + [("b0", "family:Small", "B")])
+    rows = [(f"a{i}", "g", "Big", "O", "C") for i in range(10)] + [("b0", "g", "Small", "O", "C")]
+    rows += [(f"n{i}", "g", "New", "O", "C") for i in range(3)]
+    result = carry_over(taxa(rows), old)
+    assert set(result.filter(pl.col("family") == "New")["half"]) == {"B"}
+
+
+def test_carry_over_balances_new_families_within_each_group():
+    old = previous([(f"p{i}", "family:P", "A") for i in range(6)] + [(f"q{i}", "family:Q", "B") for i in range(6)])
+    rows = [(f"p{i}", "plants", "P", "O", "C") for i in range(6)] + [(f"q{i}", "insects", "Q", "O", "C") for i in range(6)]
+    rows += [("n1", "plants", "NewPlant", "O", "C"), ("n2", "insects", "NewInsect", "O", "C")]
+    result = species_half(carry_over(taxa(rows), old))
+    assert (result["n1"], result["n2"]) == ("B", "A")
+
+
+def test_carry_over_same_result_for_any_input_order():
+    old = assign_halves(families([4, 4, 4, 4]))
+    df = families([4, 4, 4, 4, 3, 2, 2, 1, 1, 1])
+    shuffled = df.sample(fraction=1.0, shuffle=True, seed=99)
+    keep = old.select("species_id", "lineage", "half")
+    assert species_half(carry_over(df, keep)) == species_half(carry_over(shuffled, keep))
+
+
+def test_carry_over_refuses_a_family_in_both_halves():
+    old = previous([("s1", "family:F", "A"), ("s2", "family:F", "B")])
+    with pytest.raises(ValueError, match="family:F"):
+        carry_over(taxa([("s1", "g", "F", "O", "C")]), old)
+
+
+def test_crossed_lists_the_species_of_both_splits_whose_half_changed():
+    old = previous([("s1", "family:F1", "A"), ("s2", "family:F1", "A"), ("s3", "family:F2", "B")])
+    new = previous([("s1", "family:F2", "B"), ("s2", "family:F1", "A"), ("s4", "family:F3", "B")])
+    result = crossed(old, new)
+    assert result.select("species_id", "lineage_before", "half_before", "lineage", "half").rows() == [("s1", "family:F1", "A", "family:F2", "B")]

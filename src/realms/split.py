@@ -11,8 +11,10 @@ import numpy as np
 import polars as pl
 
 SPLIT_SEED: int = 20261031
-# The canonical hash of the split for COL release 315557, as made by scripts/write_split.py.
-SPLIT_SHA256: str = "88f237b47d4964108c161e08acb00c9cf03601418dd2e0f16b49a43704845fa9"
+# The canonical hash of the split for COL release 315557, as made by scripts/write_split.py; scripts/carry_split.py carries it to later releases.
+SPLIT_SHA256_315557: str = "88f237b47d4964108c161e08acb00c9cf03601418dd2e0f16b49a43704845fa9"
+# The split the pipeline loads by default.
+SPLIT_SHA256: str = SPLIT_SHA256_315557
 OTHER_GROUP = "other"
 
 
@@ -57,19 +59,61 @@ def assign_halves(taxa: pl.DataFrame, seed: int = SPLIT_SEED) -> pl.DataFrame:
 
     halves: dict[str, str] = {}
     for _, rows in _lineage_groups(df).group_by(["main_group"], maintain_order=True):
-        lineages = rows["lineage"].to_numpy(allow_copy=True)
-        counts = rows["len"].to_numpy()
-        order = rng.permutation(len(lineages))
-        largest_first = order[np.argsort(-counts[order], kind="stable")]
-        totals = {"A": 0, "B": 0}
-        for i in largest_first:
-            if totals["A"] == totals["B"]:
-                half = "A" if rng.random() < 0.5 else "B"
-            else:
-                half = "A" if totals["A"] < totals["B"] else "B"
-            halves[lineages[i]] = half
-            totals[half] += int(counts[i])
+        halves.update(_place(rows, rng, {"A": 0, "B": 0}))
+    return _with_halves(df, halves)
 
+
+def carry_over(taxa: pl.DataFrame, previous: pl.DataFrame, seed: int = SPLIT_SEED) -> pl.DataFrame:
+    """Add `lineage` and `half` to the taxa of a new release, keeping each lineage of `previous` (species_id, lineage, half) in its half.
+
+    A lineage is a family name (or the next rank up), so a species follows its family of the new release, and a species that changed
+    family may change half. Lineages that `previous` lacks are placed as `assign_halves` places them, within their group, largest first
+    into the half with fewer species, counting the carried-over lineages of that group from the start. The halves explored and held out
+    under the earlier release so stay apart (DECISIONS, 2026-11-11, the move to COL 316691).
+    """
+    known = previous.select("lineage", "half").unique()
+    doubled = sorted(known.group_by("lineage").len().filter(pl.col("len") > 1)["lineage"])
+    if doubled:
+        raise ValueError(f"{len(doubled)} lineages are in both halves of the previous split: {', '.join(doubled[:10])}")
+    df = taxa.with_columns(_lineage(taxa.columns))
+    groups = _lineage_groups(df).join(known, on="lineage", how="left", maintain_order="left")
+    halves = dict(groups.filter(pl.col("half").is_not_null()).select("lineage", "half").iter_rows())
+
+    rng = np.random.default_rng(seed)
+    for _, rows in groups.group_by(["main_group"], maintain_order=True):
+        new = rows.filter(pl.col("half").is_null())
+        if new.height:
+            carried = rows.filter(pl.col("half").is_not_null())
+            totals = {h: int(carried.filter(pl.col("half") == h)["len"].sum()) for h in ("A", "B")}
+            halves.update(_place(new, rng, totals))
+    return _with_halves(df, halves)
+
+
+def crossed(before: pl.DataFrame, after: pl.DataFrame) -> pl.DataFrame:
+    """The species in both splits whose half changed: species_id, lineage_before, half_before, lineage, half, sorted by species_id."""
+    old = before.select("species_id", pl.col("lineage").alias("lineage_before"), pl.col("half").alias("half_before"))
+    both = old.join(after.select("species_id", "lineage", "half"), on="species_id", how="inner")
+    return both.filter(pl.col("half") != pl.col("half_before")).sort("species_id")
+
+
+def _place(rows: pl.DataFrame, rng: np.random.Generator, totals: dict[str, int]) -> dict[str, str]:
+    """Each lineage of `rows` (lineage, len) in a half: shuffled, then largest first into whichever half holds fewer species so far."""
+    lineages = rows["lineage"].to_numpy(allow_copy=True)
+    counts = rows["len"].to_numpy()
+    order = rng.permutation(len(lineages))
+    largest_first = order[np.argsort(-counts[order], kind="stable")]
+    halves = {}
+    for i in largest_first:
+        if totals["A"] == totals["B"]:
+            half = "A" if rng.random() < 0.5 else "B"
+        else:
+            half = "A" if totals["A"] < totals["B"] else "B"
+        halves[lineages[i]] = half
+        totals[half] += int(counts[i])
+    return halves
+
+
+def _with_halves(df: pl.DataFrame, halves: dict[str, str]) -> pl.DataFrame:
     assignment = pl.DataFrame({"lineage": list(halves), "half": list(halves.values())}, schema={"lineage": pl.String, "half": pl.String})
     return df.join(assignment, on="lineage", how="left", maintain_order="left")
 

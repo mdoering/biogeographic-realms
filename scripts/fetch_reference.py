@@ -2,8 +2,12 @@
 
 Existing ChecklistBank exports only: asking for a new one is a write on production, so anything without an export is listed for a
 person to decide on. Requests are sequential. The COL release comes from what GBIF production uses today.
+
+With `--col-only` it fetches only the two COL exports and replaces just their entries in the existing manifest, leaving every other
+file and entry as it is (the move to COL 316691, 2026-11-11: the COL release changes before the GRIIS lists are fetched again).
 """
 
+import argparse
 import json
 import sys
 import urllib.parse
@@ -48,7 +52,10 @@ def get_export(name: str, dataset_key: int, export: ExportInfo | None, manifest:
 
 
 def main() -> None:
-    manifest: dict = {}
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--col-only", action="store_true", help="fetch only the COL exports and update just their manifest entries")
+    col_only = parser.parse_args().col_only
+    manifest: dict = json.loads((ROOT / "manifest.json").read_text()) if col_only else {}
     release = production_release()
     print(f"GBIF production uses {release}")
     # only extended exports carry environment, extinct and distributions; the classification-only one adds the taxGroup
@@ -59,6 +66,10 @@ def main() -> None:
     get_export("col", release, export, manifest)
     manifest["col"]["release"] = release
     get_export("col_groups", release, groups, manifest)
+    if col_only:
+        (ROOT / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        print(f"manifest: col and col_groups are now release {release}; nothing else changed")
+        return
 
     get_export("wcvp", WCVP, latest_export(WCVP, extended=True), manifest)
     get_export("wrims", WRIMS, latest_export(WRIMS, extended=True), manifest)

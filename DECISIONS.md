@@ -3000,3 +3000,23 @@ On half A, every rank passes at every level on both scopes, p = 0.01 (the smalle
 Per realm, the only failure is New Guinea at family rank at 14 realms. A realm that fails is reported as not confirmed and does not fail the test. C2 stays as proposed: V ≥ 0.8 at the coarsest reported level.
 
 **`group_min_records`** scales with the records (open point I4, 2026-11-01). The calibration chose 300 on half A, which holds about half the records of all species. A run uses 300 times its records over half A's, which keeps the meaning the threshold had on A: about 600 on all species. The exact values, and the code that sets them, come at the freeze and in M2; half A's runs keep 300.
+
+### The move to COL 316691, with a new download (2026-11-11)
+
+GBIF production switched on 2026-11-10 from COL 315557 (COL26.6 XR) to **316691 (COL26.10 XR, issued 2026-10-16)**. Its match index was built on 2026-11-05. Markus: every COL release has issues, but the one GBIF used before had many duplicates and known problems, so the analysis moves to 316691 with a new full download, before the freeze rather than after it. The cleaning waits for the GRIIS re-fetch anyway (Markus is fixing ChecklistBank's interpretation of GRIIS-US's native flags), so both changes go into one reprocessing.
+
+**What is new:**
+- **The download.** 0001502-261110092616502, submitted by Markus on 2026-11-11 with `queries/occurrence_res7_visits.sql`. That query is the res 7 query plus `n_visits` and `n_visits_open`, so one download carries both records and visits.
+- **The COL export.** 316691's extended export with classification is ChecklistBank job 3a5a79df-3a08-4877-a1c7-5d7ec869699d, requested by Markus with the settings of 315557's export. Its classification-only export, fd5642b7, already existed.
+- **The WoRMS environment.** It comes from a new matching job of WoRMS (dataset 2011) against 316691, 6cb549e1-b347-4175-a7bc-f2e3661dbbb1, with the settings of 59fcfcc1 (relaxed, TSV, synonyms).
+- **`fetch_reference.py --col-only`.** It fetches only the two COL exports and replaces just their manifest entries, so the COL release can change before the GRIIS lists are fetched again. The reference data of 315557, which every M1 result so far rests on, is kept in `data/reference-315557/`.
+
+**What stays:**
+- the calibration, setting 132; `calibrate.py` is not run again, and its held-out check on half B stays a record of 315557;
+- every rule chosen on half A: the configuration, levels and cuts are re-derived by the same rules on the new data.
+
+**The split is carried over by lineage (Markus, 2026-11-11).** Half A and half B were drawn from 315557's lineages: family names, or the next rank up. A seeded shuffle and a greedy balance over that whole list placed them. Run fresh on 316691, `write_split.py` would shuffle and balance a different list, so many families explored in half A would land in half B, and M3's test would no longer be independent of the exploration.
+
+Instead, `split.carry_over` keeps every lineage of 315557 in its half. Only lineages new in 316691 are placed as before: within their group, largest first, into the half with fewer species, counting the carried-over lineages from the start. A species follows its family of 316691, so a species that changed family may change half. `split.crossed` lists those species, and `scripts/carry_split.py` reports them and writes them to `data/split/crossed-315557-<release>.parquet`. The carry-over reads taxonomy only.
+
+On 315557 itself, `carry_over` reproduces the frozen split (hash 88f237b4…), with no species crossing. The refactored `assign_halves` also still gives that hash.
