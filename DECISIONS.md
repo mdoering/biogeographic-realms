@@ -3136,3 +3136,33 @@ Coverage of half A's data (315557, WCVP off), as shares of plant presences (reco
   palustre* in *Galium*.
 
 Unmatched species are never trimmed. The median vascular species is native to one level 3 region (57%), and the mean is 3.4.
+
+### Crops: FAO's census list, dropped in full (2026-11-11, Markus's ruling)
+
+Layer 2 drops every species on FAO's list of crops for agricultural censuses, whether or not it also grows wild. The list is
+**World Programme for the Census of Agriculture 2030, Annex 7**: an alphabetical list of crops with botanical names and ICC 1.2 and CPC 3.0
+codes (FAO 2026, Statistical Development Series 22, doi:10.4060/cd9437en). Markus builds the list as a ChecklistBank dataset, which gives the
+mapping to COL ids. The pipeline fetches it like the other references.
+
+**Why this source.** It is FAO's current, global list for national agricultural censuses, citable by crop code, and the successor to WCA 2010's
+Appendix 4. The alternatives were weighed and set aside:
+- the plant genetic resources treaty's Annex I lists genera only;
+- FAOSTAT's items are commodity groups without botanical names;
+- Mansfeld's database (~6,100 species) and GRIN's World Economic Plants (~12,000) are not official bodies, and are much broader.
+
+**Why in full** (Markus). A per-species check of wild populations, as `NO_WILD_RANGE` did for 26 names, does not scale to some 250 species.
+Dropping a few hundred species, whose records are mostly of cultivated plants, is easier to defend than a selection. The rule replaces the
+reasoning of `NO_WILD_RANGE_DROPPED` for plants: maize, rice, barley and the rest go, wild relatives filed under their names included.
+
+**What it costs on half A** (`results/explore/res7/fao-crops/`, `cost.py`). Annex 7 resolves to 253 COL 316691 species. 190 are named outright.
+The other 63 are my reading of its genus entries as the species grown (*Coffea* → *arabica*, *canephora*, *liberica*; *Trifolium* → *pratense*,
+*repens*, *alexandrinum*, *incarnatum*), for Markus to review in the dataset. 133 of the 253 occur in half A. Beyond what WCVP `native_only` already
+removes, dropping them takes 20,474 presences (0.20%) and 8.87M records (0.49%). Most of those records are of plants growing wild in their own
+range: hazel 1.36M, orchard grass 1.28M, bilberry 1.00M, creeping bent 1.00M, perennial ryegrass 0.99M, timothy 0.68M, wild carrot 0.66M.
+Under `native_only` maize keeps 46 presences.
+
+**Animals: open, asked of Markus.** WCA 2030's livestock classification (Annex 8) names categories only. FAO's DAD-IS names the species, about
+38–40 mammals and birds plus managed bees. Several of them are wild species with large native ranges, and their records are mostly of wild animals.
+Taken whole, they would remove 2.9% of half A's records (51.4M): mallard 27.0M, rock dove 9.8M, greylag goose 4.9M, wild turkey 2.8M, red fox 1.8M
+(fur animals), honeybee 1.2M. Proposed instead: keep the current rule for animals, dropping a domestic animal where COL names it apart from its wild
+ancestor (cattle and aurochs, pig and wild boar), and add the ones COL also names apart (yak, gayal, silkworm).
