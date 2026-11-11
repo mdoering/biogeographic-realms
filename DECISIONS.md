@@ -3074,6 +3074,38 @@ Species entries, by `griis_lists`: before, 127,338 introduced, 51 unstated, 5,07
 - **GRIIS-AM** (dataset 24471) was not reimported with the others: its source archive had a data bug, and Markus fixed it by hand for one import (attempt 20, 2026-11-11), exported as 9cbcf7d8-edf4-4386-9d42-97ec1aa68fbb. Only its file and manifest entry were replaced; import 5's file is kept in `data/griis-before-reimport/am-import-5/`. Import 5 had broken encoding in 7 names (`Arctotis sp. Ã—hybrida`, `Larix kaempferi Ã¨re`). The list now has 386 species entries against 403: 334 kept, 75 gone, 52 new, with animals from 13 to 36 (*Salmo trutta*, *Carassius gibelio*, *Aedes albopictus*). Its one native entry, *Medicago arabica*, is now uncertain, so no list has a native entry left. `check_natives.py` again: **116,794 GRIIS alien pairs of 27,057 species in 305 lists**; nothing else changed.
 - ChecklistBank now gives Cayman Brac its own alias, `GRIIS-KY-Brac` (it was `GRIIS-KY-CaymanBrac`, made up from the title). Natural Earth has no polygon for it under either name, as before.
 
+**The download of 316691: 0001626-261110092616502** (DOI 10.15468/dl.hztukv, `queries/occurrence_res7_visits_detected.sql`). It was submitted by Markus on 2026-11-11 and took 533 minutes: 27,148,649 rows, 1,032,074,404 bytes, zip sha256 `b50fc2c8…`. `ingest.py --resolution 7 --results results/col316691` passed all three marks (`results/col316691/res7/qa.json`):
+- no species outside 316691's accepted species;
+- no unknown cell, after the same 7 near-miss codes were remapped as in 0003457 (35 rows, 40 clean records);
+- synonyms 2.84% of the clean records.
+
+Against 0003457 (315557, `results/visits/res7/qa.json`):
+
+| | 0003457 (315557) | 0001626 (316691) |
+|---|---|---|
+| rows | 28,142,522 | 27,148,626 |
+| records | 3,305,318,352 | 3,307,941,310 |
+| clean records | 3,280,964,672 | 3,281,108,833 |
+| synonyms | 2.79% | 2.84% |
+| land part: rows, clean records | 22,257,435, 3,054.9M | 22,322,506, 3,063.6M |
+| sea part: rows, clean records, cells | 5,885,087, 226.1M, 18,774 | 4,826,120, 217.6M, 16,220 |
+| sea part of all-land cells: cells, clean records | 2,534, 2,914,760 | 37, 37,911 |
+
+The records are within 0.1%. The species barely change: 1,290,787 against 1,291,143, with species-cells 0.4% fewer (23,483,462 against 23,569,864). The rows fall by 1M (3.5%) because a species' records in a cell split into fewer pieces by country and part: 28,948 combinations of cell, country and part, against 32,038.
+
+GBIF's `level0gid`, which the query reads as land or sea, now gives a country to more points near the coast. About 8.5M clean records (0.26%) moved from the sea part to the land part. 2.9M of them were in cells with no sea at all, which were errors before. Nothing in our rules changes.
+
+**The code's taxon lists on 316691** (taxonomy only):
+- **Unchanged:**
+  - all 16 `NO_WILD_RANGE` names are accepted species, none left out;
+  - every `MARINE_EXCEPTIONS` name is an order, family or genus of `TERRESTRIAL_CLASSES` at the same rank as in 315557;
+  - every taxGroup is in `MAJOR_GROUPS` or `NOT_COUNTED`;
+  - no chordate class is outside `CHORDATE_CLASSES`.
+- `Gnetopsida`, one of the `TERRESTRIAL_CLASSES`, has no species in either release, as before.
+- **Coelacanths and lungfish lost their class.** 316691 has no class Coelacanthi or Dipneusti. *Latimeria* and *Protopterus* sit under subphylum Vertebrata, with only their order. Chordates with no class rose from 633 to 1,083 (604 in half A).
+- **My ruling: the rule stays.** A chordate with no class is not counted in the composition gate. In half A, the classless chordates with records are 4 African lungfish (*Protopterus*, 2,013 clean records) and *Latimeria* (13). The rest are fossils, dinosaurs and Mesozoic fish with a few records each. The gate's fish lose about 5 living species of half A, too few to change it. A fallback by order would change `units.py` for them.
+- Cost if wrong: those few species are not counted.
+
 ### WCVP `native_only` stays the headline, `introduced` is reported beside it (2026-11-11, Markus)
 
 Markus asked whether WCVP in mode `native_only` predetermines the result. There are two kinds of circularity.
