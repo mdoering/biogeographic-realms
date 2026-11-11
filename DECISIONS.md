@@ -3073,3 +3073,66 @@ Species entries, by `griis_lists`: before, 127,338 introduced, 51 unstated, 5,07
 - **`check_natives.py` on 316691 with the new lists** (`results/natives.json`; 315557's report is kept in `data/reference-315557/natives.json`): 116,792 GRIIS alien pairs of 27,063 species in 305 lists, against 115,371 of 26,734 in 303. Ecuador (690 pairs) and Suriname (172) apply for the first time. Names matched: GRIIS 92.3% after GBIF's fallback (92.0% before), WCVP 98.5% and WRiMS 98.8%; GBIF's match API was asked about 26 names (103 before) and placed 6. The same 62 subdivisions have no cells, KY-Brac in place of KY-CaymanBrac. Checked by hand: *Passer domesticus* is an alien of US, AU and EC, *Columba livia* of US, AU, EC and JP; *Popillia japonica* of US only, not of Japan; *Trichosurus vulpecula*, *Melaleuca lanceolata*, *Eucalyptus cinerea* and *Oncorhynchus nerka* of none. WCVP and WRiMS moved only with the release (357,706 WCVP species, 2,139 WRiMS).
 - **GRIIS-AM** (dataset 24471) was not reimported with the others: its source archive had a data bug, and Markus fixed it by hand for one import (attempt 20, 2026-11-11), exported as 9cbcf7d8-edf4-4386-9d42-97ec1aa68fbb. Only its file and manifest entry were replaced; import 5's file is kept in `data/griis-before-reimport/am-import-5/`. Import 5 had broken encoding in 7 names (`Arctotis sp. Ã—hybrida`, `Larix kaempferi Ã¨re`). The list now has 386 species entries against 403: 334 kept, 75 gone, 52 new, with animals from 13 to 36 (*Salmo trutta*, *Carassius gibelio*, *Aedes albopictus*). Its one native entry, *Medicago arabica*, is now uncertain, so no list has a native entry left. `check_natives.py` again: **116,794 GRIIS alien pairs of 27,057 species in 305 lists**; nothing else changed.
 - ChecklistBank now gives Cayman Brac its own alias, `GRIIS-KY-Brac` (it was `GRIIS-KY-CaymanBrac`, made up from the title). Natural Earth has no polygon for it under either name, as before.
+
+### WCVP `native_only` stays the headline, `introduced` is reported beside it (2026-11-11, Markus)
+
+Markus asked whether WCVP in mode `native_only` predetermines the result. There are two kinds of circularity.
+- **Edges.** WCVP's ranges are coded in TDWG level 3 regions, so trimming plants to them could draw realm boundaries along those edges.
+  The circularity gate tests this, and `native_only` passes it with room (+0.012 over `off`, against +0.126 by chance).
+- **Knowledge.** `native_only` keeps a plant only where regional floras record it as native, so the botanists' judgement enters the data.
+  No test against chance exists for that. The gate also has little power: 60% of land cells lie within one cell of a TDWG edge.
+
+**The three runs side by side** (half A, eukaryotes, mt075, seed 1; `results/explore/res7/wcvp-modes/`, drawn by its `draw.py`):
+- At 5 realms, `off` differs from `native_only` on 908 parts and 14.4M km² of land (V 0.908). Australia (13.3M km²), New Zealand and the
+  Antarctic coast join the Holarctic.
+- At 5 realms, `introduced` differs on 334 parts and 4.3M km² (V 0.946). Australia is with Indo-Malaya, as in `native_only`. New Zealand and
+  the Antarctic coast (3.3M km²) stay Holarctic, and so do southern Arabia (0.5M km²) and specks of northeast Asia.
+- At 9 realms (the select stage's candidates, not the nested cuts), `off` differs on 24.1M km² and `introduced` on 7.5M km².
+  - `off`: the Holarctic does not split, and the extra realms are at sea.
+  - `introduced`: the Nearctic, Patagonia and Australia as in `native_only`; New Zealand Palearctic; a North Atlantic–Arctic sea realm instead of
+    temperate East Asia.
+- **Why New Zealand moves.** `introduced` and `native_only` differ only in plant presences in regions WCVP says nothing about. In New Zealand's 70
+  land parts, 5,995 such presences of 1,390 plant species are kept under `introduced`. They are led by European weeds and garden plants that WCVP
+  does not record as introduced there (*Leontodon saxatilis*, *Cerastium fontanum*, *Mycelis muralis*, *Lapsana communis*, *Carduus nutans*,
+  *Lunaria annua*, the potato). They also include a few natives that WCVP's native range misses and `native_only` wrongly removes (*Centipeda
+  aotearoana*, *Coprosma pumila*, *Euchiton audax*, *Glossostigma diandrum*).
+- `off` is no neutral baseline: alien plants pull whole continents into the Holarctic.
+
+**The ruling.** `native_only` stays the headline, by the gate's rule. The `introduced` run is reported beside it at its own levels, with where
+and why it differs (PREREGISTRATION sections 4, 8 and 10).
+
+**My addition, for Markus to confirm or strike.** C1 and C2 on half B are also run with `introduced`, in the same single pass, as a reported
+check that does not decide (section 9). It shows how much of the confirmation rests on the floras. It has to be fixed before B is opened, or it
+would be a second look at B.
+
+**The taxon lists go to Appendix A.** Section 4 said "domesticated species, major crops and humans". The list drops 16 species: humans, 13
+domestic animals, bread wheat and rapeseed. Maize, rice, potato and seven others were looked at and kept, as COL files wild populations under
+their names. Both lists are now in the preregistration with their reasons.
+
+**Cultivated trees (open, Markus is thinking about it).** Markus suggested adding plantation trees such as eucalyptus and spruce to the list.
+`native_only` already removes them outside their WCVP native regions:
+- *Eucalyptus globulus* is native to TAS and VIC only, and introduced in 49 regions;
+- *Pinus radiata* is native to CAL, MXI and MXN;
+- *Picea abies* is native to 24 regions from France to the Urals.
+Inside a native region a plantation can't be told from the wild at this resolution (spruce in lowland Germany). `NO_WILD_RANGE` is for species
+with no wild population, so putting such a tree on it would delete its wild range as well.
+
+**WCVP against World Plants and WFO (Appendix B).** In ChecklistBank:
+- WCVP has 1,986,823 distribution rows, all coded as TDWG level 3 regions, native or introduced, for 371,856 species;
+- World Plants (1141), COL's main source of vascular plants, has one free-text line per taxon (391,924 rows; introduced areas marked `[I]`);
+- the WFO Plant List (2004) and POWO's checklist (2000) have none.
+
+COL 316691 takes its coded plant distributions from WCVP: 599,462 of its 909,648 plant distribution rows are from the WCVP and WCVP-Fabaceae
+sectors, and 275,333 are World Plants' text.
+
+Coverage of COL 316691: 357,534 of 378,499 vascular species (94.5%) have a WCVP native range, from 85.5% (Pinopsida) to 96.7% (Liliopsida).
+The 29,610 mosses, liverworts, hornworts and algae have none.
+
+Coverage of half A's data (315557, WCVP off), as shares of plant presences (records in brackets):
+- 86.9% (94.6%) belong to species with a native range;
+- 9.5% (3.5%) are non-vascular;
+- 3.4% (1.9%) are vascular plants WCVP doesn't match, mostly where the names differ. Some differences were 315557's and are gone in 316691
+  (*Elytrigia repens*, now *Elymus repens*). Others remain: WCVP sinks *Taraxacum officinale* into an unresolved section, and keeps *Hydrogalium
+  palustre* in *Galium*.
+
+Unmatched species are never trimmed. The median vascular species is native to one level 3 region (57%), and the mean is 3.4.

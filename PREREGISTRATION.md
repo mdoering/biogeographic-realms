@@ -56,7 +56,9 @@ The layers run in order (design, "Cleaning"; `src/realms/clean.py`):
 
 1. **Record evidence:** drops living specimens, non-native establishment flags, fuzzy matches, kingdom clashes, matches to ambiguous
    synonyms and misapplied names, and the multilingual text patterns of the query.
-2. **Taxon lists:** drops extinct species, domesticated species, major crops and humans.
+2. **Taxon lists:** drops the species COL flags as extinct, and the 16 species of `lists.NO_WILD_RANGE`: humans, 13 domestic animals and
+   2 crops (bread wheat and rapeseed) with no wild population. Ten other domestic animals and crops (maize, rice, potato …) are kept, as
+   COL files wild populations under their names. Both lists, with the reason for each entry, are in Appendix A.
 3. **Authoritative ranges:**
    - WCVP in mode `native_only`: plants outside their native regions are dropped, and a cell touching a native region counts as native;
    - GRIIS by each entry's own establishment means, with sub-national lists on the cells they overlap;
@@ -79,7 +81,8 @@ The layers run in order (design, "Cleaning"; `src/realms/clean.py`):
    walk at break-even, with at most 5% of native presences lost (DECISIONS, 2026-11-01/02).
 
 **The WCVP mode is chosen by the circularity gate** (section 8). The headline mode is the first of `native_only` and `introduced` whose
-gate passes, else WCVP off.
+gate passes, else WCVP off. The `introduced` run is always reported beside the headline (section 8). What WCVP covers, and why it is the
+source of plant ranges rather than World Plants or WFO, is in Appendix B.
 
 **`group_min_records` scales with the records** (Markus, 2026-11-09). The calibration chose 300 on half A, whose group totals per cell are
 about half those of all species. A run uses 300 times its records over half A's records, so that the threshold keeps the meaning it had
@@ -152,6 +155,15 @@ on A: about 600 on all species, and B's own ratio on half B. The exact values ar
   - A mode passes when its raise over the base is at most the 95th percentile of the rotated raises. The verdict at land tolerance 0.5
     decides; the reading without a tolerance is reported too.
   - On half A every mode passes, and the headline mode is `native_only`.
+  - **What the gate does not test.** It tests one kind of circularity: realm boundaries drawn along the edges of the regions WCVP's
+    ranges are coded in. It does not test the other: `native_only` keeps a plant only where regional floras record it as native, so the
+    botanists' judgement behind those floras enters the data. That cannot be measured against chance, so it is shown by comparison
+    (next point). The gate also has little power: at resolution 7, 60% of the cells with land lie within one cell of a TDWG edge.
+- **`introduced`, reported beside the headline** (Markus, 2026-11-11). The run with WCVP in mode `introduced` uses WCVP only where it
+  records an introduction, as GRIIS does, and imports no flora's native range. It is reported at its own levels by the same rules, with the
+  parts and area where it differs from the headline and why. On half A, at 5 realms, it differs on 4.3M km² of land (V 0.946). New Zealand
+  and the Antarctic coast join the Holarctic, held there by European weeds that WCVP does not record as introduced in New Zealand. WCVP
+  off differs on 14.4M km² (V 0.908): Australia and New Zealand join the Holarctic (`results/explore/res7/wcvp-modes/`).
 - **Border gate** (design, "Robustness runs"):
   - A boundary segment within one cell width of a national border, which also disappears without layer 3 or in the equal-coverage
     run, is flagged.
@@ -190,12 +202,15 @@ The frozen pipeline (sections 4 to 8) runs once on half B. Any failure is report
   - confirmed if C1 and C2 both pass;
   - partly confirmed if one passes;
   - not confirmed if neither does.
+- **C1 and C2 with WCVP `introduced`, reported and not deciding.** In the same single pass, half B is also cleaned with WCVP in mode
+  `introduced` and scored by C1 and C2 against A's `introduced` map. This shows how much of the confirmation rests on the floras' native
+  ranges (section 8). It is fixed here, before B is opened, so that it is not a second look at B.
 
 ## 10. Headline on all species
 
 - The frozen pipeline runs on all species (halves A and B) with the thresholds above. The configuration, k and levels are chosen again
   by the rules (sections 6 and 7), not carried over from half A.
-- The WCVP mode is chosen again by the circularity gate.
+- The WCVP mode is chosen again by the circularity gate, and the `introduced` run is reported beside the headline, as in section 8.
 - Any change after registration is reported as a deviation, with its reason and its effect.
 
 ## 11. Robustness runs (reported, not tuned)
@@ -221,8 +236,104 @@ None of these changes the headline.
 
 ## 12. Still open before registration
 
-- **Two source issues**, to be noted rather than fixed in the pipeline:
-  - GRIIS-US flags *Passer domesticus* and *Columba livia* as native. This is a data interpretation issue at checklistbank.org that
-    Markus is fixing; all GRIIS lists are fetched again once it is fixed, before the freeze;
-  - ChecklistBank dataset 28940 (Cayman Brac) carries the alias GRIIS-KY.
+- **Two source issues, both settled on 2026-11-11** (DECISIONS, "The GRIIS lists after ChecklistBank's reimport"):
+  - GRIIS-US flagged *Passer domesticus* and *Columba livia* as native. This was how checklistbank.org read GRIIS's terms. ChecklistBank
+    now reads them correctly, and all 305 lists were fetched again. An establishment means ChecklistBank leaves empty, mostly GRIIS's
+    `Native|Alien`, is left out, as `uncertain` is;
+  - ChecklistBank dataset 28940 (Cayman Brac) carried the alias GRIIS-KY. It now has its own, GRIIS-KY-Brac.
+- **The move to COL 316691** (DECISIONS, 2026-11-11). Sections 2 and 3 still describe release 315557 and download 0020744. They are
+  brought up to date once the new download is cleaned.
 - **The exact commit and data hashes** that the registration cites. These are filled in at the freeze.
+
+## Appendix A. The taxon lists of layer 2
+
+`src/realms/lists.py`. Each name was checked against the COL release: it must be an accepted species there, with nothing wild filed under
+it (`lists.resolve_no_wild_range` checks this again at every run and drops an entry that fails). The extinct species are those COL flags.
+
+**Dropped (`NO_WILD_RANGE`, 16 species):**
+
+| Species | Why |
+|---|---|
+| *Homo sapiens* | humans: records are people, observed or photographed, wherever they were |
+| *Bos taurus* | domestic cattle; the wild aurochs is *Bos primigenius*, a species of its own in COL |
+| *Bos indicus* | zebu, domestic cattle with no wild population |
+| *Bubalus bubalis* | domestic water buffalo; the wild water buffalo is *Bubalus arnee* |
+| *Equus caballus* | domestic horse, whose feral herds have no natural range; the wild horse is *Equus ferus* |
+| *Equus asinus* | domestic donkey; the wild ass is *Equus africanus* |
+| *Canis familiaris* | domestic dog, held apart from the wolf; the dingo is filed here, a feral dog with no natural range |
+| *Felis catus* | domestic cat; the wildcat is *Felis silvestris* |
+| *Sus domesticus* | domestic pig; the wild boar is *Sus scrofa* |
+| *Camelus dromedarius* | dromedary, domestic, and extinct in the wild |
+| *Camelus bactrianus* | domestic Bactrian camel; the wild camel is *Camelus ferus* |
+| *Lama glama* | llama, domestic; the guanaco is *Lama guanicoe* |
+| *Vicugna pacos* | alpaca, domestic; the vicuña is *Vicugna vicugna* |
+| *Cavia porcellus* | domestic guinea pig; wild cavies are *Cavia aperea* |
+| *Triticum aestivum* | bread wheat, a cultigen with no wild population |
+| *Brassica napus* | rapeseed, a cultigen of two other species with no wild population |
+
+**Looked at and kept (`NO_WILD_RANGE_DROPPED`, 10 species)**, because COL files wild populations under the same accepted name, so
+dropping the species would drop its wild records too:
+
+| Species | Wild populations COL files under it |
+|---|---|
+| *Ovis aries* | the mouflon (*Ovis orientalis*, *O. orientalis ophion*, *O. aries musimon* are synonyms) |
+| *Gallus gallus domesticus* | no such species: *Gallus domesticus* is a synonym of *Gallus gallus*, the red junglefowl |
+| *Capra hircus* | the Chiltan markhor |
+| *Zea mays* | the teosintes (subspecies *parviglumis* and *huehuetenangensis*) |
+| *Hordeum vulgare* | wild barley (subspecies *spontaneum*) |
+| *Glycine max* | wild soybean (subspecies *soja*) |
+| *Solanum tuberosum* | wild potatoes, as 186 species-rank synonyms; WCVP gives it a native range in the Andes |
+| *Oryza sativa* | wild perennial rice (*Oryza perennis*) |
+| *Sorghum bicolor* | wild sorghum (subspecies *verticilliflorum*) |
+| *Capsicum annuum* | the wild chiltepin (variety *glabriusculum*) |
+
+Kept crops and plantation trees outside their native range are removed by WCVP in mode `native_only` (layer 3). Inside a native region
+they stay: a planted spruce in lowland Germany can't be told from a wild one at the resolution of WCVP's regions.
+
+## Appendix B. WCVP: what it covers, and why it is the source of plant ranges
+
+**The global plant checklists in ChecklistBank** (2026-11):
+
+| Dataset | Species | Distribution rows | Form |
+|---|---|---|---|
+| WCVP (2232; Govaerts et al. 2021, *Scientific Data* 8:215) | 371,856 | 1,986,823 | TDWG level 3 regions, each native or introduced |
+| World Plants (1141), COL's main source of vascular plants | 355,419 | 391,924 | one free-text line per taxon, introduced areas marked `[I]` |
+| WFO Plant List 2026-06 (2004) | 382,438 | none | — |
+| POWO's checklist (2000) | 368,929 | none | — |
+
+**Why WCVP:**
+- **Only WCVP has native ranges coded for nearly every vascular plant species.** The method needs, for each plant, the areas where it is
+  native, in units that map onto the grid. World Plants holds the same knowledge as text ("China (Guangdong, Hainan, S-Yunnan); India
+  (Arunachal Pradesh …)"), which would first have to be parsed into areas, a project of its own. The WFO Plant List and POWO's checklist carry
+  no distributions in ChecklistBank.
+- **COL itself takes its coded plant distributions from WCVP.** Of the 909,648 plant distribution rows in COL 316691, 599,462 come from WCVP
+  (its WCVP and WCVP-Fabaceae sectors, all TDWG level 3), 275,333 are World Plants' text, and the rest come from small sources.
+- **Only ranges are taken from WCVP, never its taxonomy.** The species are COL's. WCVP's accepted species are matched by name to COL's
+  (98.5% of names), and a COL species WCVP does not name is never trimmed.
+
+**What it covers in COL 316691:**
+
+| Group | Species | With a WCVP native range |
+|---|---|---|
+| Magnoliopsida | 275,331 | 258,949 (94.1%) |
+| Liliopsida | 87,188 | 84,307 (96.7%) |
+| Polypodiopsida | 12,759 | 11,711 (91.8%) |
+| Lycopodiopsida | 1,536 | 1,422 (92.6%) |
+| Pinopsida | 902 | 771 (85.5%) |
+| Cycadopsida | 391 | 373 (95.4%) |
+| All vascular plants | 378,499 | 357,534 (94.5%) |
+| Mosses, liverworts, hornworts, algae | 29,610 | none: WCVP covers vascular plants only |
+
+The vascular plants also include 390 Ginkgoopsida, of which 389 are fossils. A native range is a set of TDWG level 3 regions (botanical countries
+and states): the median species is native to one region (57%), and the mean is 3.4.
+
+**What it covers in the data** (half A, release 315557, WCVP off; shares of plant presences, with shares of records in brackets):
+- 86.9% (94.6%) belong to species with a WCVP native range: these are what `native_only` can judge;
+- 9.5% (3.5%) are mosses, liverworts and algae, which WCVP never touches;
+- 3.4% (1.9%) are vascular plants WCVP does not match. Mostly COL and WCVP disagree on the name. Some of these differences were 315557's
+  and are gone in 316691 (*Elytrigia repens*, now *Elymus repens* in both). Others remain: WCVP sinks *Taraxacum officinale* into an unresolved
+  section, and keeps *Hydrogalium palustre* in *Galium*.
+
+Where WCVP is silent, the presences are kept, so a gap in WCVP never cuts a range. In the other direction, `native_only` removes a native plant
+where WCVP's native range misses a region. In New Zealand this happens to a few species (*Centipeda aotearoana*, *Coprosma pumila*), against
+many more European weeds removed that WCVP does not record as introduced there (section 8).
