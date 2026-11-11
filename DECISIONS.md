@@ -3044,3 +3044,13 @@ On 315557 itself, `carry_over` reproduces the frozen split (hash 88f237b4…), w
   - WoRMS's subphylum Endomyxa and class Nucleohelea were lost;
   - the IRMNG Protozoa synonyms were removed.
 - Its GBIF impact reports add up four monthly steps from 315557. In the alltaxa report, 791 rows holding 6.8M occurrences change family, most of them protist reclassifications. Those changes reach our data through the new download.
+
+**The occurrence status vocabulary changed, which emptied the first download.** Download 0001502-261110092616502 (DOI 10.15468/dl.x64e8g) succeeded with a header and no rows. GBIF's OccurrenceStatus vocabulary deprecated `Present` (concept 40) and `Absent` (41) on 2026-11-05 and replaced them with `Detected` (1750) and `NotDetected` (1749). Our query kept `occurrencestatus = 'PRESENT'`, which no record matches since. Two one-row diagnostics, which Markus submitted, found this:
+- **0001523** (`queries/check_table.sql`): the table holds 3,892,311,392 records, and every filter of the query matches as before except the status, which matches 0.
+- **0001583** (`queries/check_values.sql`): `occurrencestatus` holds `DETECTED` (3,754,511,859), `NOT_DETECTED` (137,799,513) and 29 empty values. TAXON_MATCH_FUZZY counts the same in `issue` and in the new `taxonomicissue` (8,996,859 among DETECTED), so the `issue` filter is unchanged. `taxonomicstatus`, `establishmentmeans.concept` and `degreeofestablishment.concept` keep their values.
+
+`gbif.build_sql` takes `status`, `DETECTED` by default, and `status="PRESENT"` rebuilds the queries of 0020744 and 0003457 byte for byte (`test_sql_of_the_downloads_before_the_occurrence_status_vocabulary_changed`). The new download's query is `queries/occurrence_res7_visits_detected.sql`, which differs from 0003457's only in that word.
+
+The new concepts' hidden labels, the verbatim strings that map to them, differ from the old ones. None of Absent's 9 (`0`, `ABSENT`, `Ausente`, `not observed` …) is on NotDetected, which has 2 labels, one of them garbled (`Non observÃ©`). Detected dropped 194 of Present's 204 and gained about 950 numbers and abundance classes, a few of them garbled too.
+
+As far as the API shows, absences still reach NOT_DETECTED (137.8M, which leaves 3.65M records with an unparsable status at the default, DETECTED). Those come from shifted columns: kingdom names, UUIDs, dates and red-list codes in the status field, mostly Hatikka.fi (1.83M) and the Kalkalpen database (1.76M). No sign of absences read as presences was found. Markus has been told about the labels.

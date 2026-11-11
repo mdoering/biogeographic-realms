@@ -1,3 +1,4 @@
+from pathlib import Path
 import json
 import urllib.parse
 
@@ -101,7 +102,7 @@ def test_sql_hard_filters_and_columns_present():
     for hard in (
         "hascoordinate = TRUE",
         "hasgeospatialissues = FALSE",
-        "occurrencestatus = 'PRESENT'",
+        "occurrencestatus = 'DETECTED'",
         "specieskey IS NOT NULL",
         "basisofrecord <> 'FOSSIL_SPECIMEN'",
         "coordinateuncertaintyinmeters <= 100000",
@@ -217,3 +218,18 @@ def test_sql_counts_visits_as_distinct_dates_at_the_visit_resolution():
 def test_sql_refuses_a_visit_resolution_not_finer_than_the_cells(visit_resolution):
     with pytest.raises(ValueError, match="visit resolution"):
         build_sql(7, PATTERNS, visit_resolution=visit_resolution)
+
+
+def test_sql_of_the_downloads_before_the_occurrence_status_vocabulary_changed():
+    # GBIF replaced Present by Detected on 2026-11-05; with status PRESENT the query is the one of downloads 0020744 and 0003457
+    from realms.patterns import HUMAN_PATTERNS
+
+    root = Path(__file__).resolve().parent.parent / "queries"
+    assert build_sql(7, HUMAN_PATTERNS, status="PRESENT") + "\n" == (root / "occurrence_res7.sql").read_text()
+    assert build_sql(7, HUMAN_PATTERNS, visit_resolution=17, status="PRESENT") + "\n" == (root / "occurrence_res7_visits.sql").read_text()
+
+
+@pytest.mark.parametrize("status", ["Detected", "DETECTED' OR 1=1 --", ""])
+def test_sql_refuses_an_occurrence_status_that_is_not_a_vocabulary_term(status):
+    with pytest.raises(ValueError, match="vocabulary term"):
+        build_sql(7, PATTERNS, status=status)

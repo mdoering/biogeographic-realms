@@ -4,6 +4,7 @@ An API failure raises rather than reading as an answer, so a timeout can never p
 """
 
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -136,15 +137,20 @@ def _visits(condition: str, resolution: int) -> str:
     return f'COUNT(DISTINCT CASE WHEN {condition} THEN COALESCE("year",0) END, COALESCE("month",0), COALESCE("day",0), {fine})'
 
 
-def build_sql(resolution: int, patterns: Sequence[HumanPattern], visit_resolution: int | None = None) -> str:
+def build_sql(resolution: int, patterns: Sequence[HumanPattern], visit_resolution: int | None = None, status: str = "DETECTED") -> str:
     """The occurrence query: species x cell x land/sea x country, counting each filter rather than applying it.
 
     With `visit_resolution`, also `n_visits` and `n_visits_open`: the distinct visits (`_visits`) among the records counted by `n` and by `n_open`.
     A species seen many times on one day at one spot is one visit, so the counts measure visits rather than photos (DECISIONS, "Species-days",
     2026-11-06). Without it the query is the one of the downloads so far, unchanged.
+
+    `status` is the occurrence status kept. GBIF's vocabulary replaced Present by Detected (and Absent by NotDetected) on 2026-11-05, and the
+    SQL table has held no PRESENT since. `status="PRESENT"` gives the query of the downloads before that, 0020744 and 0003457.
     """
     if not 1 <= resolution <= 22:
         raise ValueError(f"ISEA3H resolution must be 1 to 22, not {resolution}")
+    if not re.fullmatch(r"[A-Z_]+", status):
+        raise ValueError(f"the occurrence status is a vocabulary term in capitals, such as DETECTED, not {status!r}")
     if visit_resolution is not None and not resolution < visit_resolution <= 22:
         raise ValueError(f"the visit resolution must be finer than {resolution} and at most 22, not {visit_resolution}")
     human = " OR ".join(_pattern_sql(p) for p in patterns)
@@ -167,7 +173,7 @@ def build_sql(resolution: int, patterns: Sequence[HumanPattern], visit_resolutio
  SUM(CASE WHEN ({_CLEAN}) AND LOWER(taxonomicstatus) = 'synonym' THEN 1 ELSE 0 END) AS n_synonym,
  SUM(CASE WHEN ({_CLEAN}) AND ({human}) THEN 1 ELSE 0 END) AS n_human_text{visits}
 FROM occurrence
-WHERE hascoordinate = TRUE AND hasgeospatialissues = FALSE AND occurrencestatus = 'PRESENT' AND specieskey IS NOT NULL
+WHERE hascoordinate = TRUE AND hasgeospatialissues = FALSE AND occurrencestatus = '{status}' AND specieskey IS NOT NULL
  AND basisofrecord <> 'FOSSIL_SPECIMEN' AND (coordinateuncertaintyinmeters IS NULL OR coordinateuncertaintyinmeters <= 100000)
 GROUP BY specieskey, countrycode, {cell}, {_PART}"""
 
