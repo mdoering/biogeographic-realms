@@ -3027,3 +3027,20 @@ On 315557 itself, `carry_over` reproduces the frozen split (hash 88f237b4…), w
 - **BOLD BIN and UNITE identifiers: not used.** They are unranked usages, and we use accepted species only.
 - **Identifier churn at family and genus rank: matters for the carry-over.** In 315557, 79 accepted families and 1,371 genera changed ids, and 1,070 family ids came back. Carrying the split over by family name, not by id, makes it immune to this churn. Species ids churn too: 16,548 accepted species ids were deleted against 315192. A species that changed both its id and its family is counted by `crossed` as gone and new, not as crossed, so `carry_split.py` also reports the species matched by name.
 - **GBIF impact:** no impact report existed for 315557, which download 0020744 was matched against.
+
+**The split of 316691** (`scripts/carry_split.py`, `data/split/halves-316691.parquet`, canonical hash `73c940c3…`, kept as `split.SPLIT_SHA256_316691`; the pipeline's default stays 315557 until the reprocessing starts):
+- 316691 has 2,504,814 accepted species in 27,471 lineages: 1,246,127 in half A and 1,258,687 in half B, balanced within every large group to between 0.48 and 0.52. 2,440,692 species are in both releases by id; 64,122 are new and 88,648 of 315557's are gone.
+- **13,076 species change half (0.54% of those in both),** and 447 of the 23,410 that took a new id, paired by name. Every one of them moved into a family that 315557 already held in the other half, so whole-family halves can't avoid it. Examples: 1,019 Ectobiidae to Pseudophyllodromiidae, 729 to Chrysididae, 205 Margarodidae to Monophlebidae. The 729 are the cuckoo wasps *Chrysis*: 315557 had them under Vespidae (Masarinae), an error of that release that 316691 corrects.
+- **A refinement of the carry-over (my ruling within Markus's approval, recorded here).** A lineage new in 316691 takes the half that most of its species had in 315557, when they were there and not tied. That covers a family split off or renamed (Monophlebidae from Margarodidae, Euglenaceae from Euglenidae) or moved to another kingdom (the Microsporidia families, Protozoa to Fungi, which renames their lineage). Only the rest are placed by balance. Without it, 15,221 species changed half; with it, 13,076. The approval's purpose was to keep the explored and held-out families apart, and this does so more closely. On 315557 itself, `carry_over` still reproduces the frozen split.
+
+**The WoRMS environment of 316691.** Rebuilt from match job 6cb549e1: **547,068 COL species** get one, against 470,752 on 315557. Of WoRMS's 1,419,220 match rows, 1,055,073 are usable.
+
+**The release review of 316691** (Markus shared it, dated 2026-10-19; verdict "publish with caveats"):
+- The duplicate-name issue fell from 65,111 in COL26.9 XR to 1,367. No accepted name is duplicated at any rank down to family, and provisionally accepted usages fell by 2,354, among them GRIN's 3,031 placeholder names such as *Abroma spp*. That is the defect of 315557 that touched us.
+- The caveats are far from our data:
+  - 129 taxa have a synonym parent;
+  - the Coleoptera type-genera sector was deleted, losing 686 family-group synonyms (the accepted classification stays);
+  - 8,561 merge-source genus subtrees were skipped as homonyms, most of them already in COL from another source;
+  - WoRMS's subphylum Endomyxa and class Nucleohelea were lost;
+  - the IRMNG Protozoa synonyms were removed.
+- Its GBIF impact reports add up four monthly steps from 315557. In the alltaxa report, 791 rows holding 6.8M occurrences change family, most of them protist reclassifications. Those changes reach our data through the new download.

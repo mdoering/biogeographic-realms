@@ -3,8 +3,9 @@
 `uv run python -I scripts/worms_environment.py`
 
 Reads:
-- the matching of WoRMS (ChecklistBank dataset 2011) against the COL release 315557, a ChecklistBank matching job (Markus, 2026-11-05, job
-  59fcfcc1-565c-470f-963e-57be8814a05d, relaxed mode, synonyms on): `data/reference/exports/worms-match/match.zip`;
+- the matching of WoRMS (ChecklistBank dataset 2011) against the COL release, a ChecklistBank matching job (relaxed mode, synonyms on):
+  `data/reference/exports/worms-match/match.zip`. For 316691 that is job 6cb549e1-b347-4175-a7bc-f2e3661dbbb1 (Markus, 2026-11-11); for 315557 it
+  was 59fcfcc1-565c-470f-963e-57be8814a05d (2026-11-05), kept in `data/reference-315557/`;
 - WoRMS's extended ColDP export, which holds `col:environment`: `data/reference/exports/worms/worms-2011-coldp-extended.zip`;
 - the accepted species of the release (`reference.load_taxa` of the manifest's `col`).
 
@@ -30,7 +31,7 @@ REFERENCE = Path("data/reference")
 MATCH = REFERENCE / "exports" / "worms-match" / "match.zip"
 WORMS = REFERENCE / "exports" / "worms" / "worms-2011-coldp-extended.zip"
 OUT = REFERENCE / "worms_environment.parquet"
-JOB = "59fcfcc1-565c-470f-963e-57be8814a05d"
+JOB = "6cb549e1-b347-4175-a7bc-f2e3661dbbb1"  # against COL 316691; 59fcfcc1-565c-470f-963e-57be8814a05d was against 315557
 ACCEPTED = ("accepted", "provisionally accepted")
 
 

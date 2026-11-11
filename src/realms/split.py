@@ -13,6 +13,8 @@ import polars as pl
 SPLIT_SEED: int = 20261031
 # The canonical hash of the split for COL release 315557, as made by scripts/write_split.py; scripts/carry_split.py carries it to later releases.
 SPLIT_SHA256_315557: str = "88f237b47d4964108c161e08acb00c9cf03601418dd2e0f16b49a43704845fa9"
+# The split of COL release 316691, carried over from 315557 by scripts/carry_split.py (DECISIONS, 2026-11-11).
+SPLIT_SHA256_316691: str = "73c940c3e1c8df646e5a702d18e3990a3a255d0e906b0ea9f93d0b31a6a7b17e"
 # The split the pipeline loads by default.
 SPLIT_SHA256: str = SPLIT_SHA256_315557
 OTHER_GROUP = "other"
@@ -67,8 +69,9 @@ def carry_over(taxa: pl.DataFrame, previous: pl.DataFrame, seed: int = SPLIT_SEE
     """Add `lineage` and `half` to the taxa of a new release, keeping each lineage of `previous` (species_id, lineage, half) in its half.
 
     A lineage is a family name (or the next rank up), so a species follows its family of the new release, and a species that changed
-    family may change half. Lineages that `previous` lacks are placed as `assign_halves` places them, within their group, largest first
-    into the half with fewer species, counting the carried-over lineages of that group from the start. The halves explored and held out
+    family may change half. A lineage that `previous` lacks takes the half that most of its species had in `previous`, when they were there
+    and not tied (a family split off, renamed or moved to another kingdom). The rest are placed as `assign_halves` places them, within
+    their group, largest first into the half with fewer species, counting the lineages already placed in that group from the start. The halves explored and held out
     under the earlier release so stay apart (DECISIONS, 2026-11-11, the move to COL 316691).
     """
     known = previous.select("lineage", "half").unique()
@@ -77,6 +80,15 @@ def carry_over(taxa: pl.DataFrame, previous: pl.DataFrame, seed: int = SPLIT_SEE
         raise ValueError(f"{len(doubled)} lineages are in both halves of the previous split: {', '.join(doubled[:10])}")
     df = taxa.with_columns(_lineage(taxa.columns))
     groups = _lineage_groups(df).join(known, on="lineage", how="left", maintain_order="left")
+    # a new lineage whose species were in `previous` (a family split off, renamed or moved to another kingdom) goes where most of them were
+    followed = (
+        df.join(previous.select("species_id", pl.col("half").alias("was")), on="species_id", how="inner")
+        .group_by("lineage")
+        .agg((pl.col("was") == "A").sum().alias("a"), (pl.col("was") == "B").sum().alias("b"))
+        .filter(pl.col("a") != pl.col("b"))
+        .select("lineage", pl.when(pl.col("a") > pl.col("b")).then(pl.lit("A")).otherwise(pl.lit("B")).alias("majority"))
+    )
+    groups = groups.join(followed, on="lineage", how="left", maintain_order="left").with_columns(pl.coalesce("half", "majority").alias("half")).drop("majority")
     halves = dict(groups.filter(pl.col("half").is_not_null()).select("lineage", "half").iter_rows())
 
     rng = np.random.default_rng(seed)

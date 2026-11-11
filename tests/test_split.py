@@ -207,3 +207,18 @@ def test_id_changes_pairs_the_ids_of_a_name_found_once_in_each_release():
     after = names([("a", "Aus bus L."), ("x", "Cus dus L."), ("y", "Eus fus L."), ("z", "Gus hus L."), ("w", "Gus hus L.")])
     # a kept its id; b became x; Eus fus is twice before and Gus hus twice after, so neither can be paired
     assert id_changes(before, after).rows() == [("b", "x")]
+
+
+def test_carry_over_puts_a_new_family_where_most_of_its_known_species_were():
+    # Margarodidae species move to the new family Monophlebidae; it follows them into B although A is lighter
+    old = previous([(f"m{i}", "family:Margarodidae", "B") for i in range(3)] + [("x0", "family:Other", "A"), ("b0", "family:Big", "B")])
+    old = pl.concat([old, previous([(f"b{i}", "family:Big", "B") for i in range(1, 10)])])
+    rows = [(f"m{i}", "g", "Monophlebidae", "O", "C") for i in range(3)] + [("n0", "g", "Monophlebidae", "O", "C"), ("x0", "g", "Other", "O", "C")]
+    rows += [(f"b{i}", "g", "Big", "O", "C") for i in range(10)]
+    assert set(carry_over(taxa(rows), old).filter(pl.col("family") == "Monophlebidae")["half"]) == {"B"}
+
+
+def test_carry_over_places_a_new_family_whose_known_species_tie_by_balance():
+    old = previous([("p0", "family:P", "A"), ("q0", "family:Q", "B")] + [(f"a{i}", "family:Heavy", "A") for i in range(10)])
+    rows = [("p0", "g", "New", "O", "C"), ("q0", "g", "New", "O", "C")] + [(f"a{i}", "g", "Heavy", "O", "C") for i in range(10)]
+    assert set(carry_over(taxa(rows), old).filter(pl.col("family") == "New")["half"]) == {"B"}
