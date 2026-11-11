@@ -382,12 +382,16 @@ def test_griis_uncertain_entries_are_not_alien(tmp_path, index):
     assert (counted["entries"], counted["introduced"], counted["uncertain"]) == (2, 1, 1)
 
 
-def test_griis_empty_means_counts_as_introduced(tmp_path, index):
-    # a GRIIS list is a list of aliens, so an entry with no value is introduced, and the list says how many had none
+def test_griis_empty_means_is_not_alien(tmp_path, index):
+    # ChecklistBank leaves the value empty where it can't map the list's term, mostly GRIIS's `Native|Alien` (native in part of the country), so an
+    # entry with no value is left out as an uncertain one is (Markus, 2026-11-11), and the list says how many had none
     path = griis_zip(tmp_path, "GRIIS-ZW", plain_rows("Aus bus", "Aus cus"), means={"s0": ""})
-    assert griis_pairs([path], index).rows() == [("A1", "ZW", None), ("A2", "ZW", None)]
+    assert griis_pairs([path], index).rows() == [("A2", "ZW", None)]
     counted = listed(griis_lists(griis_names([path])), "GRIIS-ZW")
     assert (counted["introduced"], counted["unstated"], counted["native"]) == (1, 1, 0)
+    # an introduced row beside an empty one still makes it an alien
+    both = griis_zip(tmp_path, "GRIIS-NO", plain_rows("Aus bus"), means={"s0": ["", "introduced"]})
+    assert griis_pairs([both], index).rows() == [("A1", "NO", None)]
 
 
 def test_griis_assisted_colonisation_counts_as_introduced(tmp_path, index):

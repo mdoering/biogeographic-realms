@@ -79,11 +79,15 @@ def main() -> None:
     totals = {k: int(with_table[k].sum()) for k in kinds}
     print(
         f"  GRIIS entries by their own establishment means: {len(with_table)} lists with a distribution table hold {totals['entries']:,} species entries, "
-        f"{totals['introduced']:,} introduced, {totals['unstated']:,} with no value (counted as introduced), {totals['native']:,} native and {totals['uncertain']:,} uncertain, "
-        f"which are left out; {len(without_table)} lists with none hold {int(without_table['entries'].sum()):,} entries that say nothing"
+        f"{totals['introduced']:,} introduced, {totals['unstated']:,} with no value, {totals['native']:,} native and {totals['uncertain']:,} uncertain, "
+        f"the last three left out; {len(without_table)} lists with none hold {int(without_table['entries'].sum()):,} entries that say nothing"
     )
-    left_out = with_table.filter((pl.col("native") + pl.col("uncertain")) > 0).sort(pl.col("native") + pl.col("uncertain"), descending=True)
-    print("  lists that name native or uncertain entries:", ", ".join(f"{r['alias']} {r['native']}n/{r['uncertain']}u of {r['entries']}" for r in left_out.head(12).iter_rows(named=True)))
+    out = pl.col("native") + pl.col("uncertain") + pl.col("unstated")
+    left_out = with_table.filter(out > 0).sort(out, descending=True)
+    print(
+        "  lists with entries left out:",
+        ", ".join(f"{r['alias']} {r['native']}n/{r['uncertain']}u/{r['unstated']}e of {r['entries']}" for r in left_out.head(12).iter_rows(named=True)),
+    )
 
     report: dict = {
         "release": manifest["col"]["release"],

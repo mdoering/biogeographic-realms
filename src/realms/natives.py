@@ -45,10 +45,12 @@ STATUS_ORDER = {"accepted": 0, "provisionally accepted": 1, SYNONYM: 2}  # which
 TDWG3 = r"^[A-Z]{3}$"  # level 3 codes, as against the level 1 and 2 codes (digits) that WCVP sometimes gives
 WCVP_MEANS = (None, "introduced", "uncertain")
 # What a GRIIS list says an entry is, as `griis_names` gives it. `unstated` is an entry whose distribution has no `establishmentMeans` (or has no
-# row at all): a GRIIS list is a list of aliens, so that is introduced. `name_only` is an entry of a list whose export has no distribution table,
-# which says nothing. In the order that settles an entry with several: native wins, as in WCVP, and uncertain only if nothing else is said.
+# row at all). Since ChecklistBank's reimport of 2026-11-11 an empty value is mostly GRIIS's `Native|Alien` (native in part of the country), which
+# it can't map, so it is left out as `uncertain` is (Markus, 2026-11-11; it counted as introduced before). `name_only` is an entry of a list whose
+# export has no distribution table, which says nothing. In the order that settles an entry with several: native wins, as in WCVP, and uncertain
+# only if nothing else is said.
 GRIIS_MEANS = ("native", "introduced", "unstated", "uncertain")
-GRIIS_ALIEN = ("introduced", "unstated")
+GRIIS_ALIEN = ("introduced",)
 # ChecklistBank values that are a kind of one of GRIIS_MEANS in Darwin Core's establishmentMeans vocabulary, read as that one. `introduced assisted
 # colonisation` is how the reimport of 2026-11-11 gives the US registers' `introduced: assisted colonization`, species released on purpose (DECISIONS)
 GRIIS_MEANS_KIND = {"introduced assisted colonisation": "introduced"}
@@ -339,7 +341,7 @@ def griis_names(griis_dirs: Sequence[Path], species_only: bool = True) -> pl.Dat
 
 def griis_lists(names: pl.DataFrame) -> pl.DataFrame:
     """What each GRIIS list holds, from `griis_names`: `alias`, `country`, `subdivision`, `table`, `entries`, and the entries that are `introduced`,
-    `unstated` (an empty value, counted as introduced), `native` and `uncertain`, which `griis_pairs` leaves out.
+    `unstated` (an empty value), `native` and `uncertain`; `griis_pairs` takes the introduced ones alone.
 
     `table` is whether the list's export has a distribution table. A list without one says nothing of its entries, so its counts of the kinds are 0
     and `entries` is all there is to say. Entries are those of the list (accepted species, as named), whether COL knows them or not.
@@ -387,7 +389,7 @@ def griis_split(names: pl.DataFrame, index: pl.DataFrame, fallback: pl.DataFrame
 def griis_pairs(griis_dirs: Sequence[Path], index: pl.DataFrame, fallback: pl.DataFrame | None = None) -> pl.DataFrame:
     """`species_id`, `country` and `subdivision` for each COL species an alien list names as an alien. Ranks above species (and below) are dropped.
 
-    An entry is an alien where its distribution says `introduced`, or says nothing (`unstated`: a GRIIS list is a list of aliens). `native` and `uncertain`
+    An entry is an alien where its distribution says `introduced`. `native`, `uncertain` and `unstated` (an empty value, mostly GRIIS's `Native|Alien`)
     entries are left out, and so are the entries of a list whose export has no distribution table (`griis_name_only_pairs`).
     """
     return griis_split(griis_names(griis_dirs), index, fallback)[0]
