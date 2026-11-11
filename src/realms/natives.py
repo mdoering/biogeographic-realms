@@ -49,6 +49,9 @@ WCVP_MEANS = (None, "introduced", "uncertain")
 # which says nothing. In the order that settles an entry with several: native wins, as in WCVP, and uncertain only if nothing else is said.
 GRIIS_MEANS = ("native", "introduced", "unstated", "uncertain")
 GRIIS_ALIEN = ("introduced", "unstated")
+# ChecklistBank values that are a kind of one of GRIIS_MEANS in Darwin Core's establishmentMeans vocabulary, read as that one. `introduced assisted
+# colonisation` is how the reimport of 2026-11-11 gives the US registers' `introduced: assisted colonization`, species released on purpose (DECISIONS)
+GRIIS_MEANS_KIND = {"introduced assisted colonisation": "introduced"}
 NAME_ONLY = "name_only"
 GRIIS_LIST_SCHEMA = {
     "alias": pl.String, "country": pl.String, "subdivision": pl.String, "table": pl.Boolean,
@@ -267,11 +270,12 @@ def _griis_means(path: Path) -> pl.DataFrame | None:
 
     An entry's means is that of its distribution rows, and where they differ native wins and then introduced, then an empty value (`unstated`), and
     `uncertain` only where nothing else is said: a species native somewhere in a list is no alien of it. A value other than `native`,
-    `introduced` and `uncertain` is refused, as nobody has judged it.
+    `introduced` and `uncertain` is refused, as nobody has judged it, except a kind of one of them (`GRIIS_MEANS_KIND`), which is read as that one.
     """
     if not has_member(path, "Distribution.tsv"):
         return None
     rows = read_tsv(path, "Distribution.tsv", ["col:taxonID", "col:establishmentMeans"])
+    rows = rows.with_columns(pl.col("col:establishmentMeans").replace(GRIIS_MEANS_KIND))
     unknown = sorted(set(rows["col:establishmentMeans"].drop_nulls().unique().to_list()) - set(GRIIS_MEANS))
     if unknown:
         raise ValueError(f"{path} has establishmentMeans values nobody has judged, {unknown}: native, introduced or uncertain?")

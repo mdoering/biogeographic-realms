@@ -3054,3 +3054,21 @@ On 315557 itself, `carry_over` reproduces the frozen split (hash 88f237b4…), w
 The new concepts' hidden labels, the verbatim strings that map to them, differ from the old ones. None of Absent's 9 (`0`, `ABSENT`, `Ausente`, `not observed` …) is on NotDetected, which has 2 labels, one of them garbled (`Non observÃ©`). Detected dropped 194 of Present's 204 and gained about 950 numbers and abundance classes, a few of them garbled too.
 
 As far as the API shows, absences still reach NOT_DETECTED (137.8M, which leaves 3.65M records with an unparsable status at the default, DETECTED). Those come from shifted columns: kingdom names, UUIDs, dates and red-list codes in the status field, mostly Hatikka.fi (1.83M) and the Kalkalpen database (1.76M). No sign of absences read as presences was found. Markus has been told about the labels.
+
+**The GRIIS lists after ChecklistBank's reimport (2026-11-11).** Markus reimported every GRIIS list with ChecklistBank's fix of how it reads their establishment means, and requested an extended export of each list's new import (`request_exports.py --griis-current`). `fetch_reference.py` took all 305 lists as extended exports of their current import, none missing. The old files are kept in `data/griis-before-reimport/` and `data/reference-315557/`. COL, WCVP and WRiMS were unchanged, and so was the WoRMS environment, which `worms_environment.py` wrote again byte for byte (the full fetch rewrites the manifest without it).
+
+The old import read almost every GRIIS term as `native`: `Alien`, `Native|Alien`, `Cryptogenic|Uncertain` and the US registers' `introduced: assisted colonization`. That is why GRIIS-EC and GRIIS-SR applied nothing (the "What the lists say" entry above). The new import maps the sources' terms like this (checked against the source archives of AU, US-United, EC, JP, GB and SR):
+
+| GRIIS source term | old import | new import |
+|---|---|---|
+| `Alien`, `introduced` | `introduced`, or `native` in some lists (all of EC and SR) | `introduced` |
+| `Cryptogenic\|Uncertain` | `native` | `uncertain` |
+| `introduced: assisted colonization` (US registers) | `native` | `introduced assisted colonisation` |
+| `Native\|Alien`, `native\|introduced` | `native` | empty |
+
+Species entries, by `griis_lists`: before, 127,338 introduced, 51 unstated, 5,077 native and 13 uncertain; after, 129,203 introduced, 477 unstated, 1 native and 2,894 uncertain. Of the 5,077 native entries, 2,752 are now uncertain, 1,767 introduced and 412 empty. *Passer domesticus* and *Columba livia* in GRIIS-US-United, the cases that started this, went from native to introduced.
+
+- **`introduced assisted colonisation` counts as introduced (my ruling).** It is a kind of `introduced` in Darwin Core's establishmentMeans vocabulary. In the US registers it marks species released on purpose: 390 of the 431 rows in US-United are biocontrol insects, the rest include *Passer*, *Columba* and *Trapa natans*. `natives.GRIIS_MEANS_KIND` reads it as `introduced`. Any other new value still raises.
+- **Open: the 412 empty entries.** They are GRIIS's `Native|Alien`, native in part of the country and alien in another. Under the rule above, an empty value counts as introduced, so these native species would become aliens of their own country (*Trichosurus vulpecula*, *Melaleuca lanceolata* and *Eucalyptus cinerea* in Australia; *Oncorhynchus nerka* and *Popillia japonica* in Japan). That rule was made when only GRIIS-TR's 28 entries were empty. Markus decides between a ChecklistBank mapping for `Native|Alien` and a change of the rule here.
+- GRIIS-AM (dataset 24471) was not reimported: its import is from 2026-06-15, and its one native entry is the old reading.
+- ChecklistBank now gives Cayman Brac its own alias, `GRIIS-KY-Brac` (it was `GRIIS-KY-CaymanBrac`, made up from the title). Natural Earth has no polygon for it under either name, as before.

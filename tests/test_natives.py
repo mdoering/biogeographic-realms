@@ -390,6 +390,18 @@ def test_griis_empty_means_counts_as_introduced(tmp_path, index):
     assert (counted["introduced"], counted["unstated"], counted["native"]) == (1, 1, 0)
 
 
+def test_griis_assisted_colonisation_counts_as_introduced(tmp_path, index):
+    # ChecklistBank's value for the US registers' `introduced: assisted colonization` (species released on purpose: biocontrol insects, Passer domesticus),
+    # a kind of introduced in Darwin Core's establishmentMeans vocabulary, so it is counted as introduced (DECISIONS, 2026-11-11)
+    path = griis_zip(tmp_path, "GRIIS-ZW", plain_rows("Aus bus", "Aus cus"), means={"s0": "introduced assisted colonisation"})
+    assert griis_pairs([path], index).rows() == [("A1", "ZW", None), ("A2", "ZW", None)]
+    counted = listed(griis_lists(griis_names([path])), "GRIIS-ZW")
+    assert (counted["entries"], counted["introduced"], counted["unstated"]) == (2, 2, 0)
+    # and native still wins over it
+    both = griis_zip(tmp_path, "GRIIS-NO", plain_rows("Aus bus"), means={"s0": ["introduced assisted colonisation", "native"]})
+    assert griis_pairs([both], index).height == 0
+
+
 def test_griis_list_without_distributions_is_not_applied(tmp_path, index):
     # a plain export has no distribution table: nothing says what the entries are, so none is applied. It is reported, and its pairs kept apart
     path = griis_zip(tmp_path, "GRIIS-ZW", plain_rows("Aus bus", "Aus cus"), means=None)
