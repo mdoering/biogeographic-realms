@@ -36,6 +36,7 @@ class ExportInfo:
     url: str
     size: int
     created: str
+    attempt: int | None = None  # the import attempt of the dataset it was made from
 
 
 @dataclass(frozen=True)
@@ -44,23 +45,39 @@ class GriisDataset:
     alias: str
     country: str
     subdivision: str | None
+    attempt: int | None = None  # its current import attempt
 
 
-def latest_export(dataset_key: int, *, classification: bool = False, extended: bool = False, api: str = CLB_API) -> ExportInfo | None:
-    """The newest finished COLDP export with exactly these flags, or None. This lists exports and creates nothing."""
+def _exports(dataset_key: int, classification: bool, extended: bool, attempt: int | None, api: str) -> list[dict]:
+    """The dataset's COLDP exports with synonyms and exactly these flags, of import `attempt` if given, in any status."""
     _, body = get_json(f"{api}/export?datasetKey={dataset_key}&format=COLDP&limit=50")
-    matching = [
+    return [
         e
         for e in (body or {}).get("result", [])
-        if e.get("status") == "finished"
-        and (e.get("request") or {}).get("synonyms")
+        if (e.get("request") or {}).get("synonyms")
         and bool((e.get("request") or {}).get("classification")) == classification
         and bool((e.get("request") or {}).get("extended")) == extended
+        and (attempt is None or e.get("attempt") == attempt)
     ]
+
+
+def latest_export(
+    dataset_key: int, *, classification: bool = False, extended: bool = False, attempt: int | None = None, api: str = CLB_API
+) -> ExportInfo | None:
+    """The newest finished COLDP export with exactly these flags, or None. This lists exports and creates nothing.
+
+    With `attempt`, only an export made from that import of the dataset counts: an older one describes data imported before.
+    """
+    matching = [e for e in _exports(dataset_key, classification, extended, attempt, api) if e.get("status") == "finished"]
     if not matching:
         return None
     newest = max(matching, key=lambda e: e["created"])
-    return ExportInfo(newest["key"], newest["download"], newest["size"], newest["created"])
+    return ExportInfo(newest["key"], newest["download"], newest["size"], newest["created"], newest.get("attempt"))
+
+
+def export_in_progress(dataset_key: int, attempt: int, *, classification: bool = False, extended: bool = False, api: str = CLB_API) -> bool:
+    """Whether an export with these flags of import `attempt` is waiting, blocked or running, so asking for another would be a duplicate."""
+    return any(e.get("status") in ("waiting", "blocked", "running") for e in _exports(dataset_key, classification, extended, attempt, api))
 
 
 def _griis_place(title: str | None) -> str | None:
@@ -89,12 +106,12 @@ def _tell_apart(alias: str, group: list[dict]) -> list[GriisDataset]:
     tell = []
     for dataset in group:
         if dataset is countries[0]:
-            tell.append(GriisDataset(dataset["key"], alias, country, None))
+            tell.append(GriisDataset(dataset["key"], alias, country, None, dataset.get("attempt")))
             continue
         place = places[dataset["key"]][:-tail].strip()
         if not place or "," in place:
             raise ValueError(f"datasets {listed} share the alias {alias}, and dataset {dataset['key']} has no single place before its country in its title")
-        tell.append(GriisDataset(dataset["key"], f"{alias}-{''.join(place.split())}", country, place))
+        tell.append(GriisDataset(dataset["key"], f"{alias}-{''.join(place.split())}", country, place, dataset.get("attempt")))
     return tell
 
 
@@ -118,7 +135,7 @@ def griis_datasets(api: str = CLB_API) -> list[GriisDataset]:
             told = _tell_apart(alias, group)
         else:
             match = GRIIS_ALIAS.match(alias)
-            told = [GriisDataset(group[0]["key"], alias, match.group(1), match.group(2))]
+            told = [GriisDataset(group[0]["key"], alias, match.group(1), match.group(2), group[0].get("attempt"))]
         for dataset in told:
             if dataset.alias in found:
                 other = found[dataset.alias]

@@ -77,9 +77,11 @@ def main() -> None:
     griis = griis_datasets()
     print(f"{len(griis)} GRIIS checklists", flush=True)
     for dataset in griis:
-        # most only have a plain export, which is still enough: every species on a GRIIS list is alien in that country
-        extended = latest_export(dataset.key, extended=True)
-        chosen = extended or latest_export(dataset.key)
+        # only an export of the list's current import: the lists were imported again on 2026-11-11 with ChecklistBank's fix of their native flags,
+        # and an older export describes the old interpretation (request_exports.py --griis-current asks for the new ones). A plain export is still
+        # enough for a list that has no extended one: every species on a GRIIS list is alien in that country
+        extended = latest_export(dataset.key, extended=True, attempt=dataset.attempt)
+        chosen = extended or latest_export(dataset.key, attempt=dataset.attempt)
         get_export(f"griis/{dataset.alias}", dataset.key, chosen, manifest, "extended" if extended else "plain")
 
     with urllib.request.urlopen(f"{GAZETTEERS}/realm/labels.tsv", timeout=60) as response:

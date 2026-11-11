@@ -3,15 +3,16 @@ import zipfile
 import polars as pl
 import pytest
 
-from realms.reference import griis_datasets, latest_export, load_tax_groups, load_taxa, rank_coverage, repeated_names
+from realms.reference import export_in_progress, griis_datasets, latest_export, load_tax_groups, load_taxa, rank_coverage, repeated_names
 
 
-def export(key, status="finished", created="2026-07-01", size=10, **request):
+def export(key, status="finished", created="2026-07-01", size=10, attempt=None, **request):
     return {
         "key": key,
         "status": status,
         "created": created,
         "size": size,
+        "attempt": attempt,
         "download": f"https://download.example/{key}.zip",
         "request": {"datasetKey": 1, "format": "COLDP", "synonyms": True, "tabFormat": "tsv", **request},
     }
@@ -329,3 +330,30 @@ def test_rank_coverage_counts(tmp_path):
     assert coverage["extinct"] == 1
     assert coverage["per_kingdom"]["Plantae"] == {"species": 2, "with_genus": 2, "with_family": 0}
     assert coverage["per_kingdom"]["Animalia"] == {"species": 2, "with_genus": 2, "with_family": 2}
+
+
+def test_latest_export_of_an_attempt_skips_exports_of_older_imports(api):
+    # a list imported again (GRIIS, 2026-11-11) still has its old exports, which describe the old interpretation
+    api.routes["/export"] = (
+        200,
+        {"total": 2, "result": [export("old", created="2026-08-23", attempt=63, extended=True), export("new", created="2026-11-11", attempt=66, extended=True)]},
+    )
+    assert latest_export(1, extended=True, attempt=66, api=api.base).key == "new"
+    assert latest_export(1, extended=True, attempt=66, api=api.base).attempt == 66
+    assert latest_export(1, extended=True, attempt=67, api=api.base) is None
+    api.routes["/export"] = (200, {"total": 1, "result": [export("old", created="2026-12-01", attempt=63, extended=True)]})
+    assert latest_export(1, extended=True, attempt=66, api=api.base) is None
+
+
+def test_griis_dataset_carries_its_import_attempt(api):
+    griis_listing(api, [{"key": 26226, "alias": "GRIIS-EC", "title": "GRIIS Checklist of Introduced and Invasive Species - Ecuador", "attempt": 8}])
+    assert griis_datasets(api.base)[0].attempt == 8
+
+
+@pytest.mark.parametrize(("status", "attempt", "expected"), [
+    ("waiting", 66, True), ("blocked", 66, True), ("running", 66, True),
+    ("finished", 66, False), ("failed", 66, False), ("canceled", 66, False), ("running", 65, False),
+])
+def test_export_in_progress_is_an_unfinished_export_of_the_attempt(api, status, attempt, expected):
+    api.routes["/export"] = (200, {"total": 1, "result": [export("x", status=status, attempt=attempt, extended=True)]})
+    assert export_in_progress(1, 66, extended=True, api=api.base) is expected
