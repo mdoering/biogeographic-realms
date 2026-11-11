@@ -1,0 +1,5 @@
+{
+ "sendNotification": true,
+ "format": "SQL_TSV_ZIP",
+ "sql": "SELECT occurrencestatus, COUNT(*) AS n, SUM(CASE WHEN ARRAY_CONTAINS(issue,'TAXON_MATCH_FUZZY') THEN 1 ELSE 0 END) AS n_issue_fuzzy, SUM(CASE WHEN ARRAY_CONTAINS(taxonomicissue,'TAXON_MATCH_FUZZY') THEN 1 ELSE 0 END) AS n_taxonomicissue_fuzzy, COUNT(taxonomicstatus) AS n_taxonomicstatus, SUM(CASE WHEN LOWER(taxonomicstatus) = 'synonym' THEN 1 ELSE 0 END) AS n_synonym, SUM(CASE WHEN LOWER(taxonomicstatus) IN ('ambiguous_synonym','misapplied') THEN 1 ELSE 0 END) AS n_ambiguous_or_misapplied, SUM(CASE WHEN LOWER(taxonomicstatus) = 'accepted' THEN 1 ELSE 0 END) AS n_accepted, COUNT(establishmentmeans.concept) AS n_establishmentmeans, COUNT(degreeofestablishment.concept) AS n_degreeofestablishment\nFROM occurrence\nGROUP BY occurrencestatus"
+}
